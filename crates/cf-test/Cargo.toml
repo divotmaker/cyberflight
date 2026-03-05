@@ -1,0 +1,20 @@
+[package]
+name = "cf-test"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+gpu-tests = ["cf-render/gpu-tests"]
+
+[dependencies]
+cf-render.workspace = true
+cf-scene.workspace = true
+cf-math.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+image.workspace = true
+image-compare.workspace = true
+serde_json.workspace = true

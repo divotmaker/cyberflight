@@ -1,0 +1,58 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba8) uniform image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    vec4 camera_pos;        // xyz = position, w = unused
+    mat4 inv_view_proj;     // screen->world transform
+    vec4 grid_params;       // x = spacing_m, y = line_half_width, z = max_fade_dist, w = unused
+    vec4 ball_pos;          // xyz = ball center, w = trail fade distance (meters)
+} pc;
+
+layout(location = 0) rayPayloadEXT vec4 payload; // rgb + alpha (1 = hit floor, 0 = miss)
+
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+
+    // NDC: [-1, 1] with Y flipped for Vulkan
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    vec2 ndc = uv * 2.0 - 1.0;
+
+    // Unproject near and far planes to get ray direction
+    vec4 world_near = pc.inv_view_proj * vec4(ndc, 0.0, 1.0);
+    vec4 world_far  = pc.inv_view_proj * vec4(ndc, 1.0, 1.0);
+    world_near /= world_near.w;
+    world_far  /= world_far.w;
+
+    vec3 origin = pc.camera_pos.xyz;
+    vec3 direction = normalize(world_far.xyz - world_near.xyz);
+
+    float tmin = 0.01;
+    float tmax = 1000.0;
+
+    payload = vec4(0.0, 0.0, 0.0, 0.0);
+
+    // Cull mask 0x01: only hits floor (instance mask bit 0).
+    // Non-floor geometry (ball, tee box, trail) has mask 0x02/0x04,
+    // so primary rays pass through them — raster draws those instead.
+    traceRayEXT(
+        tlas,
+        gl_RayFlagsOpaqueEXT,
+        0x01,       // cull mask: floor only
+        0,          // SBT record offset
+        0,          // SBT record stride
+        0,          // miss index
+        origin,
+        tmin,
+        direction,
+        tmax,
+        0           // payload location
+    );
+
+    // Preserve alpha: transparent where no floor was hit,
+    // reflection color where floor reflected something.
+    imageStore(outputImage, pixel, payload);
+}

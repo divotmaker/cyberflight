@@ -1,0 +1,21 @@
+[package]
+name = "cf-render"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+gpu-tests = []
+
+[dependencies]
+cf-math.workspace = true
+cf-scene.workspace = true
+ash.workspace = true
+gpu-allocator.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+image.workspace = true
+ash-window.workspace = true
+raw-window-handle.workspace = true
