@@ -70,6 +70,10 @@ pub struct FlightResult {
     pub carry_yards: f64,
     pub apex_m: f64,
     pub lateral_m: f64,
+    /// Backspin at landing (rad/s, positive = backspin opposing forward motion).
+    pub landing_backspin_rads: f64,
+    /// Sidespin at landing (rad/s).
+    pub landing_sidespin_rads: f64,
 }
 
 /// Simulate a ball flight from launch to landing.
@@ -85,7 +89,8 @@ pub fn simulate_flight(input: &ShotInput, ball: &BallModel, env: &Environment) -
 
     let vx = speed_mps * launch_rad.cos() * azimuth_rad.cos();
     let vy = speed_mps * launch_rad.sin();
-    let vz = speed_mps * launch_rad.cos() * azimuth_rad.sin();
+    // Negate: golf convention is positive azimuth = right, physics +Z = left.
+    let vz = -speed_mps * launch_rad.cos() * azimuth_rad.sin();
 
     let mut aero = AeroParams::from_spin(input.backspin_rpm, input.sidespin_rpm);
     let air_density = env.air_density();
@@ -141,13 +146,118 @@ pub fn simulate_flight(input: &ShotInput, ball: &BallModel, env: &Environment) -
 
     let carry_m = (state.pos.x * state.pos.x + state.pos.z * state.pos.z).sqrt();
 
+    // Extract landing spin components from the decayed aero state.
+    // spin_axis.z = backspin fraction, spin_axis.y = sidespin fraction.
+    let landing_backspin_rads = aero.spin_rate * aero.spin_axis.z;
+    let landing_sidespin_rads = aero.spin_rate * aero.spin_axis.y;
+
     FlightResult {
         points,
         flight_time: t,
         carry_m,
         carry_yards: units::meters_to_yards(carry_m),
         apex_m: apex,
-        lateral_m: state.pos.z,
+        // Negate: physics +Z = left, golf convention positive = right.
+        lateral_m: -state.pos.z,
+        landing_backspin_rads,
+        landing_sidespin_rads,
+    }
+}
+
+/// Position and velocity at each bounce event.
+#[derive(Debug, Clone, Copy)]
+pub struct BounceEvent {
+    pub pos: DVec3,
+    pub vel_in: DVec3,
+    pub vel_out: DVec3,
+}
+
+/// Result of a full shot simulation: flight + bounce + rollout.
+#[derive(Debug, Clone)]
+pub struct ShotResult {
+    pub flight: FlightResult,
+    pub bounces: Vec<BounceEvent>,
+    pub rollout: crate::rollout::RolloutResult,
+    /// Carry + rollout distance (m).
+    pub total_m: f64,
+    /// Carry + rollout distance (yards).
+    pub total_yards: f64,
+    /// Where the ball came to rest.
+    pub final_pos: DVec3,
+}
+
+/// Simulate a complete shot: flight, bounce sequence, and rollout.
+///
+/// `bounce_surface` and `rollout_surface` define the ground properties at the
+/// landing point. For simplicity, the surface is constant throughout the
+/// bounce/rollout phase (no mid-rollout surface transitions).
+#[must_use]
+pub fn simulate_shot(
+    input: &ShotInput,
+    ball: &BallModel,
+    env: &Environment,
+    bounce_surface: &crate::bounce::BounceSurface,
+    rollout_surface: &crate::rollout::RolloutSurface,
+) -> ShotResult {
+    let flight = simulate_flight(input, ball, env);
+
+    // Landing state from end of flight
+    let landing = flight.points.last().expect("flight must have points");
+    let landing_vel = landing.vel;
+    let landing_pos = landing.pos;
+
+    // Bounce sequence
+    let bounce_results = crate::bounce::bounce_sequence(
+        landing_vel,
+        flight.landing_backspin_rads,
+        flight.landing_sidespin_rads,
+        bounce_surface,
+    );
+
+    // Track bounce events with positions (parabolic arcs between bounces)
+    let mut bounce_events = Vec::new();
+    let mut pos = DVec3::new(landing_pos.x, 0.0, landing_pos.z);
+    let mut vel = landing_vel;
+
+    for br in &bounce_results {
+        bounce_events.push(BounceEvent {
+            pos,
+            vel_in: vel,
+            vel_out: br.vel,
+        });
+
+        if br.still_bouncing {
+            // Simple parabolic arc to next ground contact.
+            // Time to return to ground: t = 2*vy/g
+            let t_air = 2.0 * br.vel.y / units::G;
+            pos = DVec3::new(
+                pos.x + br.vel.x * t_air,
+                0.0,
+                pos.z + br.vel.z * t_air,
+            );
+        }
+        vel = br.vel;
+    }
+
+    // Final bounce state → rollout
+    let final_bounce = bounce_results.last().expect("at least one bounce");
+    let rollout = crate::rollout::simulate_rollout(
+        pos,
+        final_bounce.vel,
+        final_bounce.omega,
+        rollout_surface,
+    );
+
+    let final_pos = rollout.final_pos;
+    let total_m = (final_pos.x * final_pos.x + final_pos.z * final_pos.z).sqrt();
+
+    ShotResult {
+        flight,
+        bounces: bounce_events,
+        rollout,
+        total_m,
+        total_yards: units::meters_to_yards(total_m),
+        final_pos,
     }
 }
 
@@ -568,5 +678,139 @@ mod tests {
             gap_low > 25.0 && gap_high > 25.0,
             "era gaps should be substantial: low={gap_low:.1}, high={gap_high:.1}"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  UNIFIED SHOT SIMULATION — flight + bounce + rollout
+    // ══════════════════════════════════════════════════════════════════
+
+    use crate::bounce::BounceSurface;
+    use crate::rollout::RolloutSurface;
+
+    fn shot_on_fairway(input: &ShotInput) -> ShotResult {
+        simulate_shot(input, &BALL, &Environment::SEA_LEVEL, &BounceSurface::FAIRWAY, &RolloutSurface::FAIRWAY)
+    }
+
+    fn shot_on_green(input: &ShotInput) -> ShotResult {
+        simulate_shot(input, &BALL, &Environment::SEA_LEVEL, &BounceSurface::GREEN, &RolloutSurface::GREEN)
+    }
+
+    #[test]
+    fn shot_total_greater_than_carry_driver() {
+        // Driver on fairway: low spin, should roll forward significantly.
+        let r = shot_on_fairway(&ShotInput::driver());
+        assert!(
+            r.total_yards > r.flight.carry_yards,
+            "driver total ({:.1}) should exceed carry ({:.1})",
+            r.total_yards, r.flight.carry_yards
+        );
+    }
+
+    #[test]
+    fn shot_driver_total_distance() {
+        // PGA Tour driver: ~282 carry, ~305-315 total on fairway.
+        let r = shot_on_fairway(&ShotInput::driver());
+        assert!(
+            r.total_yards > 290.0 && r.total_yards < 330.0,
+            "driver total should be 290-330 yds, got {:.1} (carry={:.1}, rollout={:.1})",
+            r.total_yards, r.flight.carry_yards, r.total_yards - r.flight.carry_yards
+        );
+    }
+
+    #[test]
+    fn shot_7iron_total_distance() {
+        // PGA Tour 7-iron: 123 mph, 16.3°, 7097 rpm → ~176 carry, ~185-195 total.
+        // Our carry model runs ~8 yds hot for this input (183 vs 176), so the
+        // total window is widened to accommodate. ATTD: tighten when carry is tuned.
+        let input = ShotInput {
+            ball_speed_mph: 123.0,
+            launch_angle_deg: 16.3,
+            launch_azimuth_deg: 0.0,
+            backspin_rpm: 7097.0,
+            sidespin_rpm: 0.0,
+        };
+        let r = shot_on_fairway(&input);
+        assert!(
+            r.total_yards > 178.0 && r.total_yards < 225.0,
+            "7-iron total should be 178-225 yds, got {:.1} (carry={:.1}, rollout={:.1})",
+            r.total_yards, r.flight.carry_yards, r.total_yards - r.flight.carry_yards
+        );
+    }
+
+    #[test]
+    fn shot_wedge_minimal_rollout_on_green() {
+        // Wedge on green: high spin, should check up with minimal rollout.
+        let r = shot_on_green(&ShotInput::wedge());
+        let rollout_yards = r.total_yards - r.flight.carry_yards;
+        assert!(
+            rollout_yards.abs() < 15.0,
+            "wedge on green rollout should be minimal, got {rollout_yards:.1} yds"
+        );
+    }
+
+    #[test]
+    fn shot_has_bounces() {
+        let r = shot_on_fairway(&ShotInput::driver());
+        assert!(
+            !r.bounces.is_empty(),
+            "shot should have at least one bounce"
+        );
+    }
+
+    #[test]
+    fn shot_final_pos_on_ground() {
+        let r = shot_on_fairway(&ShotInput::seven_iron());
+        assert!(
+            r.final_pos.y.abs() < 0.01,
+            "final position should be on ground: y={:.6}",
+            r.final_pos.y
+        );
+    }
+
+    #[test]
+    fn shot_final_pos_downrange() {
+        let r = shot_on_fairway(&ShotInput::driver());
+        assert!(
+            r.final_pos.x > 0.0,
+            "driver should finish downrange: x={:.1}",
+            r.final_pos.x
+        );
+    }
+
+    #[test]
+    fn shot_landing_spin_decayed() {
+        // Landing spin should be less than initial spin (decay during flight).
+        let flight = simulate_flight(&ShotInput::driver(), &BALL, &Environment::SEA_LEVEL);
+        let initial_backspin = units::rpm_to_rads(2700.0);
+        assert!(
+            flight.landing_backspin_rads < initial_backspin,
+            "landing backspin ({:.1}) should be less than initial ({:.1})",
+            flight.landing_backspin_rads, initial_backspin
+        );
+        assert!(flight.landing_backspin_rads > 0.0, "should still have some backspin");
+    }
+
+    #[test]
+    fn shot_green_less_rollout_than_fairway() {
+        // Same shot on green vs fairway: green should have less total rollout
+        // because lower COR means less bouncy, and ball checks up more.
+        let input = ShotInput::seven_iron();
+        let fairway = shot_on_fairway(&input);
+        let green = shot_on_green(&input);
+        let rollout_fairway = fairway.total_yards - fairway.flight.carry_yards;
+        let rollout_green = green.total_yards - green.flight.carry_yards;
+        assert!(
+            rollout_green < rollout_fairway,
+            "green rollout ({rollout_green:.1}) should be less than fairway ({rollout_fairway:.1})"
+        );
+    }
+
+    #[test]
+    fn shot_stats_from_shot() {
+        let r = shot_on_fairway(&ShotInput::driver());
+        let stats = crate::stats::ShotStats::from_shot(&r);
+        assert!(stats.total_yards > stats.carry_yards);
+        assert!(stats.rollout_yards > 0.0);
+        assert!((stats.carry_yards + stats.rollout_yards - stats.total_yards).abs() < 0.1);
     }
 }

@@ -5,10 +5,7 @@ use cf_scene::color;
 
 use crate::pipeline::GridPushConstants;
 
-use super::{NO_CLIP, Renderer};
-
-/// Fraction of screen width used by the chase camera viewport (right side).
-const CHASE_VIEWPORT_FRAC: f32 = 0.20;
+use super::{CHASE_VIEWPORT_FRAC, NO_CLIP, Renderer};
 
 impl Renderer {
     /// Record raster scene commands into the command buffer.
@@ -287,12 +284,12 @@ impl Renderer {
 
             // In-flight trail wireframe core (LINE_LIST, magenta — 2px when supported)
             if self.flight_line_count > 0 {
-                device.cmd_set_line_width(cb, if self.gpu.wide_lines { 2.0 } else { 1.0 });
                 device.cmd_bind_pipeline(
                     cb,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline.pipeline, // LINE_LIST grid pipeline
                 );
+                device.cmd_set_line_width(cb, if self.gpu.wide_lines { 2.0 } else { 1.0 });
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_line_buffer], &[0]);
                 device.cmd_push_constants(
                     cb,

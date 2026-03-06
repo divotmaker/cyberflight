@@ -14,11 +14,13 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) rayPayloadEXT vec4 payload; // rgb + alpha (1 = hit floor, 0 = miss)
 
 void main() {
-    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 local_pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    ivec2 viewport_offset = ivec2(pc.camera_pos.w, pc.grid_params.w);
+    ivec2 pixel = local_pixel + viewport_offset;
 
-    // NDC: [-1, 1] with Y flipped for Vulkan
-    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    // NDC: [-1, 1] with Y flipped for Vulkan (relative to dispatch viewport)
+    vec2 uv = (vec2(local_pixel) + 0.5) / vec2(size);
     vec2 ndc = uv * 2.0 - 1.0;
 
     // Unproject near and far planes to get ray direction

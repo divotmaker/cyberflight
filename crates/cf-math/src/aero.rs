@@ -203,7 +203,9 @@ impl BallModel {
 
     /// Compute ball acceleration from gravity + drag + Magnus lift.
     ///
-    /// Coordinate system: +X downrange, +Y up, +Z left.
+    /// Internal coordinate system: +X downrange, +Y up, +Z left (right-handed).
+    /// Golf-convention sign flips (positive azimuth/lateral = right) are applied
+    /// at the input/output boundary in `trajectory.rs`, not here.
     #[must_use]
     pub fn acceleration(
         &self,

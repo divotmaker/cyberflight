@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::grid::GridVertex;
@@ -138,18 +140,37 @@ pub enum UnitSystem {
 }
 
 /// Shot telemetry data for HUD display.
+///
+/// Distance fields (`carry_yards`, `total_yards`, `downrange_yards`) are live —
+/// they increase with the ball animation each frame, not final calculated values.
 #[derive(Debug, Clone)]
 pub struct ShotTelemetry {
-    pub club_name: String,
     pub club_speed_mph: f64,
     pub ball_speed_mph: f64,
+    pub smash_factor: Option<f64>,
     pub launch_angle_deg: f64,
     pub launch_azimuth_deg: f64,
     pub backspin_rpm: f64,
     pub sidespin_rpm: f64,
+    /// Club path (degrees, negative = left of target for RH).
+    pub club_path_deg: Option<f64>,
+    /// Attack angle (degrees, negative = descending blow).
+    pub attack_angle_deg: Option<f64>,
+    /// Face angle at impact (degrees, positive = open for RH).
+    pub face_angle_deg: Option<f64>,
+    /// Dynamic loft at impact (degrees).
+    pub dynamic_loft_deg: Option<f64>,
     pub apex_m: f64,
+    /// Live carry distance (Euclidean XZ from tee), updated each frame.
     pub carry_yards: f64,
+    /// Carry distance reported by the launch monitor, if available.
+    pub lm_carry_yards: Option<f64>,
+    /// Live total distance (Euclidean XZ from tee), updated each frame.
+    pub total_yards: f64,
+    /// Live downrange distance (Z-axis only), updated each frame.
+    pub downrange_yards: f64,
     pub lateral_m: f64,
+    /// Carry flight time only (excludes bounce/rollout).
     pub flight_time_s: f64,
     pub elapsed_s: f64,
     pub in_flight: bool,
@@ -163,40 +184,81 @@ pub struct HudGeometry {
     pub fills: Vec<GridVertex>,
 }
 
-// Layout constants (pixels at 1080p).
-const CHAR_HEIGHT: f32 = 16.0;
-const LINE_HEIGHT: f32 = 22.0;
-const SECTION_GAP: f32 = 14.0;
-const MARGIN_LEFT: f32 = 24.0;
-const MARGIN_TOP: f32 = 40.0;
-const LABEL_X: f32 = 36.0;
+// Layout constants (reference values at 1080p, scaled by screen height).
+const REF_HEIGHT: f32 = 1080.0;
+const REF_CHAR_HEIGHT: f32 = 16.0;
+const REF_LINE_HEIGHT: f32 = 22.0;
+const REF_SECTION_GAP: f32 = 14.0;
+const REF_MARGIN_LEFT: f32 = 24.0;
+const REF_MARGIN_TOP: f32 = 40.0;
+const REF_LABEL_X: f32 = 36.0;
 const PANEL_FRAC: f32 = 0.20;
 const LABEL_FADE: f32 = 0.35;
 const VALUE_FADE: f32 = 0.0;
 const HEADER_FADE: f32 = 0.0;
 const DECOR_FADE: f32 = 0.55;
 
+/// Scaled layout dimensions for the current screen height.
+struct HudScale {
+    char_height: f32,
+    line_height: f32,
+    section_gap: f32,
+    margin_left: f32,
+    margin_top: f32,
+    label_x: f32,
+}
+
+impl HudScale {
+    fn new(screen_h: f32) -> Self {
+        let s = screen_h / REF_HEIGHT;
+        Self {
+            char_height: REF_CHAR_HEIGHT * s,
+            line_height: REF_LINE_HEIGHT * s,
+            section_gap: REF_SECTION_GAP * s,
+            margin_left: REF_MARGIN_LEFT * s,
+            margin_top: REF_MARGIN_TOP * s,
+            label_x: REF_LABEL_X * s,
+        }
+    }
+}
+
 /// Build HUD geometry for the telemetry overlay.
 ///
 /// Returns line vertices (for text + decorations) and fill vertices (panel background).
 /// Designed for the left 20% of the screen with a telemetry/rocket-monitoring feel.
-#[must_use]
+///
+/// `lm_states`: per-source armed state map.
+/// `connected`: whether the flighthook connection is alive.
 pub fn build_hud(
     telemetry: Option<&ShotTelemetry>,
     units: UnitSystem,
+    chase_active: bool,
+    lm_states: &HashMap<String, bool>,
+    connected: bool,
     screen_w: f32,
     screen_h: f32,
 ) -> HudGeometry {
+    let sc = HudScale::new(screen_h);
     let panel_w = screen_w * PANEL_FRAC;
+    let panel_margin = 16.0 * screen_h / REF_HEIGHT;
     let mut lines: Vec<GridVertex> = Vec::with_capacity(4096);
 
-    let fills = build_panel_fill(panel_w, screen_h);
+    let mut fills = build_panel_fill(0.0, panel_w, screen_h);
+    // Right panel fill is hidden when chase camera is active (chase cam has priority).
+    if !chase_active {
+        fills.extend_from_slice(&build_panel_fill(screen_w - panel_w, screen_w, screen_h));
+    }
 
     // Vertical separator at panel edge
     let sep = hud_font::build_vline(panel_w, 0.0, screen_h, DECOR_FADE);
     lines.extend_from_slice(&sep);
 
-    let mut y = MARGIN_TOP;
+    // Vertical separator at left edge of right panel
+    let right_sep_x = screen_w * (1.0 - PANEL_FRAC);
+    let right_sep = hud_font::build_vline(right_sep_x, 0.0, screen_h, DECOR_FADE);
+    lines.extend_from_slice(&right_sep);
+
+    let mut y = sc.margin_top;
 
     if let Some(t) = telemetry {
         // Unit labels and conversions
@@ -205,8 +267,8 @@ pub fn build_hud(
             UnitSystem::Metric => ("KPH", 1.60934),
         };
         let fmt_dist = |yards: f64| match units {
-            UnitSystem::Imperial => format!("{:.0} YDS", yards),
-            UnitSystem::Metric => format!("{:.0} M", yards * 0.9144),
+            UnitSystem::Imperial => format!("{:.1} YDS", yards),
+            UnitSystem::Metric => format!("{:.1} M", yards * 0.9144),
         };
         let fmt_height = |meters: f64| match units {
             UnitSystem::Imperial => format!("{:.1} FT", meters / 0.3048),
@@ -214,81 +276,128 @@ pub fn build_hud(
         };
 
         // ── CLUB section
-        y = emit_section_header(&mut lines, "CLUB", y, panel_w);
-        y = emit_row(&mut lines, "TYPE", &t.club_name, y);
-        y = emit_row(
-            &mut lines,
-            "SPEED",
-            &format!("{:.0} {spd_label}", t.club_speed_mph * spd_factor),
-            y,
-        );
-        y += SECTION_GAP;
+        y = emit_section_header(&mut lines, "CLUB", y, panel_w, &sc);
+        y = emit_row(&mut lines, "SPEED",
+            &format!("{:.0} {spd_label}", t.club_speed_mph * spd_factor), y, panel_w, &sc);
+        if let Some(v) = t.club_path_deg {
+            y = emit_row(&mut lines, "PATH", &format!("{v:.1}"), y, panel_w, &sc);
+        }
+        if let Some(v) = t.attack_angle_deg {
+            y = emit_row(&mut lines, "AOA", &format!("{v:.1}"), y, panel_w, &sc);
+        }
+        if let Some(v) = t.face_angle_deg {
+            y = emit_row(&mut lines, "FACE", &format!("{v:.1}"), y, panel_w, &sc);
+        }
+        if let Some(v) = t.dynamic_loft_deg {
+            y = emit_row(&mut lines, "D LOFT", &format!("{v:.1}"), y, panel_w, &sc);
+        }
+        y += sc.section_gap;
 
-        // ── IMPACT section
-        y = emit_section_header(&mut lines, "IMPACT", y, panel_w);
-        y = emit_row(
-            &mut lines,
-            "BALL SPD",
-            &format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor),
-            y,
-        );
-        y = emit_row(&mut lines, "VLA", &format!("{:.1}", t.launch_angle_deg), y);
-        y = emit_row(&mut lines, "HLA", &format!("{:.1}", t.launch_azimuth_deg), y);
-        y = emit_row(&mut lines, "BACK", &format!("{:.0} RPM", t.backspin_rpm), y);
-        y = emit_row(&mut lines, "SIDE", &format!("{:.0} RPM", t.sidespin_rpm), y);
-        y += SECTION_GAP;
+        // ── LAUNCH section
+        y = emit_section_header(&mut lines, "LAUNCH", y, panel_w, &sc);
+        y = emit_row(&mut lines, "SPEED",
+            &format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor), y, panel_w, &sc);
+        if let Some(sf) = t.smash_factor {
+            y = emit_row(&mut lines, "SMASH", &format!("{sf:.2}"), y, panel_w, &sc);
+        }
+        y = emit_row(&mut lines, "VLA", &format!("{:.1}", t.launch_angle_deg), y, panel_w, &sc);
+        y = emit_row(&mut lines, "HLA", &format!("{:.1}", t.launch_azimuth_deg), y, panel_w, &sc);
+        y = emit_row(&mut lines, "BACK", &format!("{:.0} RPM", t.backspin_rpm), y, panel_w, &sc);
+        y = emit_row(&mut lines, "SIDE", &format!("{:.0} RPM", t.sidespin_rpm), y, panel_w, &sc);
+        y += sc.section_gap;
+
+        // ── FLIGHT section
+        y = emit_section_header(&mut lines, "FLIGHT", y, panel_w, &sc);
+        y = emit_row(&mut lines, "APEX", &fmt_height(t.apex_m), y, panel_w, &sc);
+        y = emit_row(&mut lines, "CARRY", &fmt_dist(t.carry_yards), y, panel_w, &sc);
+        if t.lm_carry_yards.is_some() {
+            let carry_complete = t.elapsed_s >= t.flight_time_s;
+            let lm_text = if carry_complete {
+                fmt_dist(t.lm_carry_yards.unwrap())
+            } else {
+                "-".to_owned()
+            };
+            y = emit_row(&mut lines, "CARRY(LM)", &lm_text, y, panel_w, &sc);
+        }
+        y = emit_row(&mut lines, "TIME", &format!("{:.1} S", t.elapsed_s), y, panel_w, &sc);
+        y += sc.section_gap;
 
         // ── RESULT section
-        y = emit_section_header(&mut lines, "RESULT", y, panel_w);
-        y = emit_row(&mut lines, "APEX", &fmt_height(t.apex_m), y);
-        y = emit_row(&mut lines, "CARRY", &fmt_dist(t.carry_yards), y);
-        y = emit_row(&mut lines, "TOTAL", &fmt_dist(t.carry_yards), y);
-        y = emit_row(&mut lines, "LATERAL", &fmt_height(t.lateral_m), y);
-        y = emit_row(&mut lines, "TIME", &format!("{:.1} S", t.elapsed_s), y);
-        y += SECTION_GAP;
-
-        // Status line
-        let status = if t.in_flight { "IN FLIGHT" } else { "LANDED" };
-        let status_fade = if t.in_flight { 0.0 } else { LABEL_FADE };
-        lines.extend(hud_font::build_text(status, MARGIN_LEFT, y, CHAR_HEIGHT, status_fade));
+        y = emit_section_header(&mut lines, "RESULT", y, panel_w, &sc);
+        y = emit_row(&mut lines, "TOTAL", &fmt_dist(t.total_yards), y, panel_w, &sc);
+        y = emit_row(&mut lines, "DOWNRANGE", &fmt_dist(t.downrange_yards), y, panel_w, &sc);
+        y = emit_row(&mut lines, "LATERAL", &fmt_height(t.lateral_m), y, panel_w, &sc);
+        let _ = y;
     } else {
         // No telemetry — show standby
-        lines.extend(hud_font::build_text("STANDBY", MARGIN_LEFT, y, CHAR_HEIGHT, LABEL_FADE));
+        lines.extend(hud_font::build_text("SEND IT", sc.margin_left, y, sc.char_height, LABEL_FADE));
+    }
+
+    // ── SYSTEM section (bottom-aligned in left panel)
+    {
+        let mut rows: Vec<(&str, &str, f32, f32)> = Vec::new(); // (label, value, label_fade, value_fade)
+
+        if !connected {
+            // Negative fade = red alert color (see grid.frag).
+            rows.push(("LAUNCH MONITOR", "-", -1.0, -1.0));
+        } else if lm_states.is_empty() {
+            rows.push(("LAUNCH MONITOR", "UNKNOWN", LABEL_FADE, LABEL_FADE));
+        } else {
+            let multi = lm_states.len() > 1;
+            for (source, &armed) in lm_states {
+                let label = if multi { source.as_str() } else { "LAUNCH MONITOR" };
+                let (status, vfade) = if armed { ("ARMED", 0.0) } else { ("STANDBY", LABEL_FADE) };
+                rows.push((label, status, LABEL_FADE, vfade));
+            }
+        }
+
+        let num_rows = rows.len() as f32;
+        let header_y = screen_h - sc.margin_top - (num_rows * sc.line_height) - sc.line_height;
+        emit_section_header(&mut lines, "SYSTEM", header_y, panel_w, &sc);
+
+        let mut row_y = header_y + sc.line_height;
+        for (label, value, label_fade, value_fade) in &rows {
+            lines.extend(hud_font::build_text(label, sc.label_x, row_y, sc.char_height, *label_fade));
+            let value_x = panel_w - panel_margin - hud_font::text_width(value, sc.char_height);
+            lines.extend(hud_font::build_text(value, value_x, row_y, sc.char_height, *value_fade));
+            row_y += sc.line_height;
+        }
     }
 
     HudGeometry { lines, fills }
 }
 
-fn emit_section_header(lines: &mut Vec<GridVertex>, title: &str, y: f32, panel_w: f32) -> f32 {
-    lines.extend(hud_font::build_text(title, MARGIN_LEFT, y, CHAR_HEIGHT, HEADER_FADE));
-    // Decorative line from end of title text to near panel edge
-    let line_start = MARGIN_LEFT + hud_font::text_width(title, CHAR_HEIGHT) + 8.0;
-    let line_end = panel_w - 16.0;
+fn emit_section_header(lines: &mut Vec<GridVertex>, title: &str, y: f32, panel_w: f32, sc: &HudScale) -> f32 {
+    lines.extend(hud_font::build_text(title, sc.margin_left, y, sc.char_height, HEADER_FADE));
+    let panel_margin = 16.0 * sc.line_height / REF_LINE_HEIGHT;
+    let line_start = sc.margin_left + hud_font::text_width(title, sc.char_height) + 8.0 * sc.char_height / REF_CHAR_HEIGHT;
+    let line_end = panel_w - panel_margin;
     if line_end > line_start + 10.0 {
-        let sep = hud_font::build_hline(line_start, line_end, y + CHAR_HEIGHT * 0.5, DECOR_FADE);
+        let sep = hud_font::build_hline(line_start, line_end, y + sc.char_height * 0.5, DECOR_FADE);
         lines.extend_from_slice(&sep);
     }
-    y + LINE_HEIGHT
+    y + sc.line_height
 }
 
-fn emit_row(lines: &mut Vec<GridVertex>, label: &str, value: &str, y: f32) -> f32 {
-    lines.extend(hud_font::build_text(label, LABEL_X, y, CHAR_HEIGHT, LABEL_FADE));
-    // Right-align value: compute value width, position so it ends near the panel margin
-    let panel_right = 384.0 - 16.0; // approximate at 1920 width
-    let value_w = hud_font::text_width(value, CHAR_HEIGHT);
-    let value_x = (panel_right - value_w).max(LABEL_X + hud_font::text_width(label, CHAR_HEIGHT) + 16.0);
-    lines.extend(hud_font::build_text(value, value_x, y, CHAR_HEIGHT, VALUE_FADE));
-    y + LINE_HEIGHT
+fn emit_row(lines: &mut Vec<GridVertex>, label: &str, value: &str, y: f32, panel_w: f32, sc: &HudScale) -> f32 {
+    lines.extend(hud_font::build_text(label, sc.label_x, y, sc.char_height, LABEL_FADE));
+    let panel_margin = 16.0 * sc.line_height / REF_LINE_HEIGHT;
+    let panel_right = panel_w - panel_margin;
+    let value_w = hud_font::text_width(value, sc.char_height);
+    let min_x = sc.label_x + hud_font::text_width(label, sc.char_height) + panel_margin;
+    let value_x = (panel_right - value_w).max(min_x);
+    lines.extend(hud_font::build_text(value, value_x, y, sc.char_height, VALUE_FADE));
+    y + sc.line_height
 }
 
-fn build_panel_fill(panel_w: f32, screen_h: f32) -> Vec<GridVertex> {
+fn build_panel_fill(x_left: f32, x_right: f32, screen_h: f32) -> Vec<GridVertex> {
     let v = |x: f32, y: f32| GridVertex {
         position: [x, y, 0.0],
         fade: 0.0,
     };
     vec![
-        v(0.0, 0.0), v(panel_w, 0.0), v(panel_w, screen_h),
-        v(0.0, 0.0), v(panel_w, screen_h), v(0.0, screen_h),
+        v(x_left, 0.0), v(x_right, 0.0), v(x_right, screen_h),
+        v(x_left, 0.0), v(x_right, screen_h), v(x_left, screen_h),
     ]
 }
 
@@ -324,36 +433,48 @@ mod tests {
     #[test]
     fn build_hud_with_telemetry() {
         let t = ShotTelemetry {
-            club_name: "7I".to_owned(),
             club_speed_mph: 90.0,
             ball_speed_mph: 132.0,
+            smash_factor: Some(1.47),
             launch_angle_deg: 16.0,
             launch_azimuth_deg: -1.2,
             backspin_rpm: 7000.0,
             sidespin_rpm: -300.0,
+            club_path_deg: Some(-2.1),
+            attack_angle_deg: Some(-4.5),
+            face_angle_deg: Some(0.3),
+            dynamic_loft_deg: Some(22.8),
             apex_m: 28.3,
             carry_yards: 159.0,
+            lm_carry_yards: None,
+            total_yards: 172.0,
+            downrange_yards: 170.5,
             lateral_m: -4.2,
             flight_time_s: 5.8,
             elapsed_s: 3.2,
             in_flight: true,
         };
-        let geom = build_hud(Some(&t), UnitSystem::Imperial, 1920.0, 1080.0);
+        let geom = build_hud(Some(&t), UnitSystem::Imperial, false, &HashMap::new(), true, 1920.0, 1080.0);
         assert!(!geom.lines.is_empty(), "should have text lines");
         assert_eq!(geom.lines.len() % 2, 0, "LINE_LIST needs even count");
-        assert_eq!(geom.fills.len(), 6, "panel is 2 triangles");
+        assert_eq!(geom.fills.len(), 12, "2 panels × 2 triangles each");
     }
 
     #[test]
     fn build_hud_without_telemetry() {
-        let geom = build_hud(None, UnitSystem::Imperial, 1920.0, 1080.0);
+        let geom = build_hud(None, UnitSystem::Imperial, false, &HashMap::new(), true, 1920.0, 1080.0);
         assert!(!geom.lines.is_empty(), "should show standby text");
     }
 
     #[test]
-    fn panel_fill_covers_left_fifth() {
-        let geom = build_hud(None, UnitSystem::Imperial, 1920.0, 1080.0);
-        let max_x = geom.fills.iter().map(|v| v.position[0]).fold(0.0_f32, f32::max);
-        assert!((max_x - 384.0).abs() < 1.0, "panel should be 20% of 1920 = 384, got {max_x}");
+    fn panel_fills_cover_both_sides() {
+        let geom = build_hud(None, UnitSystem::Imperial, false, &HashMap::new(), true, 1920.0, 1080.0);
+        // Left panel: 0..384, right panel: 1536..1920
+        let left_fills = &geom.fills[..6];
+        let right_fills = &geom.fills[6..12];
+        let left_max_x = left_fills.iter().map(|v| v.position[0]).fold(0.0_f32, f32::max);
+        let right_min_x = right_fills.iter().map(|v| v.position[0]).fold(f32::MAX, f32::min);
+        assert!((left_max_x - 384.0).abs() < 1.0, "left panel edge should be 384, got {left_max_x}");
+        assert!((right_min_x - 1536.0).abs() < 1.0, "right panel edge should be 1536, got {right_min_x}");
     }
 }

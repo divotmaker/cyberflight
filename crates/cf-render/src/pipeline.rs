@@ -318,12 +318,10 @@ impl GridPipeline {
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .stencil_test_enable(false);
 
-        let dynamic_states = [
-            vk::DynamicState::VIEWPORT,
-            vk::DynamicState::SCISSOR,
-            vk::DynamicState::STENCIL_REFERENCE,
-            vk::DynamicState::LINE_WIDTH,
-        ];
+        let mut dynamic_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        if topology == vk::PrimitiveTopology::LINE_LIST {
+            dynamic_states.push(vk::DynamicState::LINE_WIDTH);
+        }
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 

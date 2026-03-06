@@ -29,6 +29,9 @@ use crate::window::Swapchain;
 /// Clip bounds that effectively disable clipping (huge region).
 const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
+/// Fraction of screen width used by the chase camera viewport (right side).
+const CHASE_VIEWPORT_FRAC: f32 = 0.20;
+
 /// RT reflection composite pass: fullscreen triangle that samples the RT storage
 /// image and additively blends reflections onto the rasterized scene.
 pub(super) struct CompositePass {
@@ -235,8 +238,7 @@ impl Renderer {
 
         let (render_mode, rt_pipeline) = if gpu.rt_supported {
             let tee = TeeBox::default();
-            let ball_center = glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
-            let geometries = build_scene_geometry(grid_config, &tee, ball_center, &[]);
+            let geometries = build_scene_geometry(grid_config, &tee, &[]);
             match RtPipeline::new(
                 &mut gpu,
                 swapchain.extent.width,
@@ -356,7 +358,7 @@ impl Renderer {
 
         // Acquire next image
         // SAFETY: Acquiring swapchain image with valid semaphore.
-        let (image_index, _suboptimal) = unsafe {
+        let (image_index, suboptimal) = unsafe {
             match self.swapchain.swapchain_loader.acquire_next_image(
                 self.swapchain.swapchain,
                 u64::MAX,
@@ -364,10 +366,18 @@ impl Renderer {
                 vk::Fence::null(),
             ) {
                 Ok(result) => result,
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(()), // will resize
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.resize_to_surface()?;
+                    return Ok(());
+                }
                 Err(e) => return Err(RenderError::Vulkan(e)),
             }
         };
+
+        if suboptimal {
+            self.resize_to_surface()?;
+            return Ok(());
+        }
 
         let cb = self.command_buffers[image_index as usize];
 
@@ -442,13 +452,31 @@ impl Renderer {
                 .swapchain_loader
                 .queue_present(self.gpu.graphics_queue, &present_info)
             {
-                Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {}
+                Ok(_) => {}
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {
+                    self.resize_to_surface()?;
+                }
                 Err(e) => return Err(RenderError::Vulkan(e)),
             }
         }
 
         self.current_frame = (self.current_frame + 1) % self.image_available.len();
         Ok(())
+    }
+
+    /// Query the current surface extent and resize the swapchain to match.
+    fn resize_to_surface(&mut self) -> Result<(), RenderError> {
+        // SAFETY: Querying surface capabilities for current extent.
+        let caps = unsafe {
+            self.swapchain
+                .surface_loader
+                .get_physical_device_surface_capabilities(
+                    self.gpu.physical_device,
+                    self.swapchain.surface,
+                )
+                .map_err(RenderError::Vulkan)?
+        };
+        self.resize(caps.current_extent.width, caps.current_extent.height)
     }
 
     /// Handle window resize.
@@ -600,7 +628,7 @@ impl Renderer {
                 16,
             ));
 
-            // Trail glow ribbon + wireframe centerline
+            // Trail glow ribbon (with endcap) + wireframe centerline
             if flight.trail_points.len() >= 2 {
                 glow_verts.extend(generate_trail_glow(
                     &flight.trail_points,
@@ -664,7 +692,6 @@ impl Renderer {
                 let geometries = build_scene_geometry(
                     &grid_config,
                     &tee,
-                    self.rt_ball_center,
                     &self.rt_trail_points,
                 );
                 if let Err(e) = rt_pipeline.update_scene(&mut self.gpu, &geometries) {

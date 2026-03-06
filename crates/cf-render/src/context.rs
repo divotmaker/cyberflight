@@ -187,6 +187,23 @@ impl GpuContext {
         config: &GpuConfig,
         surface_extensions: &[*const i8],
     ) -> Result<ash::Instance, RenderError> {
+        // Check that the Vulkan loader supports 1.3.
+        // SAFETY: Querying the Vulkan instance version from the loader.
+        let instance_version = unsafe { entry.try_enumerate_instance_version() }
+            .unwrap_or(Some(vk::make_api_version(0, 1, 0, 0)))
+            .unwrap_or(vk::make_api_version(0, 1, 0, 0));
+        let major = vk::api_version_major(instance_version);
+        let minor = vk::api_version_minor(instance_version);
+        let patch = vk::api_version_patch(instance_version);
+        eprintln!("Vulkan instance version: {major}.{minor}.{patch}");
+
+        if major < 1 || (major == 1 && minor < 3) {
+            return Err(RenderError::UnsupportedVulkan {
+                found_major: major,
+                found_minor: minor,
+            });
+        }
+
         let app_name = CString::new("cyberflight").expect("valid cstr");
         let engine_name = CString::new("cyberflight").expect("valid cstr");
 
@@ -278,7 +295,10 @@ impl GpuContext {
         // SAFETY: Reading device name for logging.
         let props = unsafe { instance.get_physical_device_properties(pd) };
         let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) };
-        eprintln!("GPU: {}", name.to_string_lossy());
+        let dev_major = vk::api_version_major(props.api_version);
+        let dev_minor = vk::api_version_minor(props.api_version);
+        let dev_patch = vk::api_version_patch(props.api_version);
+        eprintln!("GPU: {} (Vulkan {dev_major}.{dev_minor}.{dev_patch})", name.to_string_lossy());
 
         Ok((pd, qi))
     }

@@ -18,6 +18,12 @@ void main() {
         discard;
     }
 
+    // Negative fade encodes alert color (bright red, full opacity).
+    if (frag_fade < 0.0) {
+        out_color = vec4(1.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
     // Fade grid lines toward transparent at distance
     float alpha = 1.0 - frag_fade;
     // Smooth falloff for neon glow feel

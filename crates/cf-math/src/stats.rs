@@ -1,11 +1,12 @@
-use crate::trajectory::FlightResult;
+use crate::trajectory::{FlightResult, ShotResult};
 use crate::units;
 
 /// Statistics for a single shot, in display-friendly units.
 #[derive(Debug, Clone, Copy)]
 pub struct ShotStats {
     pub carry_yards: f64,
-    pub total_yards: f64, // same as carry for driving range (no roll)
+    pub total_yards: f64,
+    pub rollout_yards: f64,
     pub apex_feet: f64,
     pub flight_time_s: f64,
     pub lateral_yards: f64, // positive = left, negative = right (for right-handed)
@@ -13,10 +14,37 @@ pub struct ShotStats {
 }
 
 impl ShotStats {
-    /// Compute shot statistics from a flight result.
+    /// Compute shot statistics from a flight result (no bounce/rollout).
     #[must_use]
     pub fn from_flight(result: &FlightResult) -> Self {
-        let descent_angle = if let Some(last) = result.points.last() {
+        Self {
+            carry_yards: result.carry_yards,
+            total_yards: result.carry_yards,
+            rollout_yards: 0.0,
+            apex_feet: units::meters_to_feet(result.apex_m),
+            flight_time_s: result.flight_time,
+            lateral_yards: units::meters_to_yards(result.lateral_m),
+            descent_angle_deg: Self::descent_angle(result),
+        }
+    }
+
+    /// Compute shot statistics from a full shot result (flight + bounce + rollout).
+    #[must_use]
+    pub fn from_shot(result: &ShotResult) -> Self {
+        let rollout_yards = result.total_yards - result.flight.carry_yards;
+        Self {
+            carry_yards: result.flight.carry_yards,
+            total_yards: result.total_yards,
+            rollout_yards,
+            apex_feet: units::meters_to_feet(result.flight.apex_m),
+            flight_time_s: result.flight.flight_time,
+            lateral_yards: units::meters_to_yards(result.flight.lateral_m),
+            descent_angle_deg: Self::descent_angle(&result.flight),
+        }
+    }
+
+    fn descent_angle(result: &FlightResult) -> f64 {
+        if let Some(last) = result.points.last() {
             let vy = last.vel.y;
             let vx = last.vel.x;
             let vz = last.vel.z;
@@ -28,15 +56,6 @@ impl ShotStats {
             }
         } else {
             0.0
-        };
-
-        Self {
-            carry_yards: result.carry_yards,
-            total_yards: result.carry_yards, // no roll on driving range
-            apex_feet: units::meters_to_feet(result.apex_m),
-            flight_time_s: result.flight_time,
-            lateral_yards: units::meters_to_yards(result.lateral_m),
-            descent_angle_deg: descent_angle,
         }
     }
 }
@@ -226,6 +245,7 @@ mod tests {
         session.add_shot(ShotStats {
             carry_yards: 150.0,
             total_yards: 150.0,
+            rollout_yards: 0.0,
             apex_feet: 90.0,
             flight_time_s: 5.0,
             lateral_yards: 2.0,
@@ -234,6 +254,7 @@ mod tests {
         session.add_shot(ShotStats {
             carry_yards: 160.0,
             total_yards: 160.0,
+            rollout_yards: 0.0,
             apex_feet: 100.0,
             flight_time_s: 5.5,
             lateral_yards: -2.0,
@@ -274,6 +295,7 @@ mod tests {
             session.add_shot(ShotStats {
                 carry_yards: 150.0 + i as f64,
                 total_yards: 150.0 + i as f64,
+                rollout_yards: 0.0,
                 apex_feet: 90.0,
                 flight_time_s: 5.0,
                 lateral_yards: 0.0,

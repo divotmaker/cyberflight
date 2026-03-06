@@ -4,11 +4,43 @@ use cf_scene::camera::Camera;
 
 use crate::rt_pipeline::RtPushConstants;
 
-use super::Renderer;
+use super::{Renderer, CHASE_VIEWPORT_FRAC};
 
 impl Renderer {
+    /// Build RT push constants for a given camera and viewport offset.
+    fn rt_push_constants(&self, camera: &Camera, aspect: f32, vp_offset_x: f32, vp_offset_y: f32) -> RtPushConstants {
+        let view = camera.view_matrix();
+        let mut proj = camera.projection_matrix(aspect);
+        proj.y_axis.y *= -1.0; // Vulkan Y-flip
+        let view_proj = proj * view;
+        let inv_view_proj = view_proj.inverse();
+
+        RtPushConstants {
+            camera_pos: [
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                vp_offset_x,
+            ],
+            inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            grid_params: [
+                self.grid_spacing_m,
+                0.15, // line half-width in meters
+                self.grid_max_fade_dist,
+                vp_offset_y,
+            ],
+            ball_pos: [
+                self.rt_ball_center.x,
+                self.rt_ball_center.y,
+                self.rt_ball_center.z,
+                self.rt_trail_fade_dist,
+            ],
+        }
+    }
+
     /// Record ray tracing commands: trace reflection rays into the storage image,
     /// then transition it to `SHADER_READ_ONLY_OPTIMAL` for the composite pass.
+    /// If a chase camera is set, traces reflections for both viewports.
     ///
     /// # Safety
     /// The command buffer must be in the recording state.
@@ -21,35 +53,9 @@ impl Renderer {
         let extent = self.swapchain.extent;
         let rt = self.rt_pipeline.as_ref().expect("RT pipeline present");
 
-        // Build push constants
-        let aspect = extent.width as f32 / extent.height as f32;
-        let view = camera.view_matrix();
-        let mut proj = camera.projection_matrix(aspect);
-        proj.y_axis.y *= -1.0; // Vulkan Y-flip
-        let view_proj = proj * view;
-        let inv_view_proj = view_proj.inverse();
-
-        let pc = RtPushConstants {
-            camera_pos: [
-                camera.position.x,
-                camera.position.y,
-                camera.position.z,
-                0.0,
-            ],
-            inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            grid_params: [
-                self.grid_spacing_m,
-                0.15, // line half-width in meters
-                self.grid_max_fade_dist,
-                0.0,
-            ],
-            ball_pos: [
-                self.rt_ball_center.x,
-                self.rt_ball_center.y,
-                self.rt_ball_center.z,
-                self.rt_trail_fade_dist,
-            ],
-        };
+        // Main camera push constants (full screen, offset 0,0)
+        let main_aspect = extent.width as f32 / extent.height as f32;
+        let main_pc = self.rt_push_constants(camera, main_aspect, 0.0, 0.0);
 
         // SAFETY: Recording RT trace commands into a valid command buffer.
         unsafe {
@@ -77,8 +83,30 @@ impl Renderer {
                     .subresource_range(subresource_range)],
             );
 
-            // Trace rays (reflections only — primary rays hit floor, trace reflection)
-            rt.record_trace(device, cb, &pc);
+            // Trace main camera reflections (full screen)
+            rt.record_trace(device, cb, &main_pc, extent.width, extent.height);
+
+            // Trace chase camera reflections (right viewport)
+            if let Some(chase) = &self.chase_camera {
+                // Barrier: wait for main trace to finish writing before chase trace overwrites
+                device.cmd_pipeline_barrier(
+                    cb,
+                    vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                    vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                    vk::DependencyFlags::empty(),
+                    &[vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_WRITE)],
+                    &[],
+                    &[],
+                );
+
+                let chase_x = (extent.width as f32 * (1.0 - CHASE_VIEWPORT_FRAC)) as u32;
+                let chase_w = (extent.width as f32 * CHASE_VIEWPORT_FRAC) as u32;
+                let chase_aspect = chase_w as f32 / extent.height as f32;
+                let chase_pc = self.rt_push_constants(chase, chase_aspect, chase_x as f32, 0.0);
+                rt.record_trace(device, cb, &chase_pc, chase_w, extent.height);
+            }
 
             // Transition storage image: GENERAL → SHADER_READ_ONLY_OPTIMAL (for composite sampling)
             device.cmd_pipeline_barrier(

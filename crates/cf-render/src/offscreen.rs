@@ -9,7 +9,7 @@ use cf_scene::tee::{
     TeeBox, generate_ball, generate_ball_at, generate_ball_glow, generate_ball_glow_at,
     generate_tee_border, generate_tee_fill,
 };
-use cf_scene::trail::{TrailPoint, generate_trail_glow};
+use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
@@ -36,6 +36,10 @@ pub struct OffscreenRenderer {
     glow_buffer: vk::Buffer,
     glow_allocation: Option<Allocation>,
     glow_count: u32,
+    /// Trail centerline (LINE_LIST, always visible regardless of viewing angle).
+    trail_line_buffer: Option<vk::Buffer>,
+    trail_line_allocation: Option<Allocation>,
+    trail_line_count: u32,
     // Optional HUD overlay.
     hud_line_buffer: Option<vk::Buffer>,
     hud_line_allocation: Option<Allocation>,
@@ -66,6 +70,8 @@ pub struct OffscreenRenderer {
     rt_ball_radius: f32,
     /// RT trail fade distance (arc length of trimmed trail, meters).
     rt_trail_fade_dist: f32,
+    /// Optional chase camera for split viewport (right 20%).
+    chase_camera: Option<Camera>,
 }
 
 /// Offscreen image format (RGBA8 sRGB for correct gamma in PNG output).
@@ -152,6 +158,9 @@ impl OffscreenRenderer {
             glow_buffer,
             glow_allocation: Some(glow_allocation),
             glow_count,
+            trail_line_buffer: None,
+            trail_line_allocation: None,
+            trail_line_count: 0,
             hud_line_buffer: None,
             hud_line_allocation: None,
             hud_line_count: 0,
@@ -177,6 +186,7 @@ impl OffscreenRenderer {
             rt_ball_center: glam::Vec3::new(0.0, tee.ball_radius, 0.0),
             rt_ball_radius: tee.ball_radius,
             rt_trail_fade_dist: 0.0,
+            chase_camera: None,
         })
     }
 
@@ -242,14 +252,22 @@ impl OffscreenRenderer {
         let (fill_buffer, fill_allocation) =
             Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fill_verts)?;
 
-        // Ball glow at flight position + trail glow ribbon.
-        // Trail uses same shell params as ball glow (matched width/brightness).
+        // Ball glow sphere + trail glow ribbon (with endcap to bridge the junction).
         let mut glow_verts = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
-        let trail_glow = generate_trail_glow(trail_points, current_time, max_lifetime, camera.position, tee.ball_radius);
-        glow_verts.extend(trail_glow);
+        glow_verts.extend(generate_trail_glow(trail_points, current_time, max_lifetime, camera.position, tee.ball_radius));
         let glow_count = glow_verts.len() as u32;
         let (glow_buffer, glow_allocation) =
             Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &glow_verts)?;
+
+        // Trail centerline (LINE_LIST — always visible regardless of viewing angle).
+        let trail_line_verts = generate_trail_line(trail_points, current_time, max_lifetime);
+        let (trail_line_buffer, trail_line_allocation, trail_line_count) = if trail_line_verts.is_empty() {
+            (None, None, 0)
+        } else {
+            let count = trail_line_verts.len() as u32;
+            let (buf, alloc) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &trail_line_verts)?;
+            (Some(buf), Some(alloc), count)
+        };
 
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
@@ -276,6 +294,9 @@ impl OffscreenRenderer {
             glow_buffer,
             glow_allocation: Some(glow_allocation),
             glow_count,
+            trail_line_buffer,
+            trail_line_allocation,
+            trail_line_count,
             hud_line_buffer: None,
             hud_line_allocation: None,
             hud_line_count: 0,
@@ -301,6 +322,7 @@ impl OffscreenRenderer {
             rt_ball_center: ball_center,
             rt_ball_radius: tee.ball_radius,
             rt_trail_fade_dist: 0.0,
+            chase_camera: None,
         })
     }
 
@@ -314,7 +336,7 @@ impl OffscreenRenderer {
     ) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let ball_center = glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
-        let geometries = build_scene_geometry(grid_config, &tee, ball_center, &[]);
+        let geometries = build_scene_geometry(grid_config, &tee, &[]);
         Self::create_rt(width, height, grid_config, &tee, ball_center, &geometries, None, 0.0)
     }
 
@@ -341,7 +363,7 @@ impl OffscreenRenderer {
         let trim_len: f32 = trimmed.windows(2)
             .map(|w| (w[1] - w[0]).length())
             .sum();
-        let geometries = build_scene_geometry(grid_config, &tee, ball_center, &trimmed);
+        let geometries = build_scene_geometry(grid_config, &tee, &trimmed);
 
         Self::create_rt(
             width, height, grid_config, &tee, ball_center, &geometries,
@@ -404,7 +426,8 @@ impl OffscreenRenderer {
 
         // Tee box + ball geometry
         let (tee_fill_count, tee_border_count, ball_count, fill_buffer, fill_allocation,
-             glow_count, glow_buffer, glow_allocation) =
+             glow_count, glow_buffer, glow_allocation,
+             trail_line_buffer, trail_line_allocation, trail_line_count) =
             if let Some((ball_pos, trail_points, current_time, max_lifetime, camera)) = flight {
                 let tee_fill_verts = generate_tee_fill(tee);
                 let tee_border_verts = generate_tee_border(tee);
@@ -418,15 +441,24 @@ impl OffscreenRenderer {
                 let (fb, fa) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fv)?;
 
                 let mut gv = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
-                let tg = generate_trail_glow(trail_points, current_time, max_lifetime, camera.position, tee.ball_radius);
-                gv.extend(tg);
+                gv.extend(generate_trail_glow(trail_points, current_time, max_lifetime, camera.position, tee.ball_radius));
                 let gc = gv.len() as u32;
                 let (gb, ga) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &gv)?;
+
+                // Trail centerline (LINE_LIST).
+                let tlv = generate_trail_line(trail_points, current_time, max_lifetime);
+                let (tlb, tla, tlc) = if tlv.is_empty() {
+                    (None, None, 0u32)
+                } else {
+                    let c = tlv.len() as u32;
+                    let (b, a) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &tlv)?;
+                    (Some(b), Some(a), c)
+                };
 
                 // Suppress unused variable warning for ball_pos (used via ball_center).
                 let _ = ball_pos;
 
-                (tfc, tbc, bc, fb, fa, gc, gb, ga)
+                (tfc, tbc, bc, fb, fa, gc, gb, ga, tlb, tla, tlc)
             } else {
                 let tee_fill_verts = generate_tee_fill(tee);
                 let tee_border_verts = generate_tee_border(tee);
@@ -443,7 +475,7 @@ impl OffscreenRenderer {
                 let gc = gv.len() as u32;
                 let (gb, ga) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &gv)?;
 
-                (tfc, tbc, bc, fb, fa, gc, gb, ga)
+                (tfc, tbc, bc, fb, fa, gc, gb, ga, None, None, 0u32)
             };
 
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
@@ -501,6 +533,9 @@ impl OffscreenRenderer {
             glow_buffer,
             glow_allocation: Some(glow_allocation),
             glow_count,
+            trail_line_buffer,
+            trail_line_allocation,
+            trail_line_count,
             hud_line_buffer: None,
             hud_line_allocation: None,
             hud_line_count: 0,
@@ -526,16 +561,129 @@ impl OffscreenRenderer {
             rt_ball_center: ball_center,
             rt_ball_radius: tee.ball_radius,
             rt_trail_fade_dist: trail_fade_dist,
+            chase_camera: None,
         })
     }
 
     /// Whether this renderer has RT reflection compositing enabled.
     #[must_use]
+    fn compute_view_proj(camera: &Camera, aspect: f32) -> [[f32; 4]; 4] {
+        let view = camera.view_matrix();
+        let mut proj = camera.projection_matrix(aspect);
+        // Vulkan NDC has +Y down; glam assumes OpenGL (+Y up). Flip Y.
+        proj.y_axis.y *= -1.0;
+        (proj * view).to_cols_array_2d()
+    }
+
+    /// Draw all scene geometry (grid, tee box, ball, glow) with the given view-projection.
+    ///
+    /// Assumes viewport and scissor are already set, and we're inside a render pass.
+    ///
+    /// # Safety
+    /// Must be called within an active render pass.
+    unsafe fn draw_scene_geometry(&self, view_proj: [[f32; 4]; 4]) {
+        // SAFETY: Caller guarantees we're inside an active render pass with valid
+        // command buffer. All buffers and pipelines are created during construction.
+        unsafe {
+        let device = &self.gpu.device;
+        let cb = self.command_buffer;
+
+        let pc_cyan = GridPushConstants {
+            view_proj,
+            color: color::CYAN.into(),
+            clip_bounds: NO_CLIP,
+        };
+        let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
+            std::ptr::from_ref(&pc_cyan).cast::<u8>(),
+            std::mem::size_of::<GridPushConstants>(),
+        );
+        let pc_black = GridPushConstants {
+            view_proj,
+            color: [0.0, 0.0, 0.0, 1.0],
+            clip_bounds: NO_CLIP,
+        };
+        let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
+            std::ptr::from_ref(&pc_black).cast::<u8>(),
+            std::mem::size_of::<GridPushConstants>(),
+        );
+        let pc_magenta = GridPushConstants {
+            view_proj,
+            color: color::MAGENTA.into(),
+            clip_bounds: NO_CLIP,
+        };
+        let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
+            std::ptr::from_ref(&pc_magenta).cast::<u8>(),
+            std::mem::size_of::<GridPushConstants>(),
+        );
+
+        // Grid lines (LINE_LIST, cyan)
+        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+        device.cmd_set_line_width(cb, 1.0);
+        device.cmd_push_constants(
+            cb, self.pipeline.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_cyan_bytes,
+        );
+        device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
+        device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
+
+        // Tee box fill (black)
+        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill_pipeline);
+        device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
+        device.cmd_push_constants(
+            cb, self.pipeline.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_black_bytes,
+        );
+        device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
+
+        // Tee box border (cyan)
+        device.cmd_push_constants(
+            cb, self.pipeline.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_cyan_bytes,
+        );
+        device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
+
+        // Trail centerline (LINE_LIST, magenta — always visible regardless of angle)
+        if let Some(trail_buf) = self.trail_line_buffer {
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            device.cmd_set_line_width(cb, 1.0);
+            device.cmd_bind_vertex_buffers(cb, 0, &[trail_buf], &[0]);
+            device.cmd_push_constants(
+                cb, self.pipeline.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_magenta_bytes,
+            );
+            device.cmd_draw(cb, self.trail_line_count, 1, 0, 0);
+        }
+
+        // Ball glow (additive, magenta)
+        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow_pipeline);
+        device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer], &[0]);
+        device.cmd_push_constants(
+            cb, self.pipeline.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_magenta_bytes,
+        );
+        device.cmd_draw(cb, self.glow_count, 1, 0, 0);
+
+        // Ball (black sphere)
+        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill_pipeline);
+        device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
+        device.cmd_push_constants(
+            cb, self.pipeline.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_black_bytes,
+        );
+        device.cmd_draw(cb, self.ball_count, 1, self.tee_fill_count + self.tee_border_count, 0);
+        } // unsafe
+    }
+
     pub fn has_rt(&self) -> bool {
         self.rt_pipeline.is_some()
     }
 
     /// Add HUD overlay geometry (call before `render()`).
+    /// Set the chase camera for the right 20% split viewport.
+    pub fn set_chase_camera(&mut self, camera: Camera) {
+        self.chase_camera = Some(camera);
+    }
+
     pub fn set_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) -> Result<(), RenderError> {
         if !lines.is_empty() {
             let (buf, alloc) =
@@ -620,6 +768,7 @@ impl OffscreenRenderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline.pipeline,
             );
+            device.cmd_set_line_width(self.command_buffer, 1.0);
 
             let viewport = vk::Viewport {
                 x: 0.0,
@@ -637,139 +786,77 @@ impl OffscreenRenderer {
             };
             device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
 
-            // Push constants
+            // Main scene
             let aspect = width as f32 / height as f32;
-            let mut proj = camera.projection_matrix(aspect);
-            // Vulkan NDC has +Y down; glam assumes OpenGL (+Y up). Flip Y.
-            proj.y_axis.y *= -1.0;
-            let view_proj = proj * camera.view_matrix();
+            let view_proj = Self::compute_view_proj(camera, aspect);
+            self.draw_scene_geometry(view_proj);
 
-            let pc = GridPushConstants {
-                view_proj: view_proj.to_cols_array_2d(),
-                color: color::CYAN.into(),
-                clip_bounds: NO_CLIP,
-            };
+            // Chase camera: right 20% viewport
+            if let Some(chase) = &self.chase_camera.clone() {
+                let chase_frac: f32 = 0.20;
+                let chase_x = (width as f32 * (1.0 - chase_frac)) as i32;
+                let chase_w = (width as f32 * chase_frac) as u32;
 
-            let pc_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
-            device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_bytes,
-            );
+                let clear_attachments = [
+                    vk::ClearAttachment {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        color_attachment: 0,
+                        clear_value: vk::ClearValue {
+                            color: vk::ClearColorValue {
+                                float32: [
+                                    color::BACKGROUND.x,
+                                    color::BACKGROUND.y,
+                                    color::BACKGROUND.z,
+                                    color::BACKGROUND.w,
+                                ],
+                            },
+                        },
+                    },
+                    vk::ClearAttachment {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        color_attachment: 0,
+                        clear_value: vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue {
+                                depth: 1.0,
+                                stencil: 0,
+                            },
+                        },
+                    },
+                ];
+                let clear_rect = vk::ClearRect {
+                    rect: vk::Rect2D {
+                        offset: vk::Offset2D { x: chase_x, y: 0 },
+                        extent: vk::Extent2D { width: chase_w, height },
+                    },
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                device.cmd_clear_attachments(self.command_buffer, &clear_attachments, &[clear_rect]);
 
-            device.cmd_bind_vertex_buffers(self.command_buffer, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_draw(self.command_buffer, self.vertex_count, 1, 0, 0);
+                let chase_viewport = vk::Viewport {
+                    x: chase_x as f32,
+                    y: 0.0,
+                    width: chase_w as f32,
+                    height: height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
+                device.cmd_set_viewport(self.command_buffer, 0, &[chase_viewport]);
 
-            // Tee box fill (black quad — masks grid lines under the tee box)
-            let pc_black = GridPushConstants {
-                view_proj: view_proj.to_cols_array_2d(),
-                color: [0.0, 0.0, 0.0, 1.0],
-                clip_bounds: NO_CLIP,
-            };
-            let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_black).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
-            device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.fill_pipeline,
-            );
-            device.cmd_bind_vertex_buffers(self.command_buffer, 0, &[self.fill_buffer], &[0]);
-            device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_black_bytes,
-            );
-            device.cmd_draw(self.command_buffer, self.tee_fill_count, 1, 0, 0);
+                let chase_scissor = vk::Rect2D {
+                    offset: vk::Offset2D { x: chase_x, y: 0 },
+                    extent: vk::Extent2D { width: chase_w, height },
+                };
+                device.cmd_set_scissor(self.command_buffer, 0, &[chase_scissor]);
 
-            // Tee box border (cyan filled quads — fill_pipeline still bound)
-            let pc_cyan = GridPushConstants {
-                view_proj: view_proj.to_cols_array_2d(),
-                color: color::CYAN.into(),
-                clip_bounds: NO_CLIP,
-            };
-            let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_cyan).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
-            device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_cyan_bytes,
-            );
-            device.cmd_draw(
-                self.command_buffer,
-                self.tee_border_count,
-                1,
-                self.tee_fill_count,
-                0,
-            );
+                let chase_aspect = chase_w as f32 / height as f32;
+                let chase_view_proj = Self::compute_view_proj(chase, chase_aspect);
+                self.draw_scene_geometry(chase_view_proj);
 
-            // Ball glow (additive blend, magenta — draw before ball so ball occludes center)
-            let pc_magenta = GridPushConstants {
-                view_proj: view_proj.to_cols_array_2d(),
-                color: color::MAGENTA.into(),
-                clip_bounds: NO_CLIP,
-            };
-            let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_magenta).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
-            device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.glow_pipeline,
-            );
-            device.cmd_bind_vertex_buffers(self.command_buffer, 0, &[self.glow_buffer], &[0]);
-            device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_magenta_bytes,
-            );
-            device.cmd_draw(self.command_buffer, self.glow_count, 1, 0, 0);
-
-            // Ball (black sphere — occludes glow center, revealing outline)
-            let pc_black = GridPushConstants {
-                view_proj: view_proj.to_cols_array_2d(),
-                color: [0.0, 0.0, 0.0, 1.0],
-                clip_bounds: NO_CLIP,
-            };
-            let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_black).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
-            device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.fill_pipeline,
-            );
-            device.cmd_bind_vertex_buffers(self.command_buffer, 0, &[self.fill_buffer], &[0]);
-            device.cmd_push_constants(
-                self.command_buffer,
-                self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_black_bytes,
-            );
-            device.cmd_draw(
-                self.command_buffer,
-                self.ball_count,
-                1,
-                self.tee_fill_count + self.tee_border_count,
-                0,
-            );
+                // Restore full viewport for HUD
+                device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+                device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+            }
 
             // HUD overlay (2D, pixel coordinates)
             if self.hud_fill_count > 0 || self.hud_line_count > 0 {
@@ -826,6 +913,7 @@ impl OffscreenRenderer {
                             vk::PipelineBindPoint::GRAPHICS,
                             self.pipeline.pipeline,
                         );
+                        device.cmd_set_line_width(self.command_buffer, 1.0);
                         device.cmd_bind_vertex_buffers(
                             self.command_buffer,
                             0,
@@ -1029,7 +1117,7 @@ impl OffscreenRenderer {
         );
 
         // Step 2: Trace RT reflection rays.
-        rt.record_trace(device, self.command_buffer, &pc);
+        rt.record_trace(device, self.command_buffer, &pc, width, height);
 
         // Step 3: Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
         device.cmd_pipeline_barrier(
@@ -1393,6 +1481,9 @@ impl Drop for OffscreenRenderer {
             self.gpu.device.destroy_buffer(self.vertex_buffer, None);
             self.gpu.device.destroy_buffer(self.fill_buffer, None);
             self.gpu.device.destroy_buffer(self.glow_buffer, None);
+            if let Some(buf) = self.trail_line_buffer {
+                self.gpu.device.destroy_buffer(buf, None);
+            }
             if let Some(buf) = self.hud_line_buffer {
                 self.gpu.device.destroy_buffer(buf, None);
             }
@@ -1407,6 +1498,9 @@ impl Drop for OffscreenRenderer {
                 let _ = self.gpu.allocator.free(alloc);
             }
             if let Some(alloc) = self.glow_allocation.take() {
+                let _ = self.gpu.allocator.free(alloc);
+            }
+            if let Some(alloc) = self.trail_line_allocation.take() {
                 let _ = self.gpu.allocator.free(alloc);
             }
             if let Some(alloc) = self.hud_line_allocation.take() {

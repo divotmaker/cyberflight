@@ -16,6 +16,19 @@ pub struct TrailPoint {
     pub time: f64,
 }
 
+/// Phase of a ball flight for visual treatment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlightPhase {
+    /// Ball is airborne (aerodynamic flight).
+    InFlight,
+    /// Ball is bouncing on the ground.
+    Bouncing,
+    /// Ball is rolling on the ground.
+    Rolling,
+    /// Ball has come to rest.
+    Stopped,
+}
+
 /// A ball flight being displayed on the range.
 #[derive(Debug, Clone)]
 pub struct BallFlight {
@@ -25,10 +38,14 @@ pub struct BallFlight {
     pub position: Vec3,
     /// Whether the ball is still in flight (vs. landed).
     pub active: bool,
+    /// Current phase of the ball flight.
+    pub phase: FlightPhase,
     /// Flight start time (seconds since range start).
     pub start_time: f64,
     /// Trail color hint (index into color palette based on shot shape).
     pub color_index: u32,
+    /// Total distance from tee (yards), updated as the shot progresses.
+    pub total_yards: f64,
 }
 
 impl BallFlight {
@@ -39,8 +56,10 @@ impl BallFlight {
             trail: Vec::with_capacity(512),
             position: Vec3::ZERO,
             active: true,
+            phase: FlightPhase::InFlight,
             start_time,
             color_index: 0,
+            total_yards: 0.0,
         }
     }
 
@@ -62,9 +81,15 @@ impl BallFlight {
         self.trail.retain(|p| p.time >= cutoff);
     }
 
-    /// Mark the ball as landed.
+    /// Mark the ball as landed / stopped.
     pub fn land(&mut self) {
         self.active = false;
+        self.phase = FlightPhase::Stopped;
+    }
+
+    /// Set the current flight phase.
+    pub fn set_phase(&mut self, phase: FlightPhase) {
+        self.phase = phase;
     }
 
     /// Get trail points for rendering.
@@ -241,6 +266,67 @@ pub fn generate_trail_glow(
         }
     }
 
+    // ── Rounded endcap at the ball (newest) end ──
+    // Semicircular fan that wraps the ribbon forward around the ball position,
+    // eliminating the flat edge where trail glow meets ball glow.
+    {
+        let last = trail[n - 1].position;
+        let prev = trail[n - 2].position;
+        let tangent = (last - prev).normalize_or_zero();
+        let to_camera = (camera_pos - last).normalize_or_zero();
+        let right = tangent.cross(to_camera).normalize_or_zero();
+
+        let v = |pos: Vec3, fade: f32| GridVertex {
+            position: pos.into(),
+            fade,
+        };
+
+        if right.length_squared() > 0.001 {
+            let t_last = (1.0 - (current_time - trail[n - 1].time) / max_lifetime)
+                .clamp(0.0, 1.0) as f32;
+
+            let cap_segments: u32 = 8;
+
+            // Core endcap
+            let core_w = ball_radius;
+            let core_fade = (1.0 - t_last) * 0.7;
+            for s in 0..cap_segments {
+                let theta0 = std::f32::consts::PI * s as f32 / cap_segments as f32;
+                let theta1 = std::f32::consts::PI * (s + 1) as f32 / cap_segments as f32;
+                let p0 = last + core_w * (theta0.cos() * right + theta0.sin() * tangent);
+                let p1 = last + core_w * (theta1.cos() * right + theta1.sin() * tangent);
+                out.push(v(last, core_fade));
+                out.push(v(p0, core_fade));
+                out.push(v(p1, core_fade));
+            }
+
+            // Glow shell endcaps
+            for shell in 0..num_shells {
+                let st = shell as f32 / (num_shells - 1) as f32;
+                let shell_r = r_min * (r_max / r_min).powf(st * st);
+                let age = 1.0 - t_last;
+                let spread = 1.0 + 0.5 * age;
+                let w = shell_r * spread;
+
+                let shell_fade_boost = 1.0 + 2.0 * st;
+                let fade = (GLOW_SHELL_FADE
+                    + (1.0 - GLOW_SHELL_FADE) * (1.0 - t_last) * shell_fade_boost)
+                    .min(1.0);
+
+                for s in 0..cap_segments {
+                    let theta0 = std::f32::consts::PI * s as f32 / cap_segments as f32;
+                    let theta1 =
+                        std::f32::consts::PI * (s + 1) as f32 / cap_segments as f32;
+                    let p0 = last + w * (theta0.cos() * right + theta0.sin() * tangent);
+                    let p1 = last + w * (theta1.cos() * right + theta1.sin() * tangent);
+                    out.push(v(last, fade));
+                    out.push(v(p0, fade));
+                    out.push(v(p1, fade));
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -344,6 +430,34 @@ mod tests {
         let mut flight = BallFlight::new(0.0);
         flight.land();
         assert!(!flight.active);
+        assert_eq!(flight.phase, FlightPhase::Stopped);
+    }
+
+    #[test]
+    fn new_flight_phase_is_in_flight() {
+        let flight = BallFlight::new(0.0);
+        assert_eq!(flight.phase, FlightPhase::InFlight);
+    }
+
+    #[test]
+    fn phase_transitions() {
+        let mut flight = BallFlight::new(0.0);
+        assert_eq!(flight.phase, FlightPhase::InFlight);
+
+        flight.set_phase(FlightPhase::Bouncing);
+        assert_eq!(flight.phase, FlightPhase::Bouncing);
+
+        flight.set_phase(FlightPhase::Rolling);
+        assert_eq!(flight.phase, FlightPhase::Rolling);
+
+        flight.land();
+        assert_eq!(flight.phase, FlightPhase::Stopped);
+    }
+
+    #[test]
+    fn total_yards_starts_at_zero() {
+        let flight = BallFlight::new(0.0);
+        assert!((flight.total_yards - 0.0).abs() < f64::EPSILON);
     }
 
     fn make_trail(n: usize) -> Vec<TrailPoint> {

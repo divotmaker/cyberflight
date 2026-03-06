@@ -4,8 +4,11 @@ use glam::Vec3;
 
 use crate::grid::GridVertex;
 
-/// Tee box surface elevation above Y=0 (1mm) to prevent z-fighting with the floor.
+/// Tee box fill elevation above Y=0 (1mm) to prevent z-fighting with the floor.
 pub const TEE_ELEVATION: f32 = 0.001;
+
+/// Tee box border elevation — slightly above fill to prevent z-fighting between them.
+pub const TEE_BORDER_ELEVATION: f32 = 0.002;
 
 /// Tee box configuration.
 #[derive(Debug, Clone, Copy)]
@@ -65,7 +68,7 @@ pub fn generate_tee_fill(tee: &TeeBox) -> Vec<GridVertex> {
 pub fn generate_tee_border(tee: &TeeBox) -> Vec<GridVertex> {
     let inner = tee.half_size - tee.border / 2.0;
     let outer = tee.half_size + tee.border / 2.0;
-    let y = TEE_ELEVATION;
+    let y = TEE_BORDER_ELEVATION;
 
     let v = |x: f32, z: f32| GridVertex {
         position: [x, y, z],
@@ -241,19 +244,28 @@ mod tests {
     }
 
     #[test]
-    fn tee_box_at_elevation() {
+    fn tee_fill_at_elevation() {
         let tee = TeeBox::default();
-        let all: Vec<GridVertex> = generate_tee_fill(&tee)
-            .into_iter()
-            .chain(generate_tee_border(&tee))
-            .collect();
-        for v in &all {
+        for v in &generate_tee_fill(&tee) {
             assert!(
                 (v.position[1] - TEE_ELEVATION).abs() < 1e-6,
-                "tee box vertex should be at TEE_ELEVATION, got {}",
+                "tee fill vertex should be at TEE_ELEVATION, got {}",
                 v.position[1]
             );
         }
+    }
+
+    #[test]
+    fn tee_border_above_fill() {
+        let tee = TeeBox::default();
+        for v in &generate_tee_border(&tee) {
+            assert!(
+                (v.position[1] - TEE_BORDER_ELEVATION).abs() < 1e-6,
+                "tee border vertex should be at TEE_BORDER_ELEVATION, got {}",
+                v.position[1]
+            );
+        }
+        assert!(TEE_BORDER_ELEVATION > TEE_ELEVATION);
     }
 
     #[test]

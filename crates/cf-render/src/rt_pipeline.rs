@@ -9,11 +9,11 @@ use crate::error::RenderError;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RtPushConstants {
-    /// Camera position (xyz), w unused.
+    /// Camera position (xyz), w = viewport X offset in pixels.
     pub camera_pos: [f32; 4],
     /// Inverse view-projection matrix (screen → world).
     pub inv_view_proj: [[f32; 4]; 4],
-    /// Grid parameters: [spacing_m, line_half_width, max_fade_dist, unused].
+    /// Grid parameters: [spacing_m, line_half_width, max_fade_dist, viewport_y_offset].
     pub grid_params: [f32; 4],
     /// Ball position (xyz), w = trail fade distance in meters.
     pub ball_pos: [f32; 4],
@@ -21,7 +21,7 @@ pub struct RtPushConstants {
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
 pub const GEOM_FLOOR: u32 = 0;
-pub const GEOM_BALL: u32 = 1;
+// GEOM_BALL (1) removed — ball reflections are analytical in the floor shader.
 pub const GEOM_TEE_BOX: u32 = 2;
 pub const GEOM_TRAIL: u32 = 3;
 pub const GEOM_TEE_BOX_BORDER: u32 = 4;
@@ -82,7 +82,7 @@ pub struct RtPipeline {
 pub struct RtGeometry {
     /// Packed f32x3 positions (3 floats per vertex, 3 vertices per triangle).
     pub positions: Vec<f32>,
-    /// Geometry type ID (GEOM_FLOOR, GEOM_BALL, etc.).
+    /// Geometry type ID (GEOM_FLOOR, GEOM_TEE_BOX, etc.).
     pub geom_type: u32,
     /// 3×4 row-major transform (identity if not set).
     pub transform: glam::Mat4,
@@ -399,11 +399,15 @@ impl RtPipeline {
     /// Record RT dispatch commands into the given command buffer.
     ///
     /// The storage image must be in `GENERAL` layout before calling this.
+    /// `dispatch_w` and `dispatch_h` control the trace dimensions (may be
+    /// smaller than the storage image for sub-viewport traces).
     pub fn record_trace(
         &self,
         device: &ash::Device,
         cb: vk::CommandBuffer,
         push_constants: &RtPushConstants,
+        dispatch_w: u32,
+        dispatch_h: u32,
     ) {
         let callable_region = vk::StridedDeviceAddressRegionKHR::default();
 
@@ -442,8 +446,8 @@ impl RtPipeline {
                 &self.miss_region,
                 &self.hit_region,
                 &callable_region,
-                self.width,
-                self.height,
+                dispatch_w,
+                dispatch_h,
                 1,
             );
         }
@@ -681,9 +685,9 @@ impl RtPipeline {
             // hits from the glass floor shader. It only exists for raster depth.
             let mask = match geom.geom_type {
                 GEOM_FLOOR => 0x01,
-                GEOM_TEE_BOX => 0x80, // invisible to all RT rays (0x01|0x02|0x04)
+                GEOM_TEE_BOX => 0x80, // invisible to all RT rays
                 GEOM_TRAIL => 0x04,
-                _ => 0x02, // ball, tee box border
+                _ => 0x02, // tee box border
             };
             instances.push(
                 vk::AccelerationStructureInstanceKHR {

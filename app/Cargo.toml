@@ -10,8 +10,12 @@ repository.workspace = true
 cf-math.workspace = true
 cf-scene.workspace = true
 cf-render.workspace = true
+flighthook.workspace = true
 anyhow.workspace = true
 winit.workspace = true
 raw-window-handle.workspace = true
 glam.workspace = true
 image.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

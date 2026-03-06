@@ -1,7 +1,7 @@
 use cf_scene::grid::GridConfig;
-use cf_scene::tee::{TeeBox, generate_ball_at, generate_tee_border, generate_tee_fill};
+use cf_scene::tee::{TeeBox, generate_tee_border, generate_tee_fill};
 
-use crate::rt_pipeline::{GEOM_BALL, GEOM_FLOOR, GEOM_TEE_BOX, GEOM_TEE_BOX_BORDER, GEOM_TRAIL, RtGeometry};
+use crate::rt_pipeline::{GEOM_FLOOR, GEOM_TEE_BOX, GEOM_TEE_BOX_BORDER, GEOM_TRAIL, RtGeometry};
 
 // ── Scene geometry builders ──
 
@@ -17,10 +17,12 @@ pub fn grid_verts_to_positions(verts: &[cf_scene::grid::GridVertex]) -> Vec<f32>
 }
 
 /// Build the full RT scene geometry from the driving range config.
+///
+/// Ball reflections are computed analytically in the floor closest-hit shader
+/// (no ball geometry in the TLAS). Trail reflections use ray-traced geometry.
 pub fn build_scene_geometry(
     grid_config: &GridConfig,
     tee: &TeeBox,
-    ball_center: glam::Vec3,
     trail_points: &[glam::Vec3],
 ) -> Vec<RtGeometry> {
     let mut geometries = Vec::new();
@@ -30,25 +32,6 @@ pub fn build_scene_geometry(
     geometries.push(RtGeometry {
         positions: grid_verts_to_positions(&floor_verts),
         geom_type: GEOM_FLOOR,
-        transform: glam::Mat4::IDENTITY,
-    });
-
-    // Ball: tessellated sphere at current position.
-    // Use 6x radius for the RT halo geometry — the rchit shader computes
-    // a smooth falloff from the center, so the outer shell is dim and acts
-    // as the glow halo. Large enough that grazing-angle reflection rays
-    // from the floor reliably intersect it. The sphere center is lifted so
-    // the bottom sits at Y=0 (the floor).
-    let visual_ball_radius = tee.ball_radius * 6.0;
-    let rt_ball_center = glam::Vec3::new(
-        ball_center.x,
-        visual_ball_radius,
-        ball_center.z,
-    );
-    let ball_verts = generate_ball_at(rt_ball_center, visual_ball_radius, 12, 24);
-    geometries.push(RtGeometry {
-        positions: grid_verts_to_positions(&ball_verts),
-        geom_type: GEOM_BALL,
         transform: glam::Mat4::IDENTITY,
     });
 

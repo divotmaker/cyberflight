@@ -96,6 +96,7 @@ impl Renderer {
                         vk::PipelineBindPoint::GRAPHICS,
                         self.hud_line_pipeline,
                     );
+                    device.cmd_set_line_width(cb, 1.0);
                     device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_line_buffer], &[0]);
                     device.cmd_push_constants(
                         cb,
