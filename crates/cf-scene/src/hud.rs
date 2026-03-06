@@ -310,10 +310,10 @@ pub fn build_hud(
         y = emit_section_header(&mut lines, "FLIGHT", y, panel_w, &sc);
         y = emit_row(&mut lines, "APEX", &fmt_height(t.apex_m), y, panel_w, &sc);
         y = emit_row(&mut lines, "CARRY", &fmt_dist(t.carry_yards), y, panel_w, &sc);
-        if t.lm_carry_yards.is_some() {
+        if let Some(lm_carry) = t.lm_carry_yards {
             let carry_complete = t.elapsed_s >= t.flight_time_s;
             let lm_text = if carry_complete {
-                fmt_dist(t.lm_carry_yards.unwrap())
+                fmt_dist(lm_carry)
             } else {
                 "-".to_owned()
             };
