@@ -528,11 +528,16 @@ impl Renderer {
             height,
         )?;
 
+        // Use the swapchain's actual extent — it may differ from the requested
+        // width/height after surface capabilities clamping.
+        let actual_w = self.swapchain.extent.width;
+        let actual_h = self.swapchain.extent.height;
+
         let (ds_image, ds_view, ds_alloc) = Self::create_depth_stencil(
             &self.gpu.device,
             &mut self.gpu.allocator,
-            width,
-            height,
+            actual_w,
+            actual_h,
         )?;
         self.depth_stencil_image = ds_image;
         self.depth_stencil_view = ds_view;
@@ -549,6 +554,15 @@ impl Renderer {
             &self.swapchain,
             self.hud_render_pass,
         )?;
+        // Resize RT storage image and update composite descriptor to match.
+        if let Some(ref mut rtp) = self.rt_pipeline {
+            rtp.resize_storage(
+                &self.gpu.device,
+                &mut self.gpu.allocator,
+                actual_w,
+                actual_h,
+            )?;
+        }
         if let Some(ref mut composite) = self.composite {
             for fb in composite.framebuffers.drain(..) {
                 // SAFETY: Composite framebuffers no longer in use (waited idle above).
@@ -559,6 +573,22 @@ impl Renderer {
                 &self.swapchain,
                 composite.render_pass,
             )?;
+
+            // Update composite descriptor set to point at the resized RT storage image.
+            if let Some(ref rtp) = self.rt_pipeline {
+                let image_info = vk::DescriptorImageInfo::default()
+                    .image_view(rtp.storage_view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .sampler(composite.sampler);
+                let image_infos = [image_info];
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(composite.descriptor_set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&image_infos);
+                // SAFETY: Updating descriptor set with valid image view.
+                unsafe { self.gpu.device.update_descriptor_sets(&[write], &[]) };
+            }
         }
 
         // Reallocate command buffers if image count changed

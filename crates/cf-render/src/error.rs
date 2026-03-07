@@ -29,4 +29,7 @@ pub enum RenderError {
 
     #[error("swapchain error: {0}")]
     Swapchain(String),
+
+    #[error("stream error: {0}")]
+    Stream(String),
 }

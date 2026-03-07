@@ -396,6 +396,55 @@ impl RtPipeline {
         })
     }
 
+    /// Resize the RT storage image to new dimensions.
+    ///
+    /// Destroys the old storage image/view and creates a new one, then updates
+    /// the RT descriptor set (binding 1) to point at the new image.
+    /// The device must be idle before calling this.
+    pub fn resize_storage(
+        &mut self,
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
+        if width == self.width && height == self.height {
+            return Ok(());
+        }
+
+        // SAFETY: Device is idle (caller guarantees).
+        unsafe {
+            device.destroy_image_view(self.storage_view, None);
+            device.destroy_image(self.storage_image, None);
+        }
+        if let Some(alloc) = self.storage_allocation.take() {
+            let _ = allocator.free(alloc);
+        }
+
+        let (image, view, allocation) =
+            Self::create_storage_image(device, allocator, width, height)?;
+        self.storage_image = image;
+        self.storage_view = view;
+        self.storage_allocation = Some(allocation);
+        self.width = width;
+        self.height = height;
+
+        // Update RT descriptor set binding 1 (storage image).
+        let image_info = vk::DescriptorImageInfo::default()
+            .image_view(view)
+            .image_layout(vk::ImageLayout::GENERAL);
+        let image_infos = [image_info];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.descriptor_set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .image_info(&image_infos);
+        // SAFETY: Updating descriptor set with valid image view.
+        unsafe { device.update_descriptor_sets(&[write], &[]) };
+
+        Ok(())
+    }
+
     /// Record RT dispatch commands into the given command buffer.
     ///
     /// The storage image must be in `GENERAL` layout before calling this.

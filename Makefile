@@ -2,8 +2,18 @@ SHADER_DIR := crates/cf-render/shaders
 
 mode ?= raster
 
+preset ?= quality
+
 run:
 	CF_RENDER_MODE=$(mode) cargo run -p cyberflight --bin cyberflight -- --windowed
+
+stream:
+	cargo run --release -p cyberflight --bin cyberflight -- --stream --preset $(preset)
+
+port ?= 8080
+
+stream-hls:
+	cargo run --release -p cyberflight --bin cyberflight -- --stream --mode hls --serve --port $(port) --preset $(preset)
 
 WIN_TARGET := x86_64-pc-windows-gnu
 
@@ -70,4 +80,4 @@ buildtools:
 	@which cargo > /dev/null 2>&1 || (echo "cargo not found — install Rust toolchain" && exit 1)
 	@echo "All build tools present."
 
-.PHONY: run build build-release build-windows deploy test test-gpu clippy clean shaders screenshots buildtools
+.PHONY: run stream stream-hls build build-release build-windows deploy test test-gpu clippy clean shaders screenshots buildtools

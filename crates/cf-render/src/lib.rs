@@ -8,4 +8,5 @@ pub mod readback;
 pub mod render;
 pub mod rt_offscreen;
 pub mod rt_pipeline;
+pub mod stream;
 pub mod window;

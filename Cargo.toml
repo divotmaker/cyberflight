@@ -34,3 +34,4 @@ cf-scene = { path = "crates/cf-scene" }
 cf-render = { path = "crates/cf-render" }
 cf-test = { path = "crates/cf-test" }
 flighthook = { version = "0.0.7", features = ["client"] }
+tiny_http = "0.12"
