@@ -40,7 +40,7 @@ struct App {
     client: Option<FlighthookClient>,
     /// Accumulates shot lifecycle events into complete ShotData.
     shots: ShotAggregator,
-    /// Last known armed state per launch monitor source ID.
+    /// Last known ready state per launch monitor source ID.
     lm_states: HashMap<String, bool>,
     /// Whether the flighthook WebSocket connection is alive.
     flighthook_connected: bool,
@@ -171,8 +171,10 @@ impl App {
                     Ok(Some(msg)) => {
                         // Always update launch monitor status.
                         match &msg.event {
-                            FlighthookEvent::LaunchMonitorState { armed, .. } => {
-                                self.lm_states.insert(msg.source.clone(), *armed);
+                            FlighthookEvent::DeviceInfo { telemetry: Some(t), .. } => {
+                                if let Some(ready) = t.get("ready") {
+                                    self.lm_states.insert(msg.source.clone(), ready == "true");
+                                }
                             }
                             FlighthookEvent::ActorStatus { status, .. }
                                 if *status == flighthook::ActorStatus::Disconnected =>
@@ -184,15 +186,16 @@ impl App {
                         // Only feed the shot aggregator when idle.
                         if !animating {
                             if let Some(shot_data) = self.shots.feed(&msg) {
-                                let received = ReceivedShot::from_flighthook(&shot_data);
-                                self.flights.push(AnimatedFlight::from_received(
-                                    &received,
-                                    now,
-                                    &BallModel::TOUR,
-                                    &self.environment,
-                                    &self.range.targets,
-                                ));
-                                self.last_launch = now;
+                                if let Some(received) = ReceivedShot::from_flighthook(&shot_data) {
+                                    self.flights.push(AnimatedFlight::from_received(
+                                        &received,
+                                        now,
+                                        &BallModel::TOUR,
+                                        &self.environment,
+                                        &self.range.targets,
+                                    ));
+                                    self.last_launch = now;
+                                }
                             }
                         }
                     }

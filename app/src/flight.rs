@@ -379,8 +379,10 @@ impl FlighthookState {
                 match client.try_recv() {
                     Ok(Some(msg)) => {
                         match &msg.event {
-                            FlighthookEvent::LaunchMonitorState { armed, .. } => {
-                                self.lm_states.insert(msg.source.clone(), *armed);
+                            FlighthookEvent::DeviceInfo { telemetry: Some(t), .. } => {
+                                if let Some(ready) = t.get("ready") {
+                                    self.lm_states.insert(msg.source.clone(), ready == "true");
+                                }
                             }
                             FlighthookEvent::ActorStatus { status, .. }
                                 if *status == flighthook::ActorStatus::Disconnected =>
@@ -391,7 +393,7 @@ impl FlighthookState {
                         }
                         if !animating {
                             if let Some(shot_data) = self.shots.feed(&msg) {
-                                result = Some(ReceivedShot::from_flighthook(&shot_data));
+                                result = ReceivedShot::from_flighthook(&shot_data);
                             }
                         }
                     }

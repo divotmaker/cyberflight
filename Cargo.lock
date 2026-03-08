@@ -65,15 +65,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
-name = "android_system_properties"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -265,7 +256,7 @@ checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cf-math"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "approx",
  "glam",
@@ -275,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "cf-render"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "ash",
  "ash-window",
@@ -290,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "cf-scene"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "cf-math",
  "flighthook",
@@ -302,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "cf-test"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "cf-math",
  "cf-render",
@@ -325,20 +316,6 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
-
-[[package]]
-name = "chrono"
-version = "0.4.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
-dependencies = [
- "iana-time-zone",
- "js-sys",
- "num-traits",
- "serde",
- "wasm-bindgen",
- "windows-link",
-]
 
 [[package]]
 name = "chunked_transfer"
@@ -496,7 +473,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cyberflight"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "cf-math",
@@ -609,14 +586,25 @@ dependencies = [
 
 [[package]]
 name = "flighthook"
-version = "0.0.7"
+version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ec19883cc22a086a1aa8e3b19775b3c175aece56feb02035e1f2b58909c19d"
+checksum = "de07ab38150401c34a5eb355510b7548ee998b7cc03f54bc8dd103641c2834cc"
 dependencies = [
- "chrono",
+ "flightrelay",
  "serde",
  "serde_json",
  "tungstenite",
+]
+
+[[package]]
+name = "flightrelay"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae1196a039b10b2e11aea6d1fcf06561b1009b3afb3a51cb6cef5e584a31fb7a"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -800,30 +788,6 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "id-arena"

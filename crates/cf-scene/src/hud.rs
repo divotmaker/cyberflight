@@ -227,7 +227,7 @@ impl HudScale {
 /// Returns line vertices (for text + decorations) and fill vertices (panel background).
 /// Designed for the left 20% of the screen with a telemetry/rocket-monitoring feel.
 ///
-/// `lm_states`: per-source armed state map.
+/// `lm_states`: per-source ready state map.
 /// `connected`: whether the flighthook connection is alive.
 pub fn build_hud(
     telemetry: Option<&ShotTelemetry>,
