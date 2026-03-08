@@ -228,7 +228,7 @@ impl HudScale {
 /// Designed for the left 20% of the screen with a telemetry/rocket-monitoring feel.
 ///
 /// `lm_states`: per-source ready state map.
-/// `connected`: whether the flighthook connection is alive.
+/// `connected`: whether the FRP connection is alive.
 pub fn build_hud(
     telemetry: Option<&ShotTelemetry>,
     units: UnitSystem,
@@ -346,7 +346,7 @@ pub fn build_hud(
             let multi = lm_states.len() > 1;
             for (source, &armed) in lm_states {
                 let label = if multi { source.as_str() } else { "LAUNCH MONITOR" };
-                let (status, vfade) = if armed { ("ARMED", 0.0) } else { ("STANDBY", LABEL_FADE) };
+                let (status, vfade) = if armed { ("READY", 0.0) } else { ("WAITING", LABEL_FADE) };
                 rows.push((label, status, LABEL_FADE, vfade));
             }
         }

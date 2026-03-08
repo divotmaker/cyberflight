@@ -256,7 +256,7 @@ checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cf-math"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "approx",
  "glam",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "cf-render"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "ash",
  "ash-window",
@@ -281,10 +281,10 @@ dependencies = [
 
 [[package]]
 name = "cf-scene"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "cf-math",
- "flighthook",
+ "flightrelay",
  "glam",
  "serde",
  "serde_json",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "cf-test"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "cf-math",
  "cf-render",
@@ -473,13 +473,13 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cyberflight"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "cf-math",
  "cf-render",
  "cf-scene",
- "flighthook",
+ "flightrelay",
  "glam",
  "image",
  "raw-window-handle",
@@ -585,26 +585,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "flighthook"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de07ab38150401c34a5eb355510b7548ee998b7cc03f54bc8dd103641c2834cc"
-dependencies = [
- "flightrelay",
- "serde",
- "serde_json",
- "tungstenite",
-]
-
-[[package]]
 name = "flightrelay"
-version = "0.1.0"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae1196a039b10b2e11aea6d1fcf06561b1009b3afb3a51cb6cef5e584a31fb7a"
+checksum = "a0074be0f495eee3a5f51ef1501c91370777e1c35ac8f137e5b767c7796c630a"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tungstenite",
 ]
 
 [[package]]

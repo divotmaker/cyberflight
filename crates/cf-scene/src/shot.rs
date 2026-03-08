@@ -1,11 +1,11 @@
-//! Shot data model — bridges flighthook schemas to cyberflight's physics engine.
+//! Shot data model — bridges flightrelay (FRP) schemas to cyberflight's physics engine.
 //!
-//! Converts `flighthook::ShotData` into `cf_math::ShotInput` for flight simulation,
+//! Converts `flightrelay::CompletedShot` into `cf_math::ShotInput` for flight simulation,
 //! and extracts club/ball data for HUD display.
 
 use cf_math::trajectory::ShotInput;
 
-/// Club delivery data extracted from a flighthook shot.
+/// Club delivery data extracted from an FRP shot.
 ///
 /// All angles in degrees. Fields are optional because not all launch monitors
 /// provide them (e.g. Mevo+ doesn't report face angle or dynamic loft).
@@ -19,10 +19,10 @@ pub struct ClubDelivery {
     pub smash_factor: Option<f64>,
 }
 
-/// A complete shot received from flighthook, ready for simulation and display.
+/// A complete shot received from flightrelay, ready for simulation and display.
 #[derive(Debug, Clone)]
 pub struct ReceivedShot {
-    pub source: String,
+    pub device: String,
     pub shot_number: u32,
     pub input: ShotInput,
     pub club: ClubDelivery,
@@ -31,11 +31,11 @@ pub struct ReceivedShot {
 }
 
 impl ReceivedShot {
-    /// Convert a flighthook `ShotData` into a `ReceivedShot`.
+    /// Convert an FRP `CompletedShot` into a `ReceivedShot`.
     ///
     /// Returns `None` if the shot has no ball flight data (nothing to simulate).
     #[must_use]
-    pub fn from_flighthook(shot: &flighthook::ShotData) -> Option<Self> {
+    pub fn from_frp(shot: &flightrelay::CompletedShot) -> Option<Self> {
         let ball = shot.ball.as_ref()?;
 
         let input = ShotInput {
@@ -60,8 +60,8 @@ impl ReceivedShot {
         let lm_carry_yards = ball.carry_distance.map(|d| d.as_yards());
 
         Some(Self {
-            source: shot.source.clone(),
-            shot_number: shot.shot_number,
+            device: shot.device.clone(),
+            shot_number: shot.key.shot_number,
             input,
             club,
             lm_carry_yards,
@@ -72,12 +72,15 @@ impl ReceivedShot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flighthook::{BallFlight, ClubData, ShotData, Velocity};
+    use flightrelay::{BallFlight, ClubData, CompletedShot, ShotKey, Velocity};
 
-    fn sample_shot_data() -> ShotData {
-        ShotData {
-            source: "mevo.0".to_owned(),
-            shot_number: 1,
+    fn sample_completed_shot() -> CompletedShot {
+        CompletedShot {
+            device: "mevo.0".to_owned(),
+            key: ShotKey {
+                shot_id: "test-uuid".to_owned(),
+                shot_number: 1,
+            },
             ball: Some(BallFlight {
                 launch_speed: Some(Velocity::MilesPerHour(167.0)),
                 launch_elevation: Some(10.5),
@@ -109,7 +112,7 @@ mod tests {
 
     #[test]
     fn converts_ball_flight_to_shot_input() {
-        let shot = ReceivedShot::from_flighthook(&sample_shot_data()).unwrap();
+        let shot = ReceivedShot::from_frp(&sample_completed_shot()).unwrap();
         assert!((shot.input.ball_speed_mph - 167.0).abs() < 0.01);
         assert!((shot.input.launch_angle_deg - 10.5).abs() < 0.01);
         assert!((shot.input.launch_azimuth_deg - -1.2).abs() < 0.01);
@@ -119,7 +122,7 @@ mod tests {
 
     #[test]
     fn extracts_club_delivery() {
-        let shot = ReceivedShot::from_flighthook(&sample_shot_data()).unwrap();
+        let shot = ReceivedShot::from_frp(&sample_completed_shot()).unwrap();
         assert!((shot.club.club_speed_mph.unwrap() - 112.0).abs() < 0.01);
         assert!((shot.club.path_deg.unwrap() - -2.1).abs() < 0.01);
         assert!((shot.club.attack_angle_deg.unwrap() - -1.5).abs() < 0.01);
@@ -130,34 +133,34 @@ mod tests {
 
     #[test]
     fn handles_missing_club_data() {
-        let mut data = sample_shot_data();
+        let mut data = sample_completed_shot();
         data.club = None;
-        let shot = ReceivedShot::from_flighthook(&data).unwrap();
+        let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!(shot.club.club_speed_mph.is_none());
         assert!(shot.club.path_deg.is_none());
     }
 
     #[test]
     fn handles_missing_spin() {
-        let mut data = sample_shot_data();
+        let mut data = sample_completed_shot();
         data.ball.as_mut().unwrap().backspin_rpm = None;
         data.ball.as_mut().unwrap().sidespin_rpm = None;
-        let shot = ReceivedShot::from_flighthook(&data).unwrap();
+        let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!((shot.input.backspin_rpm - 2500.0).abs() < 0.01);
         assert!((shot.input.sidespin_rpm - 0.0).abs() < 0.01);
     }
 
     #[test]
     fn returns_none_without_ball_data() {
-        let mut data = sample_shot_data();
+        let mut data = sample_completed_shot();
         data.ball = None;
-        assert!(ReceivedShot::from_flighthook(&data).is_none());
+        assert!(ReceivedShot::from_frp(&data).is_none());
     }
 
     #[test]
     fn preserves_metadata() {
-        let shot = ReceivedShot::from_flighthook(&sample_shot_data()).unwrap();
-        assert_eq!(shot.source, "mevo.0");
+        let shot = ReceivedShot::from_frp(&sample_completed_shot()).unwrap();
+        assert_eq!(shot.device, "mevo.0");
         assert_eq!(shot.shot_number, 1);
     }
 }

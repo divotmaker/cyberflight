@@ -8,18 +8,18 @@ use cf_math::aero::BallModel;
 use cf_math::bounce::BounceSurface;
 use cf_math::environment::Environment;
 use cf_math::rollout::RolloutSurface;
-use cf_math::trajectory::{ShotInput, ShotResult, simulate_shot};
+use cf_math::trajectory::{simulate_shot, ShotInput, ShotResult};
 use cf_render::render::FlightRenderData;
 use cf_scene::camera::Camera;
-use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
+use cf_scene::hud::{build_hud, ShotTelemetry, UnitSystem};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::surface;
 use cf_scene::trail::TrailPoint;
 
-use flighthook::{FlighthookClient, FlighthookEvent, ShotAggregator};
+use flightrelay::{FrpClient, FrpEvent, FrpMessage, ShotAggregator};
 
-/// Default flighthook WebSocket URL.
-pub const FLIGHTHOOK_URL: &str = "ws://localhost:3030/api/ws";
+/// FRP spec version we support.
+const FRP_VERSION: &str = flightrelay::SPEC_VERSION;
 /// How long the chase camera lingers after the ball stops (seconds).
 pub const CHASE_LINGER_TIME: f64 = 5.0;
 /// Time constant for chase camera smoothing (seconds).
@@ -67,12 +67,14 @@ pub fn interpolate_timeline(points: &[TimelinePoint], t: f64) -> Option<DVec3> {
 
 /// Build a unified timeline from a ShotResult.
 pub fn build_timeline(result: &ShotResult) -> Vec<TimelinePoint> {
-    let mut timeline = Vec::with_capacity(
-        result.flight.points.len() + result.rollout.points.len() + 200,
-    );
+    let mut timeline =
+        Vec::with_capacity(result.flight.points.len() + result.rollout.points.len() + 200);
 
     for p in &result.flight.points {
-        timeline.push(TimelinePoint { time: p.time, pos: p.pos });
+        timeline.push(TimelinePoint {
+            time: p.time,
+            pos: p.pos,
+        });
     }
 
     let mut t_offset = result.flight.flight_time;
@@ -96,7 +98,10 @@ pub fn build_timeline(result: &ShotResult) -> Vec<TimelinePoint> {
                 (bounce.pos.y + vel.y * dt - 0.5 * G * dt * dt).max(0.0),
                 bounce.pos.z + vel.z * dt,
             );
-            timeline.push(TimelinePoint { time: t_offset + dt, pos });
+            timeline.push(TimelinePoint {
+                time: t_offset + dt,
+                pos,
+            });
         }
         t_offset += t_arc;
     }
@@ -151,8 +156,12 @@ impl AnimatedFlight {
         let rollout_yards = result.total_yards - result.flight.carry_yards;
         eprintln!(
             "Shot #{} from {}: {:.1} carry + {:.1} rollout = {:.1} total yds, {:.2}s",
-            shot.shot_number, shot.source,
-            result.flight.carry_yards, rollout_yards, result.total_yards, total_time,
+            shot.shot_number,
+            shot.device,
+            result.flight.carry_yards,
+            rollout_yards,
+            result.total_yards,
+            total_time,
         );
 
         Self {
@@ -172,8 +181,7 @@ impl AnimatedFlight {
         let shot_t = (now - self.launch_time).max(0.0);
         let t_clamped = shot_t.min(self.total_time);
 
-        let pos = interpolate_timeline(&self.timeline, t_clamped)
-            .unwrap_or(DVec3::ZERO);
+        let pos = interpolate_timeline(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO);
 
         let total_m = (pos.x * pos.x + pos.z * pos.z).sqrt();
         let downrange_m = pos.x;
@@ -184,7 +192,9 @@ impl AnimatedFlight {
             self.result.flight.carry_yards
         };
 
-        let club_speed_mph = self.club.club_speed_mph
+        let club_speed_mph = self
+            .club
+            .club_speed_mph
             .unwrap_or(self.input.ball_speed_mph / DEFAULT_SMASH_FACTOR);
 
         ShotTelemetry {
@@ -223,8 +233,7 @@ impl AnimatedFlight {
 
         let t_clamped = shot_t.min(self.total_time);
 
-        let ball_pos = interpolate_timeline(&self.timeline, t_clamped)
-            .map(traj_to_scene)?;
+        let ball_pos = interpolate_timeline(&self.timeline, t_clamped).map(traj_to_scene)?;
 
         let tail_duration = t_clamped * TRAIL_TAIL_FRACTION;
         let tail_start = (t_clamped - tail_duration).max(0.0);
@@ -244,7 +253,10 @@ impl AnimatedFlight {
             .last()
             .is_none_or(|last| (last.position - ball_pos).length() > 0.01)
         {
-            trail_points.push(TrailPoint { position: ball_pos, time: t_clamped });
+            trail_points.push(TrailPoint {
+                position: ball_pos,
+                time: t_clamped,
+            });
         }
 
         Some(FlightRenderData {
@@ -269,8 +281,7 @@ impl AnimatedFlight {
         };
 
         let ideal = if shot_t < self.total_time {
-            let ball_pos = interpolate_timeline(&self.timeline, shot_t)
-                .map(traj_to_scene)?;
+            let ball_pos = interpolate_timeline(&self.timeline, shot_t).map(traj_to_scene)?;
 
             let idx = self.timeline.partition_point(|p| p.time <= shot_t);
             let vel_idx = if idx > 0 { idx - 1 } else { 0 };
@@ -285,7 +296,11 @@ impl AnimatedFlight {
             let velocity = Vec3::new(vel.z as f32, vel.y as f32, vel.x as f32);
 
             let horiz_speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
-            let direction = if horiz_speed > 2.0 { velocity } else { shot_dir };
+            let direction = if horiz_speed > 2.0 {
+                velocity
+            } else {
+                shot_dir
+            };
 
             Camera::chase(ball_pos, direction, final_pos)
         } else if shot_t < self.total_time + CHASE_LINGER_TIME {
@@ -322,16 +337,16 @@ impl AnimatedFlight {
     }
 }
 
-/// Shared flighthook connection state used by both windowed and streaming modes.
-pub struct FlighthookState {
-    pub client: Option<FlighthookClient>,
+/// Shared FRP connection state used by both windowed and streaming modes.
+pub struct FrpState {
+    pub client: Option<FrpClient>,
     pub shots: ShotAggregator,
     pub lm_states: HashMap<String, bool>,
     pub connected: bool,
     pub last_reconnect_attempt: f64,
 }
 
-impl FlighthookState {
+impl FrpState {
     pub fn new() -> Self {
         let (client, connected) = Self::try_connect();
         Self {
@@ -343,11 +358,11 @@ impl FlighthookState {
         }
     }
 
-    pub fn try_connect() -> (Option<FlighthookClient>, bool) {
-        eprintln!("Connecting to flighthook at {FLIGHTHOOK_URL}...");
-        match FlighthookClient::connect(FLIGHTHOOK_URL, "cyberflight") {
+    pub fn try_connect() -> (Option<FrpClient>, bool) {
+        eprintln!("Connecting to FRP at {}...", flightrelay::DEFAULT_URL);
+        match FrpClient::connect(flightrelay::DEFAULT_URL, "cyberflight", &[FRP_VERSION]) {
             Ok(client) => {
-                eprintln!("Connected as {}", client.source_id());
+                eprintln!("Connected (FRP {})", client.version());
                 if let Err(e) = client.set_nonblocking(true) {
                     eprintln!("set_nonblocking failed: {e}");
                     return (None, false);
@@ -355,13 +370,13 @@ impl FlighthookState {
                 (Some(client), true)
             }
             Err(e) => {
-                eprintln!("flighthook not available: {e}");
+                eprintln!("FRP not available (expected {FRP_VERSION}): {e}");
                 (None, false)
             }
         }
     }
 
-    /// Poll flighthook for new shots. Returns any completed ReceivedShot.
+    /// Poll FRP for new shots. Returns any completed ReceivedShot.
     pub fn poll(&mut self, now: f64, animating: bool) -> Option<ReceivedShot> {
         // Reconnect if disconnected (try every 5 seconds).
         if self.client.is_none() && now - self.last_reconnect_attempt >= 5.0 {
@@ -378,28 +393,30 @@ impl FlighthookState {
             loop {
                 match client.try_recv() {
                     Ok(Some(msg)) => {
-                        match &msg.event {
-                            FlighthookEvent::DeviceInfo { telemetry: Some(t), .. } => {
-                                if let Some(ready) = t.get("ready") {
-                                    self.lm_states.insert(msg.source.clone(), ready == "true");
+                        // Update launch monitor ready state from device telemetry.
+                        if let FrpMessage::Envelope(env) = &msg {
+                            if let FrpEvent::DeviceTelemetry {
+                                telemetry: Some(t), ..
+                            } = &env.event
+                            {
+                                if let Some(ready) = t.get(flightrelay::types::telemetry::READY) {
+                                    self.lm_states.insert(env.device.clone(), ready == "true");
                                 }
                             }
-                            FlighthookEvent::ActorStatus { status, .. }
-                                if *status == flighthook::ActorStatus::Disconnected =>
-                            {
-                                self.lm_states.remove(&msg.source);
-                            }
-                            _ => {}
                         }
                         if !animating {
-                            if let Some(shot_data) = self.shots.feed(&msg) {
-                                result = ReceivedShot::from_flighthook(&shot_data);
+                            if let Some(completed) = self.shots.feed(&msg) {
+                                result = ReceivedShot::from_frp(&completed);
                             }
                         }
                     }
                     Ok(None) => break,
+                    Err(flightrelay::FrpError::Json(_)) => {
+                        // some messages may not be parsable due to extension
+                    }
+
                     Err(e) => {
-                        eprintln!("flighthook disconnected: {e}");
+                        eprintln!("FRP disconnected: {e}");
                         disconnected = true;
                         break;
                     }
@@ -465,7 +482,10 @@ impl FlightManager {
     /// Build HUD geometry for the current frame.
     /// Compute the chase camera for the most recent active flight (if any).
     pub fn chase_camera(&mut self, now: f64) -> Option<Camera> {
-        self.flights.iter_mut().rev().find_map(|f| f.chase_camera(now))
+        self.flights
+            .iter_mut()
+            .rev()
+            .find_map(|f| f.chase_camera(now))
     }
 
     pub fn build_hud(
@@ -473,7 +493,7 @@ impl FlightManager {
         now: f64,
         chase_active: bool,
         lm_states: &HashMap<String, bool>,
-        flighthook_connected: bool,
+        frp_connected: bool,
         screen_w: f32,
         screen_h: f32,
     ) -> cf_scene::hud::HudGeometry {
@@ -485,7 +505,7 @@ impl FlightManager {
             UnitSystem::Imperial,
             chase_active,
             lm_states,
-            flighthook_connected,
+            frp_connected,
             screen_w,
             screen_h,
         )

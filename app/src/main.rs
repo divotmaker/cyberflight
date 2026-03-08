@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use cf_math::aero::BallModel;
@@ -17,15 +17,13 @@ use cf_math::environment::Environment;
 use cf_render::context::{GpuConfig, GpuContext};
 use cf_render::render::{FlightRenderData, Renderer};
 use cf_render::window::Swapchain;
-use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
+use cf_scene::hud::{build_hud, ShotTelemetry, UnitSystem};
 use cf_scene::range::Range;
 use cf_scene::shot::ReceivedShot;
 
-use flighthook::{FlighthookClient, FlighthookEvent, ShotAggregator};
+use flightrelay::{FrpClient, FrpEvent, FrpMessage, ShotAggregator};
 
-use flight::{
-    AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE, FLIGHTHOOK_URL,
-};
+use flight::{AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE};
 
 struct App {
     windowed: bool,
@@ -36,14 +34,14 @@ struct App {
     flights: Vec<AnimatedFlight>,
     /// Last shot telemetry — persists until the next shot arrives.
     last_telemetry: Option<ShotTelemetry>,
-    /// Live WebSocket connection to flighthook server (None when disconnected).
-    client: Option<FlighthookClient>,
-    /// Accumulates shot lifecycle events into complete ShotData.
+    /// Live WebSocket connection to FRP device (None when disconnected).
+    client: Option<FrpClient>,
+    /// Accumulates shot lifecycle events into complete shots.
     shots: ShotAggregator,
-    /// Last known ready state per launch monitor source ID.
+    /// Last known ready state per launch monitor device ID.
     lm_states: HashMap<String, bool>,
-    /// Whether the flighthook WebSocket connection is alive.
-    flighthook_connected: bool,
+    /// Whether the FRP WebSocket connection is alive.
+    frp_connected: bool,
     start_time: Instant,
     last_launch: f64,
     /// Monotonic time of last reconnect attempt.
@@ -68,7 +66,7 @@ impl App {
             client,
             shots: ShotAggregator::new(),
             lm_states: HashMap::new(),
-            flighthook_connected: connected,
+            frp_connected: connected,
             start_time: Instant::now(),
             last_launch: 0.0,
             last_reconnect_attempt: 0.0,
@@ -78,12 +76,16 @@ impl App {
         })
     }
 
-    /// Attempt to connect to flighthook. Returns (client, connected).
-    fn try_connect() -> (Option<FlighthookClient>, bool) {
-        eprintln!("Connecting to flighthook at {FLIGHTHOOK_URL}...");
-        match FlighthookClient::connect(FLIGHTHOOK_URL, "cyberflight") {
+    /// Attempt to connect to FRP device. Returns (client, connected).
+    fn try_connect() -> (Option<FrpClient>, bool) {
+        eprintln!("Connecting to FRP at {}...", flightrelay::DEFAULT_URL);
+        match FrpClient::connect(
+            flightrelay::DEFAULT_URL,
+            "cyberflight",
+            &[flightrelay::SPEC_VERSION],
+        ) {
             Ok(client) => {
-                eprintln!("Connected as {}", client.source_id());
+                eprintln!("Connected (FRP {})", client.version());
                 if let Err(e) = client.set_nonblocking(true) {
                     eprintln!("set_nonblocking failed: {e}");
                     return (None, false);
@@ -91,7 +93,10 @@ impl App {
                 (Some(client), true)
             }
             Err(e) => {
-                eprintln!("flighthook not available: {e}");
+                eprintln!(
+                    "FRP not available (expected {}): {e}",
+                    flightrelay::SPEC_VERSION
+                );
                 (None, false)
             }
         }
@@ -106,14 +111,8 @@ impl App {
             ..GpuConfig::default()
         };
 
-        let display_handle = window
-            .display_handle()
-            .expect("display handle")
-            .as_raw();
-        let window_handle = window
-            .window_handle()
-            .expect("window handle")
-            .as_raw();
+        let display_handle = window.display_handle().expect("display handle").as_raw();
+        let window_handle = window.window_handle().expect("window handle").as_raw();
 
         match GpuContext::new(config, display_handle, window_handle) {
             Err(cf_render::error::RenderError::Loading(_)) => {
@@ -136,8 +135,7 @@ impl App {
                         Ok(renderer) => {
                             eprintln!(
                                 "Renderer initialized: {}x{}",
-                                renderer.swapchain.extent.width,
-                                renderer.swapchain.extent.height
+                                renderer.swapchain.extent.width, renderer.swapchain.extent.height
                             );
                             self.renderer = Some(renderer);
                         }
@@ -153,15 +151,15 @@ impl App {
     fn update(&mut self) {
         let now = self.start_time.elapsed().as_secs_f64();
 
-        // Reconnect to flighthook if disconnected (try every 5 seconds).
+        // Reconnect to FRP if disconnected (try every 5 seconds).
         if self.client.is_none() && now - self.last_reconnect_attempt >= 5.0 {
             self.last_reconnect_attempt = now;
             let (client, connected) = Self::try_connect();
             self.client = client;
-            self.flighthook_connected = connected;
+            self.frp_connected = connected;
         }
 
-        // Always drain flighthook messages to prevent OS buffer overflow.
+        // Always drain FRP messages to prevent OS buffer overflow.
         // If a shot arrives while one is already in flight, ignore it.
         let animating = self.flights.iter().any(|f| f.is_animating(now));
         let mut disconnected = false;
@@ -169,24 +167,21 @@ impl App {
             loop {
                 match client.try_recv() {
                     Ok(Some(msg)) => {
-                        // Always update launch monitor status.
-                        match &msg.event {
-                            FlighthookEvent::DeviceInfo { telemetry: Some(t), .. } => {
-                                if let Some(ready) = t.get("ready") {
-                                    self.lm_states.insert(msg.source.clone(), ready == "true");
+                        // Always update launch monitor status from device telemetry.
+                        if let FrpMessage::Envelope(env) = &msg {
+                            if let FrpEvent::DeviceTelemetry {
+                                telemetry: Some(t), ..
+                            } = &env.event
+                            {
+                                if let Some(ready) = t.get(flightrelay::types::telemetry::READY) {
+                                    self.lm_states.insert(env.device.clone(), ready == "true");
                                 }
                             }
-                            FlighthookEvent::ActorStatus { status, .. }
-                                if *status == flighthook::ActorStatus::Disconnected =>
-                            {
-                                self.lm_states.remove(&msg.source);
-                            }
-                            _ => {}
                         }
                         // Only feed the shot aggregator when idle.
                         if !animating {
-                            if let Some(shot_data) = self.shots.feed(&msg) {
-                                if let Some(received) = ReceivedShot::from_flighthook(&shot_data) {
+                            if let Some(completed) = self.shots.feed(&msg) {
+                                if let Some(received) = ReceivedShot::from_frp(&completed) {
                                     self.flights.push(AnimatedFlight::from_received(
                                         &received,
                                         now,
@@ -200,8 +195,12 @@ impl App {
                         }
                     }
                     Ok(None) => break,
+                    Err(flightrelay::FrpError::Json(_)) => {
+                        // some messages may not be parsable due to extension
+                    }
+
                     Err(e) => {
-                        eprintln!("flighthook disconnected: {e}");
+                        eprintln!("FRP disconnected: {e}");
                         disconnected = true;
                         break;
                     }
@@ -209,7 +208,7 @@ impl App {
             }
         }
         if disconnected {
-            self.flighthook_connected = false;
+            self.frp_connected = false;
             self.client = None;
             self.lm_states.clear();
         }
@@ -256,7 +255,15 @@ impl App {
 
             let screen_w = renderer.swapchain.extent.width as f32;
             let screen_h = renderer.swapchain.extent.height as f32;
-            let hud = build_hud(telemetry, UnitSystem::Imperial, chase_camera.is_some(), &self.lm_states, self.flighthook_connected, screen_w, screen_h);
+            let hud = build_hud(
+                telemetry,
+                UnitSystem::Imperial,
+                chase_camera.is_some(),
+                &self.lm_states,
+                self.frp_connected,
+                screen_w,
+                screen_h,
+            );
             renderer.update_hud(&hud.lines, &hud.fills);
         }
 
@@ -361,16 +368,20 @@ impl ApplicationHandler for App {
                     && event.physical_key == PhysicalKey::Code(KeyCode::BracketRight) =>
             {
                 self.trail_subsample = (self.trail_subsample + 1).min(20);
-                eprintln!("Trail subsample: {} (every {}th point)", self.trail_subsample,
-                    self.trail_subsample);
+                eprintln!(
+                    "Trail subsample: {} (every {}th point)",
+                    self.trail_subsample, self.trail_subsample
+                );
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && event.physical_key == PhysicalKey::Code(KeyCode::BracketLeft) =>
             {
                 self.trail_subsample = (self.trail_subsample - 1).max(1);
-                eprintln!("Trail subsample: {} (every {}th point)", self.trail_subsample,
-                    self.trail_subsample);
+                eprintln!(
+                    "Trail subsample: {} (every {}th point)",
+                    self.trail_subsample, self.trail_subsample
+                );
             }
             WindowEvent::Resized(size) => {
                 eprintln!("Resized: {}x{}", size.width, size.height);

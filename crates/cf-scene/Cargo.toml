@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 cf-math.workspace = true
-flighthook.workspace = true
+flightrelay.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 serde.workspace = true

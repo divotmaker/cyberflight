@@ -2,6 +2,8 @@
 
 A (very) digital driving range for golf simulators.
 
+> **Early alpha** — in active development. Expect breaking changes, missing features, and rough edges.
+
 ![Empty Range](./screens/empty_range.png "Empty Range")
 
 ## Launch Monitor Integration

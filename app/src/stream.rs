@@ -12,7 +12,7 @@ use cf_render::offscreen::OffscreenRenderer;
 use cf_render::stream::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_scene::range::Range;
 
-use crate::flight::{AnimatedFlight, FlightManager, FlighthookState};
+use crate::flight::{AnimatedFlight, FlightManager, FrpState};
 
 struct StreamArgs {
     config: StreamConfig,
@@ -118,8 +118,8 @@ pub fn run_stream() -> Result<()> {
         }
     }
 
-    // Connect to flighthook.
-    let mut fh = FlighthookState::new();
+    // Connect to FRP device.
+    let mut fh = FrpState::new();
     let mut fm = FlightManager::new();
 
     let start = Instant::now();
@@ -146,7 +146,7 @@ pub fn run_stream() -> Result<()> {
             }
         }
 
-        // Poll flighthook for new shots.
+        // Poll FRP for new shots.
         let animating = fm.is_animating(now);
         if let Some(received) = fh.poll(now, animating) {
             fm.flights.push(AnimatedFlight::from_received(
