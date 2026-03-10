@@ -310,7 +310,13 @@ impl AnimatedFlight {
             return None;
         };
 
-        let smoothed = if let Some((prev, prev_time)) = &self.prev_chase {
+        // During carry, snap to the ball's direction of travel so hooks/slices
+        // stay visible. Smoothing only kicks in after landing to avoid jarring
+        // camera motion from bounces and slow rollout direction changes.
+        let in_carry = shot_t < self.result.flight.flight_time;
+        let smoothed = if in_carry {
+            ideal
+        } else if let Some((prev, prev_time)) = &self.prev_chase {
             let dt = (now - prev_time).clamp(0.001, 0.1);
             let alpha = (dt / (CHASE_CAM_SMOOTHING_TAU + dt)) as f32;
             Camera {
