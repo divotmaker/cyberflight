@@ -97,23 +97,31 @@ pub struct BallModel {
 impl BallModel {
     /// Modern tour ball (USGA conforming, 2020s-era dimple design).
     ///
-    /// Fitted to published trajectory data from Trackman PGA Tour Averages (2024),
-    /// PING Proving Grounds ("Unlocking Distance"), and aerodynamic studies:
-    /// - Li, Tsubokura & Tsunoda (2017) — LES CFD at Re=1.1e5
-    /// - Lyu, Kensrud, Smith & Tosaya (2018) — trajectory fit on 13 production balls
-    /// - Jenkins, Arellano, Ross & Snell (2018) — wind tunnel
+    /// Calibrated to Trackman PGA Tour Averages (2024 + classic 2009-2014 full bag).
+    /// Trackman normalizes to 25°C (77°F) sea level; our tests use ISA 15°C.
     ///
-    /// Validated against 5 carry distance targets (driver through PW) within ±10 yards.
-    /// Key advances over 1990s balls: ~30% lower base Cd from optimized dimple
-    /// geometry, and spin-sensitive Cl that rewards modern launch conditions
-    /// (high launch, low spin).
+    /// Aerodynamic sources:
+    /// - Li, Tsubokura & Tsunoda (2017), Flow Turb. Combust. 99(3) — LES CFD at
+    ///   Re=1.1e5: Cd=0.217 (static), Cd=0.240 (spinning, G=0.1), Cl=0.135
+    /// - Lyu, Kensrud, Smith & Tosaya (2018), ISEA Proc. 2(6):238 — trajectory fit
+    ///   on 13 production balls, Cd~0.20 average at high Re
+    /// - Crabill (2019), Sports Eng. 22:1-9 — high-order CFD at Re=1.5e5: Cd=0.247
+    /// - Bearman & Harvey (1976), Aero. Q. 27:112-122 — original wind tunnel study
+    ///
+    /// Spin decay: λ=0.04 s⁻¹ matches Trackman's published ~4%/s (Oct 2010) and
+    /// Lyu et al. (2018) trajectory fits. Tutelman: τ=30s → λ=0.033.
+    ///
+    /// Validated against 8 Trackman carry targets (driver through PW) within ±10 yards.
+    /// Classic full bag 7i-PW within ±3 yards. Key advances over 1990s balls: ~25%
+    /// lower base Cd from optimized dimple geometry, and spin-sensitive Cl that
+    /// rewards modern launch conditions (high launch, low spin).
     pub const TOUR: Self = Self {
         mass_kg: 0.04593,   // 1.62 oz (USGA max)
         diameter_m: 0.04267, // 1.68 in (USGA min)
         cd_sub: 0.206,
-        cd_super: 0.205,
+        cd_super: 0.22,
         cd_spin: 0.19,
-        cl_sub: 0.20,
+        cl_sub: 0.16,
         cl_super: 0.29,
         sr_scale: 0.08,
         re_crit: 100_000.0,
@@ -262,8 +270,9 @@ pub struct AeroParams {
     pub spin_decay: f64,
 }
 
-/// Default spin decay rate (s⁻¹). ~22% loss over 5 seconds.
-pub const DEFAULT_SPIN_DECAY: f64 = 0.05;
+/// Default spin decay rate (s⁻¹). ~18% loss over 5 seconds, ~21% over 6 seconds.
+/// Source: Trackman (2010) ~4%/s, Lyu et al. (2018) trajectory fits.
+pub const DEFAULT_SPIN_DECAY: f64 = 0.04;
 
 impl AeroParams {
     /// Create aero params from backspin and sidespin in RPM.
