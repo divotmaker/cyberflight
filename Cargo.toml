@@ -25,6 +25,7 @@ ash = "0.38"
 gpu-allocator = { version = "0.28", features = ["vulkan"] }
 image-compare = "0.4"
 proptest = "1"
+rayon = "1"
 approx = "0.5"
 winit = "0.30"
 ash-window = "0.13"
