@@ -34,12 +34,13 @@ Where q = ½ρv² (dynamic pressure), A = cross-sectional area, m = ball mass.
 ## Cd/Cl Model
 
 The aerodynamic coefficients use a sigmoid transition at the dimpled-ball drag
-crisis (~Re 75,000), with spin-dependent drag and exponential lift saturation.
+crisis (~Re 70,000), with saturating spin-dependent drag and exponential lift
+saturation.
 
 ### Drag coefficient
 
 ```
-Cd = Cd_base(Re) + Cd_spin × SR
+Cd = Cd_base(Re) + Cd_spin × SR / (1 + SR / SR_sat)
 
 where:
   Cd_base = Cd_sub + (Cd_super - Cd_sub) × σ(Re)
@@ -49,8 +50,11 @@ where:
 ```
 
 The base drag transitions from subcritical to supercritical at the drag crisis.
-Spin adds drag linearly with spin ratio (asymmetric wake from spin-induced
-pressure gradient).
+Spin adds drag through a saturating term: near-linear (slope Cd_spin) below
+SR ≈ SR_sat, capped at Cd_spin × SR_sat at high spin ratio. Spin drag is
+dominated by induced drag from Magnus lift, and since Cl saturates in SR, the
+drag it induces saturates too. (Set SR_sat = ∞ for a purely linear term, as in
+the PATENT_1997 model.)
 
 ### Lift coefficient
 
@@ -62,9 +66,9 @@ where:
 ```
 
 Lift follows an exponential saturation curve in spin ratio. This means:
-- **Low SR (driver, ~0.08):** Cl is well below the ceiling (~0.19)
-- **High SR (iron, ~0.29):** Cl approaches the ceiling (~0.27)
-- **Very high SR (wedge, ~0.46):** Cl is fully saturated (~0.29)
+- **Low SR (driver, ~0.07):** Cl is well below the ceiling (~0.15)
+- **High SR (iron, ~0.29):** Cl approaches the ceiling (~0.30)
+- **Very high SR (wedge, ~0.45):** Cl is fully saturated (~0.32)
 
 This spin-sensitive lift is a key feature of modern ball design — it rewards
 the "high launch, low spin" fitting strategy that dominates modern equipment.
@@ -77,14 +81,15 @@ the "high launch, low spin" fitting strategy that dominates modern equipment.
 |---|---|---|
 | mass_kg | 0.04593 | Ball mass (USGA max: 1.62 oz) |
 | diameter_m | 0.04267 | Ball diameter (USGA min: 1.68 in) |
-| cd_sub | 0.310 | Subcritical base drag |
-| cd_super | 0.235 | Supercritical base drag |
-| cd_spin | 0.12 | Spin-dependent drag increment |
-| cl_sub | 0.050 | Subcritical lift ceiling |
-| cl_super | 0.29 | Supercritical lift ceiling |
-| sr_scale | 0.10 | Lift saturation rate |
-| re_crit | 75,000 | Drag crisis Reynolds number |
-| re_width | 125 | Sigmoid transition width |
+| cd_sub | 0.295 | Subcritical base drag |
+| cd_super | 0.186 | Supercritical base drag (zero spin) |
+| cd_spin | 0.85 | Spin-drag slope (saturating) |
+| sr_sat | 0.25 | Spin-drag saturation constant (cap ≈ 0.21) |
+| cl_sub | 0.203 | Subcritical lift ceiling |
+| cl_super | 0.324 | Supercritical lift ceiling |
+| sr_scale | 0.115 | Lift saturation rate |
+| re_crit | 69,600 | Drag crisis Reynolds number |
+| re_width | 106 | Sigmoid transition width |
 
 Aerodynamic sources:
 - Li, Tsubokura & Tsunoda (2017), *Flow Turb. Combust.* 99(3) — LES CFD, Cd/Cl at Re=1.1×10⁵
@@ -93,67 +98,60 @@ Aerodynamic sources:
 - Bearman & Harvey (1976), *Aero. Q.* 27:112-122 — original wind tunnel study
 - Trackman PGA Tour Averages (2024) — carry and descent angle validation
 
-### Calibration process
+### Calibration
 
-The TOUR constants were calibrated against the 2024 Trackman PGA Tour Averages
-(12 clubs, driver through PW, normalized to 25°C sea level). The primary
-tuning targets are carry distance and descent angle for each club.
+The TOUR constants are jointly calibrated against two references:
 
-**Key tuning insight:** Descent angle accuracy requires high subcritical drag
-(cd_sub=0.310) with a sharp drag crisis transition (re_width=125) at re_crit=75k.
-At landing, irons decelerate into deeply subcritical Re (~56k) where high cd_sub
-kills horizontal speed → steep 49-52° descent matching Trackman. Driver stays
-near-supercritical at landing (Re≈78k) → moderate 38° descent.
+1. **2024 Trackman PGA Tour Averages** — 12 clubs, carry + descent angle,
+   normalized to 25°C sea level. Real-world radar data; authoritative for
+   descent angles.
+2. **A 1,178-shot per-shot validation set** spanning 26–153 mph ball speed
+   and 0.8k–14k rpm spin, fitting carry, peak height, descent angle, and
+   offline for every shot — providing breadth (amateur speeds, sidespin and
+   offline behavior) that tour averages can't.
 
-The low cl_sub (0.050) is demanded by the descent angle data. At 50° descent,
-Magnus force is 77% forward — even moderate subcritical lift (Cl=0.10) measurably
-shallows descent for all irons. Ten experiments (grid search, 1-10) tested
-structural model changes (split sigmoids, reverse Magnus, SR-dependent re_crit,
-polynomial Cl(SR)) — all converge to cl_sub≈0.05 and re_width≈125. The gap vs
-published wind tunnel Cl≈0.15 (1997 patent data) likely reflects differences
-between 1990s and modern ball subcritical aerodynamics, and/or our 2D model
-lacking spin axis precession.
+The saturating spin-drag term is what lets both references fit at once:
+steep iron descent angles (47–52°) come from heavy late-flight induced drag
+on high-spin balls, while subcritical lift stays at a wind-tunnel-plausible
+cl_sub=0.203 — which in turn produces correct sidespin curvature and
+altitude response.
 
 ### Fit quality
 
-Validated against 2024 Trackman PGA Tour Averages (25°C sea level):
-
-| Metric | Value |
-|---|---|
-| Carry RMSE | 3.8 yds |
-| Carry max error | 5.5 yds (PW, -5.5y) |
-| DA RMSE | 1.2° |
-| DA mean error | -0.4° |
+Trackman 2024 (25°C sea level): carry RMSE **2.8 yds**, DA RMSE **1.3°**,
+10 of 12 clubs within ±3y.
+Per-shot validation set (1,178 shots): carry RMSE **3.2 yds**, peak
+**2.6 ft**, descent **2.7°**, offline **1.5 yds**.
 
 Per-club results:
 
 | Club | Model | Target | Δ | DA° (model) | DA° (TM) | DA Δ |
 |---|---:|---:|---:|---:|---:|---:|
-| Driver | 277.9y | 282.0y | -4.1y | 38.0 | 39.0 | -1.0 |
-| 3-Wood | 253.6y | 249.0y | +4.6y | 46.6 | 44.0 | +2.6 |
-| 5-Wood | 241.5y | 236.0y | +5.5y | 48.5 | 48.0 | +0.5 |
-| Hybrid | 229.2y | 231.0y | -1.8y | 48.3 | 49.0 | -0.7 |
-| 3-Iron | 223.0y | 218.0y | +5.0y | 46.8 | 48.0 | -1.2 |
-| 4-Iron | 213.2y | 209.0y | +4.2y | 47.2 | 49.0 | -1.8 |
-| 5-Iron | 202.9y | 199.0y | +3.9y | 48.0 | 50.0 | -2.0 |
-| 6-Iron | 191.5y | 188.0y | +3.5y | 50.1 | 50.0 | +0.1 |
-| 7-Iron | 176.4y | 176.0y | +0.4y | 50.5 | 51.0 | -0.5 |
-| 8-Iron | 165.0y | 164.0y | +1.0y | 50.9 | 51.0 | -0.1 |
-| 9-Iron | 152.4y | 152.0y | +0.4y | 51.1 | 52.0 | -0.9 |
-| PW | 136.5y | 142.0y | -5.5y | 52.1 | 52.0 | +0.1 |
+| Driver | 279.6y | 282.0y | -2.4y | 39.7 | 39.0 | +0.7 |
+| 3-Wood | 253.4y | 249.0y | +4.4y | 46.6 | 44.0 | +2.6 |
+| 5-Wood | 238.7y | 236.0y | +2.7y | 48.6 | 48.0 | +0.6 |
+| Hybrid | 226.0y | 231.0y | -5.0y | 48.3 | 49.0 | -0.7 |
+| 3-Iron | 220.6y | 218.0y | +2.6y | 46.7 | 48.0 | -1.3 |
+| 4-Iron | 210.3y | 209.0y | +1.3y | 46.9 | 49.0 | -2.1 |
+| 5-Iron | 199.8y | 199.0y | +0.8y | 47.8 | 50.0 | -2.2 |
+| 6-Iron | 188.1y | 188.0y | +0.1y | 49.9 | 50.0 | -0.1 |
+| 7-Iron | 173.9y | 176.0y | -2.1y | 50.5 | 51.0 | -0.5 |
+| 8-Iron | 163.5y | 164.0y | -0.5y | 50.9 | 51.0 | -0.1 |
+| 9-Iron | 152.1y | 152.0y | +0.1y | 51.2 | 52.0 | -0.8 |
+| PW | 137.3y | 142.0y | -4.7y | 52.2 | 52.0 | +0.2 |
+
+Environmental response (density-only): Denver +6.9% driver carry (published
+~6.1%), 90°F-vs-50°F delta ~9y (published ~8y).
 
 ### Known limitations
 
-1. **PW carries ~6y cold.** Structural limit of single-sigmoid model — PW
-   goes subcritical mid-flight, losing nearly all lift.
-2. **Driver carries ~4y cold.** cd_super=0.235 is slightly high for driver's
-   low-spin regime (SR≈0.07).
-3. **Mid-irons 3-6y hot.** Our 2D "perfect straight shot" exceeds Trackman
-   averages that include sidespin dispersion.
-4. **Temperature/altitude sensitivity too low.** Sharp sigmoid (re_width=125)
-   barely responds to density-driven Re shifts. Hot-cold delta ~4y vs
-   published ~8y; Denver altitude gain ~1% vs published ~6%.
-5. **Single ball model.** Real balls vary ±5% in drag across dimple designs.
+1. **PW carries ~5y cold, hybrid ~5y cold.** Residual structural limit of the
+   single-sigmoid model.
+2. **Fast low-spin shots (140+ mph, <3k rpm) run a few yards short** with
+   slightly high peaks relative to the per-shot validation set.
+3. **Ball COR vs temperature unmodeled** — only air density responds to
+   temperature; cold-ball distance loss is understated.
+4. **Single ball model.** Real balls vary ±5% in drag across dimple designs.
 
 ### `BallModel::PATENT_1997` — 1990s Tour Ball
 
@@ -162,8 +160,9 @@ Per-club results:
 | mass_kg | 0.04593 | Same physical ball (USGA limits unchanged) |
 | diameter_m | 0.04267 | Same |
 | cd_sub | 0.19 | Lower subcritical base |
-| cd_super | 0.29 | **24% higher** supercritical base drag |
+| cd_super | 0.29 | Much higher supercritical base drag |
 | cd_spin | 0.15 | Spin-dependent drag |
+| sr_sat | ∞ | Linear spin drag (no saturation in patent data) |
 | cl_sub | 0.12 | Subcritical lift |
 | cl_super | 0.285 | Similar lift ceiling |
 | sr_scale | 0.01 | **Near-instant saturation** — Cl independent of SR |
@@ -175,11 +174,12 @@ tunnel measurements on production golf balls (Table 1, 7 data points). Model
 fitted with RMSE: Cd=0.008, Cl=0.006.
 
 Key differences from modern balls:
-- **Base Cd ~24% higher** (0.29 vs 0.235) — dominant factor for carry gap
+- **Base Cd much higher** (0.29 vs 0.186 + spin term; effective driver Cd
+  0.30 vs 0.24) — dominant factor for carry gap
 - **Cl saturates instantly** (sr_scale=0.01) — lift is the same for driver and
   wedge spin rates, unlike modern balls where Cl is spin-sensitive
-- **Higher subcritical Cl** (0.12 vs 0.050) — more late-flight lift, gradual
-  drag transition (re_width=8000 vs 125)
+- **Lower subcritical Cl** (0.12 vs 0.203) and a gradual drag crisis
+  (re_width=8000 vs 106)
 
 ## Environment Model
 
@@ -226,7 +226,7 @@ every 10ms. Stops when ball returns to ground level.
 
 ## Test Suite
 
-170 tests across the workspace (94 in cf-math). Test categories:
+171 tests across the workspace (95 in cf-math). Test categories:
 
 - **Structural invariants** — energy conservation, origin start, axis normalization
 - **Patent wind tunnel** — 7 Cd/Cl data points against PATENT_1997 model

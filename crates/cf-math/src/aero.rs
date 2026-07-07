@@ -10,7 +10,8 @@ use crate::units::G;
 /// through air.
 ///
 /// The Cd/Cl model uses a sigmoid transition at the dimpled-ball drag crisis
-/// (~Re 100k), with spin-dependent drag and exponential lift saturation.
+/// (~Re 70k for the TOUR model), with saturating spin-dependent drag and
+/// exponential lift saturation.
 ///
 /// Sources for the `TOUR` preset:
 /// - Li, Tsubokura & Tsunoda (2017), Flow Turb. Combust. 99(3) — LES, Cd/Cl at Re=1.1e5
@@ -32,7 +33,7 @@ pub struct BallModel {
 
     // ── Drag model ──
     //
-    // Cd = cd_base(Re) + cd_spin × SR
+    // Cd = cd_base(Re) + cd_spin × SR / (1 + SR / sr_sat)
     //   where cd_base = cd_sub + (cd_super - cd_sub) × σ(Re)
     //   and σ(Re) = sigmoid transition at the drag crisis
 
@@ -49,11 +50,18 @@ pub struct BallModel {
     /// for carry distance.
     pub cd_super: f64,
 
-    /// Spin-dependent drag increment: Cd += cd_spin × SR.
-    /// Spinning balls create asymmetric wakes, increasing form drag.
-    /// Higher values penalize high-spin shots (wedges) more than low-spin (driver).
-    /// At driver SR≈0.08: adds ~0.015. At wedge SR≈0.46: adds ~0.087.
+    /// Spin-dependent drag slope: Cd += cd_spin × SR / (1 + SR / sr_sat).
+    /// Spin drag is dominated by induced drag from Magnus lift, so it
+    /// saturates as Cl saturates — the term is near-linear (slope cd_spin)
+    /// below SR ≈ sr_sat and approaches the cap cd_spin × sr_sat at high SR.
+    /// At driver SR≈0.08: adds ~0.05. At wedge SR≈0.46: adds ~0.14.
     pub cd_spin: f64,
+
+    /// Saturation constant for spin drag (dimensionless spin ratio).
+    /// The spin-drag term reaches half its asymptotic cap at SR = sr_sat and
+    /// caps at cd_spin × sr_sat. Set to `f64::INFINITY` for a purely linear
+    /// spin-drag term (1990s patent model).
+    pub sr_sat: f64,
 
     // ── Lift model ──
     //
@@ -77,7 +85,7 @@ pub struct BallModel {
     /// Controls how quickly Cl approaches cl_super as SR increases.
     /// Smaller values = faster saturation = more lift at low SR (driver).
     /// Larger values = slower saturation = Cl stays low until high SR (irons).
-    /// Calibrated so that Cl ≈ 0.14 at SR=0.1 (Li et al. 2017 LES data).
+    /// TOUR gives Cl ≈ 0.19 at SR=0.1 (Li et al. 2017 LES: 0.135).
     pub sr_scale: f64,
 
     // ── Drag crisis transition ──
@@ -97,42 +105,47 @@ pub struct BallModel {
 impl BallModel {
     /// Modern tour ball (USGA conforming, 2020s-era dimple design).
     ///
-    /// Calibrated to Trackman 2024 PGA Tour Averages (full bag, driver through PW).
-    /// Trackman normalizes to 25°C (77°F) sea level; our tests use ISA 15°C.
+    /// Jointly calibrated to Trackman 2024 PGA Tour Averages (12 clubs, carry +
+    /// descent angle, 25°C sea level) and a 1,178-shot per-shot validation set
+    /// (carry, peak height, descent, offline across 26–153 mph and
+    /// 0.8k–14k rpm). See docs/AERO.md for the full model documentation.
     ///
-    /// Key tuning insight: descent angle accuracy requires high subcritical drag
-    /// (cd_sub=0.310) with a sharp drag crisis transition (re_width=125, re_crit=75k).
-    /// At landing, irons decelerate into deeply subcritical Re (~56k) where high
-    /// cd_sub kills horizontal speed → steep 49-52° descent matching Trackman.
-    /// Driver stays near-supercritical at landing (Re≈78k > re_crit) → moderate 38°
-    /// descent. See docs/AERO.md for the full model documentation.
+    /// Key structural feature: **saturating spin drag** (sr_sat). Spin drag is
+    /// mostly induced drag from Magnus lift, which saturates in SR as Cl does.
+    /// The high-slope/early-cap form (cd_spin=0.85, sr_sat=0.25) lets high-spin
+    /// irons carry heavy late-flight drag (steep 47-52° descent matching
+    /// Trackman) without collapsing subcritical lift — cl_sub sits at a
+    /// physically plausible 0.203 (wind tunnel: 0.15-0.28) instead of the 0.050
+    /// the linear-spin-drag model demanded.
     ///
     /// Aerodynamic sources:
     /// - Li, Tsubokura & Tsunoda (2017), Flow Turb. Combust. 99(3) — LES CFD at
-    ///   Re=1.1e5: Cd=0.217 (static), Cd=0.240 (spinning, G=0.1), Cl=0.135
+    ///   Re=1.1e5: Cd=0.217 (static), Cd=0.240 (spinning, G=0.1), Cl=0.135.
+    ///   This model at driver SR≈0.08: Cd≈0.24, Cl≈0.16.
     /// - Lyu, Kensrud, Smith & Tosaya (2018), ISEA Proc. 2(6):238 — trajectory fit
-    ///   on 13 production balls, Cd~0.20 average at high Re
+    ///   on 13 production balls, Cd~0.20 average at high Re (cd_super=0.186 + spin)
     /// - Crabill (2019), Sports Eng. 22:1-9 — high-order CFD at Re=1.5e5: Cd=0.247
     /// - Bearman & Harvey (1976), Aero. Q. 27:112-122 — original wind tunnel study
     ///
     /// Spin decay: λ=0.04 s⁻¹ matches Trackman's published ~4%/s (Oct 2010) and
     /// Lyu et al. (2018) trajectory fits. Tutelman: τ=30s → λ=0.033.
     ///
-    /// Validated against 12 Trackman 2024 carry targets (driver through PW) and
-    /// descent angles. DA RMSE=1.2°, carry RMSE=3.8y. Most clubs within ±5y
-    /// carry. PW and driver are ~6y cold outliers — structural limitation of
-    /// single-sigmoid model; see docs/AERO.md.
+    /// Fit quality: Trackman carry RMSE=2.8y (10/12 clubs within ±3y), DA
+    /// RMSE=1.3°; per-shot set carry RMSE=3.2y, offline RMSE=1.5y, peak
+    /// RMSE=2.6ft. Denver altitude gain +6.9% (published ~6.1%), hot-cold
+    /// delta ~9y (published ~8y).
     pub const TOUR: Self = Self {
         mass_kg: 0.04593,   // 1.62 oz (USGA max)
         diameter_m: 0.04267, // 1.68 in (USGA min)
-        cd_sub: 0.310,
-        cd_super: 0.235,
-        cd_spin: 0.12,
-        cl_sub: 0.050,
-        cl_super: 0.29,
-        sr_scale: 0.10,
-        re_crit: 75_000.0,
-        re_width: 125.0,
+        cd_sub: 0.295,
+        cd_super: 0.186,
+        cd_spin: 0.85,
+        sr_sat: 0.25,
+        cl_sub: 0.203,
+        cl_super: 0.324,
+        sr_scale: 0.115,
+        re_crit: 69_600.0,
+        re_width: 106.0,
     };
 
     /// 1990s-era tour ball, fitted to US6186002B1 (Quintavalla/Acushnet 1997)
@@ -160,6 +173,7 @@ impl BallModel {
         cd_sub: 0.19,
         cd_super: 0.29,
         cd_spin: 0.15,
+        sr_sat: f64::INFINITY, // linear spin drag (patent data fit)
         cl_sub: 0.12,
         cl_super: 0.285,
         sr_scale: 0.01,
@@ -205,9 +219,11 @@ impl BallModel {
         // Sigmoid transition at drag crisis
         let sigma = 1.0 / (1.0 + (-(re - self.re_crit) / self.re_width).exp());
 
-        // Cd: Re-dependent base + spin-dependent increment
+        // Cd: Re-dependent base + saturating spin-dependent increment.
+        // Spin drag is mostly induced drag from Magnus lift, which saturates
+        // in SR as Cl does: near-linear below sr_sat, capped at cd_spin×sr_sat.
         let cd_base = self.cd_sub + (self.cd_super - self.cd_sub) * sigma;
-        let cd = cd_base + self.cd_spin * sr;
+        let cd = cd_base + self.cd_spin * sr / (1.0 + sr / self.sr_sat);
 
         // Cl: Re-dependent ceiling × exponential saturation in SR
         let cl_max = self.cl_sub + (self.cl_super - self.cl_sub) * sigma;
@@ -380,6 +396,32 @@ mod tests {
         assert!(
             cl_high > cl_low,
             "more spin should mean more lift: {cl_high:.3} vs {cl_low:.3}"
+        );
+    }
+
+    #[test]
+    fn spin_drag_saturates() {
+        // The spin-drag term is sub-linear: doubling SR from 0.25 to 0.5 must
+        // add less drag than the first 0.25 did (induced drag saturates with
+        // Cl). The patent model (sr_sat=inf) stays linear by construction.
+        let speed = 70.0;
+        let sr_to_spin = |sr: f64| sr * speed / TOUR.radius_m();
+        let (cd0, _) = TOUR.cd_cl(0.0, speed, SEA_LEVEL_RHO);
+        let (cd1, _) = TOUR.cd_cl(sr_to_spin(0.25), speed, SEA_LEVEL_RHO);
+        let (cd2, _) = TOUR.cd_cl(sr_to_spin(0.50), speed, SEA_LEVEL_RHO);
+        let first = cd1 - cd0;
+        let second = cd2 - cd1;
+        assert!(
+            second < first * 0.75,
+            "spin drag should saturate: first ΔCd={first:.3}, second ΔCd={second:.3}"
+        );
+
+        let (pd0, _) = PATENT.cd_cl(0.0, speed, SEA_LEVEL_RHO);
+        let (pd1, _) = PATENT.cd_cl(sr_to_spin(0.25), speed, SEA_LEVEL_RHO);
+        let (pd2, _) = PATENT.cd_cl(sr_to_spin(0.50), speed, SEA_LEVEL_RHO);
+        assert!(
+            ((pd2 - pd1) - (pd1 - pd0)).abs() < 1e-9,
+            "patent spin drag should stay linear"
         );
     }
 

@@ -460,11 +460,10 @@ mod tests {
         let sea = flight_at(&driver, &Environment::SEA_LEVEL);
         let denver = flight_at(&driver, &Environment::DENVER);
         let gain_pct = (denver.carry_yards - sea.carry_yards) / sea.carry_yards * 100.0;
-        // Sharp drag crisis (re_width=125) reduces density sensitivity — the driver
-        // stays supercritical at all altitudes, so density changes only affect force
-        // magnitude, not regime. Real ~6% gain; model shows ~3%. Known limitation.
+        // The 2026-07 joint calibration (saturating spin drag, cd_super=0.186)
+        // reproduces the published altitude response: model ~6-7% vs Titleist ~6.1%.
         assert!(
-            gain_pct > 1.5 && gain_pct < 10.0,
+            gain_pct > 4.0 && gain_pct < 9.0,
             "Denver gain {gain_pct:.1}%, expected ~6.1% (Titleist: elevation_ft × 0.00116)"
         );
     }
@@ -615,14 +614,16 @@ mod tests {
         // 1990s balls had higher Cl (nearly saturated at all SR values), giving
         // more lift. But the drag penalty still dominates.
         //
-        // Expected: ~15-30 yard gap (proportionally less than driver because
-        // the Cl advantage of patent balls is larger at iron SR≈0.29).
+        // Expected: ~5-25 yard gap — proportionally much less than driver.
+        // Historically, iron distance gains came mostly from loft changes, not
+        // ball aero; the modern ball's saturating spin drag (high late-flight
+        // drag at iron SR) narrows the aero-only gap further.
         let modern = flight(123.0, 16.3, 7097.0, 0.0);
         let vintage = flight_1997(123.0, 16.3, 7097.0);
         let gap = modern.carry_yards - vintage.carry_yards;
         assert!(
-            gap > 8.0 && gap < 40.0,
-            "7-iron era gap should be 8-40 yds, got {gap:.1} (modern={:.1}, vintage={:.1})",
+            gap > 5.0 && gap < 40.0,
+            "7-iron era gap should be 5-40 yds, got {gap:.1} (modern={:.1}, vintage={:.1})",
             modern.carry_yards, vintage.carry_yards
         );
     }
