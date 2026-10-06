@@ -277,8 +277,14 @@ pub fn build_hud(
 
         // ── CLUB section
         y = emit_section_header(&mut lines, "CLUB", y, panel_w, &sc);
-        y = emit_row(&mut lines, "SPEED",
-            &format!("{:.0} {spd_label}", t.club_speed_mph * spd_factor), y, panel_w, &sc);
+        y = emit_row(
+            &mut lines,
+            "SPEED",
+            &format!("{:.0} {spd_label}", t.club_speed_mph * spd_factor),
+            y,
+            panel_w,
+            &sc,
+        );
         if let Some(v) = t.club_path_deg {
             y = emit_row(&mut lines, "PATH", &format!("{v:.1}"), y, panel_w, &sc);
         }
@@ -295,21 +301,62 @@ pub fn build_hud(
 
         // ── LAUNCH section
         y = emit_section_header(&mut lines, "LAUNCH", y, panel_w, &sc);
-        y = emit_row(&mut lines, "SPEED",
-            &format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor), y, panel_w, &sc);
+        y = emit_row(
+            &mut lines,
+            "SPEED",
+            &format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor),
+            y,
+            panel_w,
+            &sc,
+        );
         if let Some(sf) = t.smash_factor {
             y = emit_row(&mut lines, "SMASH", &format!("{sf:.2}"), y, panel_w, &sc);
         }
-        y = emit_row(&mut lines, "VLA", &format!("{:.1}", t.launch_angle_deg), y, panel_w, &sc);
-        y = emit_row(&mut lines, "HLA", &format!("{:.1}", t.launch_azimuth_deg), y, panel_w, &sc);
-        y = emit_row(&mut lines, "BACK", &format!("{:.0} RPM", t.backspin_rpm), y, panel_w, &sc);
-        y = emit_row(&mut lines, "SIDE", &format!("{:.0} RPM", t.sidespin_rpm), y, panel_w, &sc);
+        y = emit_row(
+            &mut lines,
+            "VLA",
+            &format!("{:.1}", t.launch_angle_deg),
+            y,
+            panel_w,
+            &sc,
+        );
+        y = emit_row(
+            &mut lines,
+            "HLA",
+            &format!("{:.1}", t.launch_azimuth_deg),
+            y,
+            panel_w,
+            &sc,
+        );
+        y = emit_row(
+            &mut lines,
+            "BACK",
+            &format!("{:.0} RPM", t.backspin_rpm),
+            y,
+            panel_w,
+            &sc,
+        );
+        y = emit_row(
+            &mut lines,
+            "SIDE",
+            &format!("{:.0} RPM", t.sidespin_rpm),
+            y,
+            panel_w,
+            &sc,
+        );
         y += sc.section_gap;
 
         // ── FLIGHT section
         y = emit_section_header(&mut lines, "FLIGHT", y, panel_w, &sc);
         y = emit_row(&mut lines, "APEX", &fmt_height(t.apex_m), y, panel_w, &sc);
-        y = emit_row(&mut lines, "CARRY", &fmt_dist(t.carry_yards), y, panel_w, &sc);
+        y = emit_row(
+            &mut lines,
+            "CARRY",
+            &fmt_dist(t.carry_yards),
+            y,
+            panel_w,
+            &sc,
+        );
         if let Some(lm_carry) = t.lm_carry_yards {
             let carry_complete = t.elapsed_s >= t.flight_time_s;
             let lm_text = if carry_complete {
@@ -319,18 +366,52 @@ pub fn build_hud(
             };
             y = emit_row(&mut lines, "CARRY(LM)", &lm_text, y, panel_w, &sc);
         }
-        y = emit_row(&mut lines, "TIME", &format!("{:.1} S", t.elapsed_s), y, panel_w, &sc);
+        y = emit_row(
+            &mut lines,
+            "TIME",
+            &format!("{:.1} S", t.elapsed_s),
+            y,
+            panel_w,
+            &sc,
+        );
         y += sc.section_gap;
 
         // ── RESULT section
         y = emit_section_header(&mut lines, "RESULT", y, panel_w, &sc);
-        y = emit_row(&mut lines, "TOTAL", &fmt_dist(t.total_yards), y, panel_w, &sc);
-        y = emit_row(&mut lines, "DOWNRANGE", &fmt_dist(t.downrange_yards), y, panel_w, &sc);
-        y = emit_row(&mut lines, "LATERAL", &fmt_height(t.lateral_m), y, panel_w, &sc);
+        y = emit_row(
+            &mut lines,
+            "TOTAL",
+            &fmt_dist(t.total_yards),
+            y,
+            panel_w,
+            &sc,
+        );
+        y = emit_row(
+            &mut lines,
+            "DOWNRANGE",
+            &fmt_dist(t.downrange_yards),
+            y,
+            panel_w,
+            &sc,
+        );
+        y = emit_row(
+            &mut lines,
+            "LATERAL",
+            &fmt_height(t.lateral_m),
+            y,
+            panel_w,
+            &sc,
+        );
         let _ = y;
     } else {
         // No telemetry — show standby
-        lines.extend(hud_font::build_text("SEND IT", sc.margin_left, y, sc.char_height, LABEL_FADE));
+        lines.extend(hud_font::build_text(
+            "SEND IT",
+            sc.margin_left,
+            y,
+            sc.char_height,
+            LABEL_FADE,
+        ));
     }
 
     // ── SYSTEM section (bottom-aligned in left panel)
@@ -345,8 +426,16 @@ pub fn build_hud(
         } else {
             let multi = lm_states.len() > 1;
             for (source, &armed) in lm_states {
-                let label = if multi { source.as_str() } else { "LAUNCH MONITOR" };
-                let (status, vfade) = if armed { ("READY", 0.0) } else { ("WAITING", LABEL_FADE) };
+                let label = if multi {
+                    source.as_str()
+                } else {
+                    "LAUNCH MONITOR"
+                };
+                let (status, vfade) = if armed {
+                    ("READY", 0.0)
+                } else {
+                    ("WAITING", LABEL_FADE)
+                };
                 rows.push((label, status, LABEL_FADE, vfade));
             }
         }
@@ -357,9 +446,21 @@ pub fn build_hud(
 
         let mut row_y = header_y + sc.line_height;
         for (label, value, label_fade, value_fade) in &rows {
-            lines.extend(hud_font::build_text(label, sc.label_x, row_y, sc.char_height, *label_fade));
+            lines.extend(hud_font::build_text(
+                label,
+                sc.label_x,
+                row_y,
+                sc.char_height,
+                *label_fade,
+            ));
             let value_x = panel_w - panel_margin - hud_font::text_width(value, sc.char_height);
-            lines.extend(hud_font::build_text(value, value_x, row_y, sc.char_height, *value_fade));
+            lines.extend(hud_font::build_text(
+                value,
+                value_x,
+                row_y,
+                sc.char_height,
+                *value_fade,
+            ));
             row_y += sc.line_height;
         }
     }
@@ -367,10 +468,24 @@ pub fn build_hud(
     HudGeometry { lines, fills }
 }
 
-fn emit_section_header(lines: &mut Vec<GridVertex>, title: &str, y: f32, panel_w: f32, sc: &HudScale) -> f32 {
-    lines.extend(hud_font::build_text(title, sc.margin_left, y, sc.char_height, HEADER_FADE));
+fn emit_section_header(
+    lines: &mut Vec<GridVertex>,
+    title: &str,
+    y: f32,
+    panel_w: f32,
+    sc: &HudScale,
+) -> f32 {
+    lines.extend(hud_font::build_text(
+        title,
+        sc.margin_left,
+        y,
+        sc.char_height,
+        HEADER_FADE,
+    ));
     let panel_margin = 16.0 * sc.line_height / REF_LINE_HEIGHT;
-    let line_start = sc.margin_left + hud_font::text_width(title, sc.char_height) + 8.0 * sc.char_height / REF_CHAR_HEIGHT;
+    let line_start = sc.margin_left
+        + hud_font::text_width(title, sc.char_height)
+        + 8.0 * sc.char_height / REF_CHAR_HEIGHT;
     let line_end = panel_w - panel_margin;
     if line_end > line_start + 10.0 {
         let sep = hud_font::build_hline(line_start, line_end, y + sc.char_height * 0.5, DECOR_FADE);
@@ -379,14 +494,33 @@ fn emit_section_header(lines: &mut Vec<GridVertex>, title: &str, y: f32, panel_w
     y + sc.line_height
 }
 
-fn emit_row(lines: &mut Vec<GridVertex>, label: &str, value: &str, y: f32, panel_w: f32, sc: &HudScale) -> f32 {
-    lines.extend(hud_font::build_text(label, sc.label_x, y, sc.char_height, LABEL_FADE));
+fn emit_row(
+    lines: &mut Vec<GridVertex>,
+    label: &str,
+    value: &str,
+    y: f32,
+    panel_w: f32,
+    sc: &HudScale,
+) -> f32 {
+    lines.extend(hud_font::build_text(
+        label,
+        sc.label_x,
+        y,
+        sc.char_height,
+        LABEL_FADE,
+    ));
     let panel_margin = 16.0 * sc.line_height / REF_LINE_HEIGHT;
     let panel_right = panel_w - panel_margin;
     let value_w = hud_font::text_width(value, sc.char_height);
     let min_x = sc.label_x + hud_font::text_width(label, sc.char_height) + panel_margin;
     let value_x = (panel_right - value_w).max(min_x);
-    lines.extend(hud_font::build_text(value, value_x, y, sc.char_height, VALUE_FADE));
+    lines.extend(hud_font::build_text(
+        value,
+        value_x,
+        y,
+        sc.char_height,
+        VALUE_FADE,
+    ));
     y + sc.line_height
 }
 
@@ -396,8 +530,12 @@ fn build_panel_fill(x_left: f32, x_right: f32, screen_h: f32) -> Vec<GridVertex>
         fade: 0.0,
     };
     vec![
-        v(x_left, 0.0), v(x_right, 0.0), v(x_right, screen_h),
-        v(x_left, 0.0), v(x_right, screen_h), v(x_left, screen_h),
+        v(x_left, 0.0),
+        v(x_right, 0.0),
+        v(x_right, screen_h),
+        v(x_left, 0.0),
+        v(x_right, screen_h),
+        v(x_left, screen_h),
     ]
 }
 
@@ -454,7 +592,15 @@ mod tests {
             elapsed_s: 3.2,
             in_flight: true,
         };
-        let geom = build_hud(Some(&t), UnitSystem::Imperial, false, &HashMap::new(), true, 1920.0, 1080.0);
+        let geom = build_hud(
+            Some(&t),
+            UnitSystem::Imperial,
+            false,
+            &HashMap::new(),
+            true,
+            1920.0,
+            1080.0,
+        );
         assert!(!geom.lines.is_empty(), "should have text lines");
         assert_eq!(geom.lines.len() % 2, 0, "LINE_LIST needs even count");
         assert_eq!(geom.fills.len(), 12, "2 panels × 2 triangles each");
@@ -462,19 +608,47 @@ mod tests {
 
     #[test]
     fn build_hud_without_telemetry() {
-        let geom = build_hud(None, UnitSystem::Imperial, false, &HashMap::new(), true, 1920.0, 1080.0);
+        let geom = build_hud(
+            None,
+            UnitSystem::Imperial,
+            false,
+            &HashMap::new(),
+            true,
+            1920.0,
+            1080.0,
+        );
         assert!(!geom.lines.is_empty(), "should show standby text");
     }
 
     #[test]
     fn panel_fills_cover_both_sides() {
-        let geom = build_hud(None, UnitSystem::Imperial, false, &HashMap::new(), true, 1920.0, 1080.0);
+        let geom = build_hud(
+            None,
+            UnitSystem::Imperial,
+            false,
+            &HashMap::new(),
+            true,
+            1920.0,
+            1080.0,
+        );
         // Left panel: 0..384, right panel: 1536..1920
         let left_fills = &geom.fills[..6];
         let right_fills = &geom.fills[6..12];
-        let left_max_x = left_fills.iter().map(|v| v.position[0]).fold(0.0_f32, f32::max);
-        let right_min_x = right_fills.iter().map(|v| v.position[0]).fold(f32::MAX, f32::min);
-        assert!((left_max_x - 384.0).abs() < 1.0, "left panel edge should be 384, got {left_max_x}");
-        assert!((right_min_x - 1536.0).abs() < 1.0, "right panel edge should be 1536, got {right_min_x}");
+        let left_max_x = left_fills
+            .iter()
+            .map(|v| v.position[0])
+            .fold(0.0_f32, f32::max);
+        let right_min_x = right_fills
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (left_max_x - 384.0).abs() < 1.0,
+            "left panel edge should be 384, got {left_max_x}"
+        );
+        assert!(
+            (right_min_x - 1536.0).abs() < 1.0,
+            "right panel edge should be 1536, got {right_min_x}"
+        );
     }
 }

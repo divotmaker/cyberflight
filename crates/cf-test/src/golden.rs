@@ -37,7 +37,9 @@ pub fn assert_golden(rendered: &RgbaImage, golden_path: &Path, threshold: f64) {
         // Save failure artifacts
         let stem = golden_path.with_extension("");
         let fail_path = format!("{}_FAIL.png", stem.display());
-        rendered.save(&fail_path).expect("failed to save fail image");
+        rendered
+            .save(&fail_path)
+            .expect("failed to save fail image");
         eprintln!(
             "Golden comparison FAILED: SSIM {:.4} < {:.4}\n  golden: {}\n  actual: {}",
             result.ssim,

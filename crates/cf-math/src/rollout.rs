@@ -212,8 +212,7 @@ fn step_ground(state: GroundState, dt: f64, surface: &RolloutSurface) -> GroundS
     // v_c < 0: contact slides backward (excess topspin)
     // v_c = 0: pure rolling
     let v_c = v_fwd - BALL_RADIUS * state.omega;
-    let is_rolling = v_c.abs() < ROLL_TRANSITION_THRESHOLD
-        && speed > STOP_SPEED;
+    let is_rolling = v_c.abs() < ROLL_TRANSITION_THRESHOLD && speed > STOP_SPEED;
 
     if is_rolling {
         // Pure rolling: omega locked to v_fwd/R, decelerate together.
@@ -222,7 +221,12 @@ fn step_ground(state: GroundState, dt: f64, surface: &RolloutSurface) -> GroundS
         let a = (5.0 / 7.0) * mu_eff * G;
 
         if speed < 1e-10 {
-            return GroundState { omega: 0.0, dir_x, dir_z, ..state };
+            return GroundState {
+                omega: 0.0,
+                dir_x,
+                dir_z,
+                ..state
+            };
         }
 
         // Decelerate speed toward zero (rolling friction opposes motion).
@@ -354,8 +358,18 @@ mod tests {
     fn green_rolls_farther_than_fairway() {
         let v0 = 5.0;
         let omega = v0 / BALL_RADIUS; // pure rolling
-        let r_fairway = simulate_rollout(DVec3::ZERO, DVec3::new(v0, 0.0, 0.0), omega, &RolloutSurface::FAIRWAY);
-        let r_green = simulate_rollout(DVec3::ZERO, DVec3::new(v0, 0.0, 0.0), omega, &RolloutSurface::GREEN);
+        let r_fairway = simulate_rollout(
+            DVec3::ZERO,
+            DVec3::new(v0, 0.0, 0.0),
+            omega,
+            &RolloutSurface::FAIRWAY,
+        );
+        let r_green = simulate_rollout(
+            DVec3::ZERO,
+            DVec3::new(v0, 0.0, 0.0),
+            omega,
+            &RolloutSurface::GREEN,
+        );
         assert!(
             r_green.rollout_m > r_fairway.rollout_m,
             "green should roll farther: green={:.1}m, fairway={:.1}m",
@@ -441,8 +455,18 @@ mod tests {
     fn stimpmeter_fairway_shorter() {
         let v0 = 1.83;
         let omega = v0 / BALL_RADIUS;
-        let r_green = simulate_rollout(DVec3::ZERO, DVec3::new(v0, 0.0, 0.0), omega, &RolloutSurface::GREEN);
-        let r_fairway = simulate_rollout(DVec3::ZERO, DVec3::new(v0, 0.0, 0.0), omega, &RolloutSurface::FAIRWAY);
+        let r_green = simulate_rollout(
+            DVec3::ZERO,
+            DVec3::new(v0, 0.0, 0.0),
+            omega,
+            &RolloutSurface::GREEN,
+        );
+        let r_fairway = simulate_rollout(
+            DVec3::ZERO,
+            DVec3::new(v0, 0.0, 0.0),
+            omega,
+            &RolloutSurface::FAIRWAY,
+        );
         assert!(
             r_fairway.rollout_m < r_green.rollout_m,
             "fairway shorter: {:.2}m vs green {:.2}m",

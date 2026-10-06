@@ -70,10 +70,9 @@ impl GpuContext {
         // SAFETY: Loading the Vulkan library from the system.
         let entry = unsafe { ash::Entry::load()? };
 
-        let surface_extensions =
-            ash_window::enumerate_required_extensions(display_handle)
-                .map_err(|e| RenderError::Window(format!("enumerate extensions: {e}")))?
-                .to_vec();
+        let surface_extensions = ash_window::enumerate_required_extensions(display_handle)
+            .map_err(|e| RenderError::Window(format!("enumerate extensions: {e}")))?
+            .to_vec();
 
         let instance = Self::create_instance(&entry, &config, &surface_extensions)?;
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
@@ -101,7 +100,15 @@ impl GpuContext {
             has_rt,
         )?;
 
-        let ctx = Self::finish(config, entry, instance, physical_device, device, queue_family_index, has_rt)?;
+        let ctx = Self::finish(
+            config,
+            entry,
+            instance,
+            physical_device,
+            device,
+            queue_family_index,
+            has_rt,
+        )?;
         Ok((ctx, surface, surface_loader))
     }
 
@@ -115,8 +122,7 @@ impl GpuContext {
 
         let instance = Self::create_instance(&entry, &config, &[])?;
 
-        let (physical_device, queue_family_index) =
-            Self::pick_physical_device(&instance, None)?;
+        let (physical_device, queue_family_index) = Self::pick_physical_device(&instance, None)?;
 
         let want_rt = config.enable_raytracing;
         let has_rt = want_rt && Self::device_supports_rt(&instance, physical_device);
@@ -132,7 +138,15 @@ impl GpuContext {
             has_rt,
         )?;
 
-        Self::finish(config, entry, instance, physical_device, device, queue_family_index, has_rt)
+        Self::finish(
+            config,
+            entry,
+            instance,
+            physical_device,
+            device,
+            queue_family_index,
+            has_rt,
+        )
     }
 
     fn finish(
@@ -163,8 +177,7 @@ impl GpuContext {
         }
 
         // SAFETY: Querying physical device features.
-        let supported =
-            unsafe { instance.get_physical_device_features(physical_device) };
+        let supported = unsafe { instance.get_physical_device_features(physical_device) };
         let wide_lines = supported.wide_lines == vk::TRUE;
 
         Ok(Self {
@@ -217,8 +230,7 @@ impl GpuContext {
         let mut extensions = surface_extensions.to_vec();
 
         let mut layers: Vec<*const i8> = Vec::new();
-        let validation_layer =
-            CString::new("VK_LAYER_KHRONOS_validation").expect("valid cstr");
+        let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").expect("valid cstr");
 
         if config.validation {
             layers.push(validation_layer.as_ptr());
@@ -298,7 +310,10 @@ impl GpuContext {
         let dev_major = vk::api_version_major(props.api_version);
         let dev_minor = vk::api_version_minor(props.api_version);
         let dev_patch = vk::api_version_patch(props.api_version);
-        eprintln!("GPU: {} (Vulkan {dev_major}.{dev_minor}.{dev_patch})", name.to_string_lossy());
+        eprintln!(
+            "GPU: {} (Vulkan {dev_major}.{dev_minor}.{dev_patch})",
+            name.to_string_lossy()
+        );
 
         Ok((pd, qi))
     }
@@ -313,13 +328,11 @@ impl GpuContext {
         };
 
         RT_DEVICE_EXTENSIONS.iter().all(|required| {
-            extensions
-                .iter()
-                .any(|ext| {
-                    // SAFETY: Extension name is a valid C string from Vulkan.
-                    let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
-                    name == *required
-                })
+            extensions.iter().any(|ext| {
+                // SAFETY: Extension name is a valid C string from Vulkan.
+                let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+                name == *required
+            })
         })
     }
 
@@ -348,19 +361,18 @@ impl GpuContext {
         }
 
         // SAFETY: Querying physical device features.
-        let supported_features =
-            unsafe { instance.get_physical_device_features(physical_device) };
+        let supported_features = unsafe { instance.get_physical_device_features(physical_device) };
         let wide_lines = supported_features.wide_lines == vk::TRUE;
         let features = vk::PhysicalDeviceFeatures::default().wide_lines(wide_lines);
 
         // RT requires buffer_device_address + acceleration_structure + rt_pipeline features.
         // Chain these via pNext when RT is enabled.
-        let mut bda_features = vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
-            .buffer_device_address(true);
+        let mut bda_features =
+            vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
         let mut as_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
             .acceleration_structure(true);
-        let mut rt_features = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default()
-            .ray_tracing_pipeline(true);
+        let mut rt_features =
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
 
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)

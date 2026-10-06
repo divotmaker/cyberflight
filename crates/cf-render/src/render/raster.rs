@@ -169,11 +169,7 @@ impl Renderer {
         // SAFETY: Drawing within an active render pass.
         unsafe {
             // Grid lines (LINE_LIST, cyan, 1px)
-            device.cmd_bind_pipeline(
-                cb,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.pipeline,
-            );
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
             device.cmd_set_line_width(cb, 1.0);
 
             let pc_cyan = GridPushConstants {

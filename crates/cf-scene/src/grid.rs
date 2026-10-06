@@ -163,26 +163,42 @@ pub fn generate_floor_quad(config: &GridConfig, tee_half_size: f32) -> Vec<GridV
 
     // 1. Tee box: X ∈ [-th, +th], Z ∈ [-th, +th]
     verts.extend_from_slice(&[
-        v(-th, -th), v(th, -th), v(th, th),
-        v(-th, -th), v(th, th), v(-th, th),
+        v(-th, -th),
+        v(th, -th),
+        v(th, th),
+        v(-th, -th),
+        v(th, th),
+        v(-th, th),
     ]);
 
     // 2. Left wing: X ∈ [-lat, -th], Z ∈ [0, dr]
     verts.extend_from_slice(&[
-        v(-lat, 0.0), v(-th, 0.0), v(-th, dr),
-        v(-lat, 0.0), v(-th, dr), v(-lat, dr),
+        v(-lat, 0.0),
+        v(-th, 0.0),
+        v(-th, dr),
+        v(-lat, 0.0),
+        v(-th, dr),
+        v(-lat, dr),
     ]);
 
     // 3. Center above tee box: X ∈ [-th, +th], Z ∈ [th, dr]
     verts.extend_from_slice(&[
-        v(-th, th), v(th, th), v(th, dr),
-        v(-th, th), v(th, dr), v(-th, dr),
+        v(-th, th),
+        v(th, th),
+        v(th, dr),
+        v(-th, th),
+        v(th, dr),
+        v(-th, dr),
     ]);
 
     // 4. Right wing: X ∈ [+th, +lat], Z ∈ [0, dr]
     verts.extend_from_slice(&[
-        v(th, 0.0), v(lat, 0.0), v(lat, dr),
-        v(th, 0.0), v(lat, dr), v(th, dr),
+        v(th, 0.0),
+        v(lat, 0.0),
+        v(lat, dr),
+        v(th, 0.0),
+        v(lat, dr),
+        v(th, dr),
     ]);
 
     verts

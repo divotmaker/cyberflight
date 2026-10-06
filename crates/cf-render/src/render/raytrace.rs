@@ -4,11 +4,17 @@ use cf_scene::camera::Camera;
 
 use crate::rt_pipeline::RtPushConstants;
 
-use super::{Renderer, CHASE_VIEWPORT_FRAC};
+use super::{CHASE_VIEWPORT_FRAC, Renderer};
 
 impl Renderer {
     /// Build RT push constants for a given camera and viewport offset.
-    fn rt_push_constants(&self, camera: &Camera, aspect: f32, vp_offset_x: f32, vp_offset_y: f32) -> RtPushConstants {
+    fn rt_push_constants(
+        &self,
+        camera: &Camera,
+        aspect: f32,
+        vp_offset_x: f32,
+        vp_offset_y: f32,
+    ) -> RtPushConstants {
         let view = camera.view_matrix();
         let mut proj = camera.projection_matrix(aspect);
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
@@ -44,11 +50,7 @@ impl Renderer {
     ///
     /// # Safety
     /// The command buffer must be in the recording state.
-    pub(super) unsafe fn record_rt_reflections(
-        &self,
-        cb: vk::CommandBuffer,
-        camera: &Camera,
-    ) {
+    pub(super) unsafe fn record_rt_reflections(&self, cb: vk::CommandBuffer, camera: &Camera) {
         let device = &self.gpu.device;
         let extent = self.swapchain.extent;
         let rt = self.rt_pipeline.as_ref().expect("RT pipeline present");
@@ -174,11 +176,7 @@ impl Renderer {
             };
             device.cmd_set_scissor(cb, 0, &[scissor]);
 
-            device.cmd_bind_pipeline(
-                cb,
-                vk::PipelineBindPoint::GRAPHICS,
-                composite.pipeline,
-            );
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, composite.pipeline);
             device.cmd_bind_descriptor_sets(
                 cb,
                 vk::PipelineBindPoint::GRAPHICS,

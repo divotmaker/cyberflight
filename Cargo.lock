@@ -587,9 +587,9 @@ dependencies = [
 
 [[package]]
 name = "flightrelay"
-version = "0.1.7"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0074be0f495eee3a5f51ef1501c91370777e1c35ac8f137e5b767c7796c630a"
+checksum = "f250f3a64629c15c61fd1da5bb314524b31927e69c87e9c6595be92c5673f2f0"
 dependencies = [
  "serde",
  "serde_json",

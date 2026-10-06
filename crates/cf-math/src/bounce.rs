@@ -353,8 +353,16 @@ mod tests {
         let vel = DVec3::new(20.0, -15.0, 0.0);
         let spin = rpm_to_rads(5000.0);
 
-        let firm = BounceSurface { e_n: 0.35, mu: 0.40, kp: 0.005 };
-        let soft = BounceSurface { e_n: 0.35, mu: 0.40, kp: 0.025 };
+        let firm = BounceSurface {
+            e_n: 0.35,
+            mu: 0.40,
+            kp: 0.005,
+        };
+        let soft = BounceSurface {
+            e_n: 0.35,
+            mu: 0.40,
+            kp: 0.025,
+        };
 
         let r_firm = compute_bounce(vel, spin, 0.0, &firm);
         let r_soft = compute_bounce(vel, spin, 0.0, &soft);

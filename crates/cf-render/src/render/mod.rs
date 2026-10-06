@@ -3,13 +3,15 @@ mod raster;
 mod raytrace;
 
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use cf_scene::camera::Camera;
 use cf_scene::color;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
-use cf_scene::tee::{TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill};
+use cf_scene::tee::{
+    TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill,
+};
 
 /// Per-frame flight render data: ball position + trail points (scene space).
 pub struct FlightRenderData {
@@ -21,7 +23,7 @@ pub struct FlightRenderData {
 use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::mode::RenderMode;
-use crate::pipeline::{GridPipeline, DEPTH_STENCIL_FORMAT};
+use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::window::Swapchain;
@@ -174,11 +176,8 @@ impl Renderer {
             swapchain.format,
             vk::ImageLayout::PRESENT_SRC_KHR,
         )?;
-        let hud_framebuffers = Self::create_hud_framebuffers(
-            &gpu.device,
-            &swapchain,
-            hud_render_pass,
-        )?;
+        let hud_framebuffers =
+            Self::create_hud_framebuffers(&gpu.device, &swapchain, hud_render_pass)?;
         let (hud_fill_pipeline, hud_line_pipeline) =
             pipeline.create_hud_pipelines(&gpu.device, hud_render_pass)?;
 
@@ -209,26 +208,46 @@ impl Renderer {
         // Pre-allocate dynamic flight buffers (empty initially).
         // Line: trail centerline (LINE_LIST), ~2000 points × 2 verts × 16 bytes = ~64 KB
         let flight_line_capacity: vk::DeviceSize = 128 * 1024;
-        let (flight_line_buffer, flight_line_allocation) =
-            Self::create_dynamic_buffer(&gpu.device, &mut gpu.allocator, flight_line_capacity, "flight line")?;
+        let (flight_line_buffer, flight_line_allocation) = Self::create_dynamic_buffer(
+            &gpu.device,
+            &mut gpu.allocator,
+            flight_line_capacity,
+            "flight line",
+        )?;
         // Fill: up to 5 in-flight balls × 1728 verts = ~140 KB
         let flight_fill_capacity: vk::DeviceSize = 256 * 1024;
-        let (flight_fill_buffer, flight_fill_allocation) =
-            Self::create_dynamic_buffer(&gpu.device, &mut gpu.allocator, flight_fill_capacity, "flight fill")?;
+        let (flight_fill_buffer, flight_fill_allocation) = Self::create_dynamic_buffer(
+            &gpu.device,
+            &mut gpu.allocator,
+            flight_fill_capacity,
+            "flight fill",
+        )?;
         // Glow: up to 5 in-flight balls × (ball glow + trail glow) ≈ 6 MB
         let flight_glow_capacity: vk::DeviceSize = 8 * 1024 * 1024;
-        let (flight_glow_buffer, flight_glow_allocation) =
-            Self::create_dynamic_buffer(&gpu.device, &mut gpu.allocator, flight_glow_capacity, "flight glow")?;
+        let (flight_glow_buffer, flight_glow_allocation) = Self::create_dynamic_buffer(
+            &gpu.device,
+            &mut gpu.allocator,
+            flight_glow_capacity,
+            "flight glow",
+        )?;
 
         // Pre-allocate HUD overlay buffers.
         // Lines: ~5000 text verts + decoration lines ≈ 128 KB
         let hud_line_capacity: vk::DeviceSize = 128 * 1024;
-        let (hud_line_buffer, hud_line_allocation) =
-            Self::create_dynamic_buffer(&gpu.device, &mut gpu.allocator, hud_line_capacity, "hud lines")?;
+        let (hud_line_buffer, hud_line_allocation) = Self::create_dynamic_buffer(
+            &gpu.device,
+            &mut gpu.allocator,
+            hud_line_capacity,
+            "hud lines",
+        )?;
         // Fill: panel background = 6 verts × 16 bytes = 96 bytes, allocate 4 KB
         let hud_fill_capacity: vk::DeviceSize = 4 * 1024;
-        let (hud_fill_buffer, hud_fill_allocation) =
-            Self::create_dynamic_buffer(&gpu.device, &mut gpu.allocator, hud_fill_capacity, "hud fill")?;
+        let (hud_fill_buffer, hud_fill_allocation) = Self::create_dynamic_buffer(
+            &gpu.device,
+            &mut gpu.allocator,
+            hud_fill_capacity,
+            "hud fill",
+        )?;
 
         // Build RT pipeline if hardware supports it.
         let spacing_m = grid_config.unit.to_meters(f64::from(grid_config.spacing)) as f32;
@@ -329,7 +348,11 @@ impl Renderer {
             composite,
             grid_spacing_m: spacing_m,
             grid_max_fade_dist,
-            rt_ball_center: glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
+            rt_ball_center: glam::Vec3::new(
+                0.0,
+                cf_scene::tee::TEE_ELEVATION + tee.ball_radius,
+                0.0,
+            ),
             rt_trail_points: Vec::new(),
             rt_trail_fade_dist: 0.0,
             rt_needs_update: false,
@@ -409,9 +432,7 @@ impl Renderer {
             // HUD overlay (final_layout = PRESENT_SRC_KHR)
             self.record_hud_commands(cb, image_index, self.swapchain.extent);
 
-            device
-                .end_command_buffer(cb)
-                .map_err(RenderError::Vulkan)?;
+            device.end_command_buffer(cb).map_err(RenderError::Vulkan)?;
         }
 
         // Submit
@@ -549,11 +570,8 @@ impl Renderer {
             self.pipeline.render_pass,
             self.depth_stencil_view,
         )?;
-        self.hud_framebuffers = Self::create_hud_framebuffers(
-            &self.gpu.device,
-            &self.swapchain,
-            self.hud_render_pass,
-        )?;
+        self.hud_framebuffers =
+            Self::create_hud_framebuffers(&self.gpu.device, &self.swapchain, self.hud_render_pass)?;
         // Resize RT storage image and update composite descriptor to match.
         if let Some(ref mut rtp) = self.rt_pipeline {
             rtp.resize_storage(
@@ -595,10 +613,9 @@ impl Renderer {
         if self.command_buffers.len() != self.framebuffers.len() {
             // SAFETY: Old command buffers freed by pool reset.
             unsafe {
-                self.gpu.device.free_command_buffers(
-                    self.gpu.command_pool,
-                    &self.command_buffers,
-                );
+                self.gpu
+                    .device
+                    .free_command_buffers(self.gpu.command_pool, &self.command_buffers);
             }
             self.command_buffers =
                 Self::allocate_command_buffers(&self.gpu, self.framebuffers.len() as u32)?;
@@ -631,9 +648,9 @@ impl Renderer {
     /// and uploads them to the pre-allocated dynamic buffers. Also caches
     /// RT scene data for per-frame TLAS rebuild.
     pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
+        use crate::rt_offscreen::trim_trail_from_ball_pub;
         use cf_scene::tee::{generate_ball_at, generate_ball_glow_at};
         use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, generate_trail_glow, generate_trail_line};
-        use crate::rt_offscreen::trim_trail_from_ball_pub;
 
         self.ball_on_tee_box = flights.is_empty();
 
@@ -643,7 +660,8 @@ impl Renderer {
         let mut glow_verts: Vec<GridVertex> = Vec::new();
 
         // Track RT scene state: use the first flight's ball + trail for RT reflections.
-        let mut new_rt_ball = glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
+        let mut new_rt_ball =
+            glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
         let mut new_rt_trail: Vec<glam::Vec3> = Vec::new();
 
         for (i, flight) in flights.iter().enumerate() {
@@ -679,7 +697,8 @@ impl Renderer {
             // so the RT reflection disappears in sync with the visible tracer.
             if i == 0 {
                 let ball_center = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-                let trail_positions: Vec<glam::Vec3> = flight.trail_points
+                let trail_positions: Vec<glam::Vec3> = flight
+                    .trail_points
                     .iter()
                     // COMMENT OUT THIS LINE TO IMPRINT TRACER REFLECTIONS
                     .filter(|p| (flight.current_time - p.time) < DEFAULT_TRAIL_LIFETIME)
@@ -699,31 +718,31 @@ impl Renderer {
             self.rt_ball_center = new_rt_ball;
             self.rt_trail_points = new_rt_trail.clone();
             // Compute trail fade distance (arc length of trimmed trail).
-            self.rt_trail_fade_dist = new_rt_trail.windows(2)
+            self.rt_trail_fade_dist = new_rt_trail
+                .windows(2)
                 .map(|w| (w[1] - w[0]).length())
                 .sum();
             self.rt_needs_update = true;
         }
 
         if let Some(alloc) = &self.flight_line_allocation {
-            self.flight_line_count = Self::upload_to_mapped(alloc, &line_verts, self.flight_line_capacity);
+            self.flight_line_count =
+                Self::upload_to_mapped(alloc, &line_verts, self.flight_line_capacity);
         }
         if let Some(alloc) = &self.flight_fill_allocation {
-            self.flight_fill_count = Self::upload_to_mapped(alloc, &fill_verts, self.flight_fill_capacity);
+            self.flight_fill_count =
+                Self::upload_to_mapped(alloc, &fill_verts, self.flight_fill_capacity);
         }
         if let Some(alloc) = &self.flight_glow_allocation {
-            self.flight_glow_count = Self::upload_to_mapped(alloc, &glow_verts, self.flight_glow_capacity);
+            self.flight_glow_count =
+                Self::upload_to_mapped(alloc, &glow_verts, self.flight_glow_capacity);
         }
 
         // Rebuild RT TLAS if scene changed.
         if self.rt_needs_update {
             if let Some(ref mut rt_pipeline) = self.rt_pipeline {
                 let grid_config = cf_scene::grid::GridConfig::default();
-                let geometries = build_scene_geometry(
-                    &grid_config,
-                    &tee,
-                    &self.rt_trail_points,
-                );
+                let geometries = build_scene_geometry(&grid_config, &tee, &self.rt_trail_points);
                 if let Err(e) = rt_pipeline.update_scene(&mut self.gpu, &geometries) {
                     eprintln!("RT scene update failed: {e}");
                 }
@@ -763,7 +782,11 @@ impl Renderer {
                     .layers(1);
 
                 // SAFETY: Creating framebuffer with valid attachments.
-                unsafe { device.create_framebuffer(&fb_info, None).map_err(RenderError::Vulkan) }
+                unsafe {
+                    device
+                        .create_framebuffer(&fb_info, None)
+                        .map_err(RenderError::Vulkan)
+                }
             })
             .collect()
     }
@@ -786,7 +809,11 @@ impl Renderer {
                     .layers(1);
 
                 // SAFETY: Creating framebuffer with valid attachment.
-                unsafe { device.create_framebuffer(&fb_info, None).map_err(RenderError::Vulkan) }
+                unsafe {
+                    device
+                        .create_framebuffer(&fb_info, None)
+                        .map_err(RenderError::Vulkan)
+                }
             })
             .collect()
     }
@@ -962,7 +989,11 @@ impl Renderer {
     /// Write vertices into a pre-allocated mapped buffer.
     ///
     /// Returns the number of vertices written. Silently truncates if over capacity.
-    fn upload_to_mapped(allocation: &Allocation, vertices: &[GridVertex], capacity: vk::DeviceSize) -> u32 {
+    fn upload_to_mapped(
+        allocation: &Allocation,
+        vertices: &[GridVertex],
+        capacity: vk::DeviceSize,
+    ) -> u32 {
         if vertices.is_empty() {
             return 0;
         }
@@ -1019,8 +1050,7 @@ impl Renderer {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [binding];
-        let ds_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
         let descriptor_set_layout = unsafe {
             device
@@ -1030,8 +1060,7 @@ impl Renderer {
 
         // Pipeline layout (descriptor set, no push constants).
         let set_layouts = [descriptor_set_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layouts);
+        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         // SAFETY: Creating pipeline layout.
         let pipeline_layout = unsafe {
             device
@@ -1089,8 +1118,8 @@ impl Renderer {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE)
             .alpha_blend_op(vk::BlendOp::ADD);
         let blend_attachments = [blend_attachment];
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&blend_attachments);
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
 
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state =
@@ -1112,11 +1141,7 @@ impl Renderer {
         // SAFETY: Creating graphics pipeline.
         let pipeline = unsafe {
             device
-                .create_graphics_pipelines(
-                    vk::PipelineCache::null(),
-                    &[create_info],
-                    None,
-                )
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
                 .map_err(|(_pipelines, err)| RenderError::Vulkan(err))?[0]
         };
 
@@ -1196,8 +1221,7 @@ impl Renderer {
         count: usize,
     ) -> Result<(Vec<vk::Semaphore>, Vec<vk::Semaphore>, Vec<vk::Fence>), RenderError> {
         let sem_info = vk::SemaphoreCreateInfo::default();
-        let fence_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let mut image_available = Vec::with_capacity(count);
         let mut render_finished = Vec::with_capacity(count);
@@ -1249,15 +1273,27 @@ impl Drop for Renderer {
             for fb in &self.hud_framebuffers {
                 self.gpu.device.destroy_framebuffer(*fb, None);
             }
-            self.gpu.device.destroy_pipeline(self.hud_fill_pipeline, None);
-            self.gpu.device.destroy_pipeline(self.hud_line_pipeline, None);
-            self.gpu.device.destroy_render_pass(self.hud_render_pass, None);
+            self.gpu
+                .device
+                .destroy_pipeline(self.hud_fill_pipeline, None);
+            self.gpu
+                .device
+                .destroy_pipeline(self.hud_line_pipeline, None);
+            self.gpu
+                .device
+                .destroy_render_pass(self.hud_render_pass, None);
             self.gpu.device.destroy_buffer(self.vertex_buffer, None);
             self.gpu.device.destroy_buffer(self.fill_buffer, None);
             self.gpu.device.destroy_buffer(self.glow_buffer, None);
-            self.gpu.device.destroy_buffer(self.flight_line_buffer, None);
-            self.gpu.device.destroy_buffer(self.flight_fill_buffer, None);
-            self.gpu.device.destroy_buffer(self.flight_glow_buffer, None);
+            self.gpu
+                .device
+                .destroy_buffer(self.flight_line_buffer, None);
+            self.gpu
+                .device
+                .destroy_buffer(self.flight_fill_buffer, None);
+            self.gpu
+                .device
+                .destroy_buffer(self.flight_glow_buffer, None);
             self.gpu.device.destroy_buffer(self.hud_line_buffer, None);
             self.gpu.device.destroy_buffer(self.hud_fill_buffer, None);
             self.gpu
@@ -1299,13 +1335,25 @@ impl Drop for Renderer {
                     self.gpu.device.destroy_framebuffer(*fb, None);
                 }
                 self.gpu.device.destroy_pipeline(composite.pipeline, None);
-                self.gpu.device.destroy_pipeline_layout(composite.pipeline_layout, None);
-                self.gpu.device.destroy_descriptor_pool(composite.descriptor_pool, None);
-                self.gpu.device.destroy_descriptor_set_layout(composite.descriptor_set_layout, None);
+                self.gpu
+                    .device
+                    .destroy_pipeline_layout(composite.pipeline_layout, None);
+                self.gpu
+                    .device
+                    .destroy_descriptor_pool(composite.descriptor_pool, None);
+                self.gpu
+                    .device
+                    .destroy_descriptor_set_layout(composite.descriptor_set_layout, None);
                 self.gpu.device.destroy_sampler(composite.sampler, None);
-                self.gpu.device.destroy_render_pass(composite.render_pass, None);
-                self.gpu.device.destroy_shader_module(composite.vert_module, None);
-                self.gpu.device.destroy_shader_module(composite.frag_module, None);
+                self.gpu
+                    .device
+                    .destroy_render_pass(composite.render_pass, None);
+                self.gpu
+                    .device
+                    .destroy_shader_module(composite.vert_module, None);
+                self.gpu
+                    .device
+                    .destroy_shader_module(composite.frag_module, None);
             }
 
             if let Some(ref mut rtp) = self.rt_pipeline {

@@ -17,7 +17,9 @@ pub enum OutputMode {
 
 impl Default for OutputMode {
     fn default() -> Self {
-        Self::Udp { dest: "127.0.0.1:5004".to_owned() }
+        Self::Udp {
+            dest: "127.0.0.1:5004".to_owned(),
+        }
     }
 }
 
@@ -28,7 +30,9 @@ impl OutputMode {
         if s.eq_ignore_ascii_case("hls") {
             Some(Self::Hls)
         } else if s.eq_ignore_ascii_case("udp") {
-            Some(Self::Udp { dest: "127.0.0.1:5004".to_owned() })
+            Some(Self::Udp {
+                dest: "127.0.0.1:5004".to_owned(),
+            })
         } else {
             None
         }
@@ -234,7 +238,10 @@ impl StreamEncoder {
         let _ = self.child.wait();
 
         self.child = spawn_encoder(&self.config)?;
-        eprintln!("StreamEncoder: restarted (was at frame {})", self.frame_count);
+        eprintln!(
+            "StreamEncoder: restarted (was at frame {})",
+            self.frame_count
+        );
         Ok(())
     }
 
@@ -292,8 +299,16 @@ fn spawn_encoder(config: &StreamConfig) -> Result<Child, RenderError> {
         let mut opts = vec!["-preset", "ll"];
         if is_udp {
             // Low-latency: zero delay, keyframe every 0.5s (30 frames at 60fps).
-            opts.extend_from_slice(&["-delay", "0", "-zerolatency", "1",
-                "-g", "30", "-keyint_min", "30"]);
+            opts.extend_from_slice(&[
+                "-delay",
+                "0",
+                "-zerolatency",
+                "1",
+                "-g",
+                "30",
+                "-keyint_min",
+                "30",
+            ]);
         }
         ("h264_nvenc", opts)
     } else {
@@ -334,13 +349,22 @@ fn spawn_ffmpeg(
 
     let mut cmd = Command::new("ffmpeg");
     cmd.args([
-        "-y", "-hide_banner", "-loglevel", "warning",
-        "-f", "rawvideo",
-        "-pix_fmt", input_pix_fmt,
-        "-s", &size,
-        "-r", &fps,
-        "-i", "pipe:0",
-        "-c:v", codec,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        input_pix_fmt,
+        "-s",
+        &size,
+        "-r",
+        &fps,
+        "-i",
+        "pipe:0",
+        "-c:v",
+        codec,
     ]);
     cmd.args(codec_opts);
     cmd.args(["-b:v", &config.bitrate, "-pix_fmt", "yuv420p"]);
@@ -352,19 +376,26 @@ fn spawn_ffmpeg(
             let hls_list = config.hls_list_size.to_string();
             let output = config.output_dir.join("stream.m3u8");
             cmd.args([
-                "-f", "hls",
-                "-hls_time", &hls_time,
-                "-hls_list_size", &hls_list,
-                "-hls_flags", "delete_segments",
+                "-f",
+                "hls",
+                "-hls_time",
+                &hls_time,
+                "-hls_list_size",
+                &hls_list,
+                "-hls_flags",
+                "delete_segments",
             ]);
             cmd.arg(output);
         }
         OutputMode::Udp { dest } => {
             let udp_url = format!("udp://{dest}?pkt_size=1316");
             cmd.args([
-                "-f", "mpegts",
-                "-flush_packets", "1",
-                "-mpegts_flags", "resend_headers",
+                "-f",
+                "mpegts",
+                "-flush_packets",
+                "1",
+                "-mpegts_flags",
+                "resend_headers",
             ]);
             cmd.arg(&udp_url);
         }

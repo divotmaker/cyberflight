@@ -17,13 +17,13 @@ use cf_math::environment::Environment;
 use cf_render::context::{GpuConfig, GpuContext};
 use cf_render::render::{FlightRenderData, Renderer};
 use cf_render::window::Swapchain;
-use cf_scene::hud::{build_hud, ShotTelemetry, UnitSystem};
+use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::range::Range;
 use cf_scene::shot::ReceivedShot;
 
-use flightrelay::{FrpClient, FrpEvent, FrpMessage, ShotAggregator};
+use flightrelay::{FrpConnection, FrpEndpoint, FrpEvent, FrpMessage, ShotAggregator};
 
-use flight::{AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE};
+use flight::{AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE, frp_endpoint, try_establish};
 
 struct App {
     windowed: bool,
@@ -34,8 +34,10 @@ struct App {
     flights: Vec<AnimatedFlight>,
     /// Last shot telemetry — persists until the next shot arrives.
     last_telemetry: Option<ShotTelemetry>,
+    /// Dials the FRP device; outlives the connections it produces.
+    endpoint: FrpEndpoint,
     /// Live WebSocket connection to FRP device (None when disconnected).
-    client: Option<FrpClient>,
+    conn: Option<FrpConnection>,
     /// Accumulates shot lifecycle events into complete shots.
     shots: ShotAggregator,
     /// Last known ready state per launch monitor device ID.
@@ -53,7 +55,8 @@ struct App {
 
 impl App {
     fn new(windowed: bool) -> Result<Self> {
-        let (client, connected) = Self::try_connect();
+        let mut endpoint = frp_endpoint().context("open FRP endpoint")?;
+        let (conn, connected) = try_establish(&mut endpoint);
 
         Ok(Self {
             windowed,
@@ -63,7 +66,8 @@ impl App {
             environment: Environment::SEA_LEVEL,
             flights: Vec::new(),
             last_telemetry: None,
-            client,
+            endpoint,
+            conn,
             shots: ShotAggregator::new(),
             lm_states: HashMap::new(),
             frp_connected: connected,
@@ -74,32 +78,6 @@ impl App {
             fps_timer: Instant::now(),
             trail_subsample: DEFAULT_TRAIL_SUBSAMPLE,
         })
-    }
-
-    /// Attempt to connect to FRP device. Returns (client, connected).
-    fn try_connect() -> (Option<FrpClient>, bool) {
-        eprintln!("Connecting to FRP at {}...", flightrelay::DEFAULT_URL);
-        match FrpClient::connect(
-            flightrelay::DEFAULT_URL,
-            "cyberflight",
-            &[flightrelay::SPEC_VERSION],
-        ) {
-            Ok(client) => {
-                eprintln!("Connected (FRP {})", client.version());
-                if let Err(e) = client.set_nonblocking(true) {
-                    eprintln!("set_nonblocking failed: {e}");
-                    return (None, false);
-                }
-                (Some(client), true)
-            }
-            Err(e) => {
-                eprintln!(
-                    "FRP not available (expected {}): {e}",
-                    flightrelay::SPEC_VERSION
-                );
-                (None, false)
-            }
-        }
     }
 
     fn init_renderer(&mut self, window: &Window) {
@@ -152,10 +130,10 @@ impl App {
         let now = self.start_time.elapsed().as_secs_f64();
 
         // Reconnect to FRP if disconnected (try every 5 seconds).
-        if self.client.is_none() && now - self.last_reconnect_attempt >= 5.0 {
+        if self.conn.is_none() && now - self.last_reconnect_attempt >= 5.0 {
             self.last_reconnect_attempt = now;
-            let (client, connected) = Self::try_connect();
-            self.client = client;
+            let (conn, connected) = try_establish(&mut self.endpoint);
+            self.conn = conn;
             self.frp_connected = connected;
         }
 
@@ -163,9 +141,9 @@ impl App {
         // If a shot arrives while one is already in flight, ignore it.
         let animating = self.flights.iter().any(|f| f.is_animating(now));
         let mut disconnected = false;
-        if let Some(client) = &mut self.client {
+        if let Some(conn) = &mut self.conn {
             loop {
-                match client.try_recv() {
+                match conn.try_recv() {
                     Ok(Some(msg)) => {
                         // Always update launch monitor status from device telemetry.
                         if let FrpMessage::Envelope(env) = &msg {
@@ -209,7 +187,7 @@ impl App {
         }
         if disconnected {
             self.frp_connected = false;
-            self.client = None;
+            self.conn = None;
             self.lm_states.clear();
         }
 

@@ -32,11 +32,7 @@ where
     );
     let k3_x = state.vel + k2_v * (dt / 2.0);
 
-    let k4_v = accel_fn(
-        state.pos + k3_x * dt,
-        state.vel + k3_v * dt,
-        t + dt,
-    );
+    let k4_v = accel_fn(state.pos + k3_x * dt, state.vel + k3_v * dt, t + dt);
     let k4_x = state.vel + k3_v * dt;
 
     State {

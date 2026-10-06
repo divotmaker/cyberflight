@@ -230,11 +230,7 @@ pub fn simulate_shot(
             // Simple parabolic arc to next ground contact.
             // Time to return to ground: t = 2*vy/g
             let t_air = 2.0 * br.vel.y / units::G;
-            pos = DVec3::new(
-                pos.x + br.vel.x * t_air,
-                0.0,
-                pos.z + br.vel.z * t_air,
-            );
+            pos = DVec3::new(pos.x + br.vel.x * t_air, 0.0, pos.z + br.vel.z * t_air);
         }
         vel = br.vel;
     }
@@ -507,8 +503,14 @@ mod tests {
         // 90°F vs 50°F → ~8 yards difference for driver.
         // Note: this only captures air density effect, not ball COR change.
         let driver = ShotInput::driver();
-        let hot = Environment { altitude_m: 0.0, temperature_c: 32.2 }; // 90°F
-        let cold = Environment { altitude_m: 0.0, temperature_c: 10.0 }; // 50°F
+        let hot = Environment {
+            altitude_m: 0.0,
+            temperature_c: 32.2,
+        }; // 90°F
+        let cold = Environment {
+            altitude_m: 0.0,
+            temperature_c: 10.0,
+        }; // 50°F
         let r_hot = flight_at(&driver, &hot);
         let r_cold = flight_at(&driver, &cold);
         let delta = r_hot.carry_yards - r_cold.carry_yards;
@@ -526,8 +528,14 @@ mod tests {
     fn temperature_direction() {
         // Hot air is less dense → more carry.
         let driver = ShotInput::driver();
-        let hot = Environment { altitude_m: 0.0, temperature_c: 35.0 };
-        let cold = Environment { altitude_m: 0.0, temperature_c: 5.0 };
+        let hot = Environment {
+            altitude_m: 0.0,
+            temperature_c: 35.0,
+        };
+        let cold = Environment {
+            altitude_m: 0.0,
+            temperature_c: 5.0,
+        };
         assert!(flight_at(&driver, &hot).carry_yards > flight_at(&driver, &cold).carry_yards);
     }
 
@@ -602,7 +610,8 @@ mod tests {
         assert!(
             gap > 20.0 && gap < 50.0,
             "driver era gap should be 20-50 yds, got {gap:.1} (modern={:.1}, vintage={:.1})",
-            modern.carry_yards, vintage.carry_yards
+            modern.carry_yards,
+            vintage.carry_yards
         );
     }
 
@@ -624,7 +633,8 @@ mod tests {
         assert!(
             gap > 5.0 && gap < 40.0,
             "7-iron era gap should be 5-40 yds, got {gap:.1} (modern={:.1}, vintage={:.1})",
-            modern.carry_yards, vintage.carry_yards
+            modern.carry_yards,
+            vintage.carry_yards
         );
     }
 
@@ -650,7 +660,8 @@ mod tests {
         assert!(
             gap > -1.0 && gap < 15.0,
             "PW era gap should be -1 to 15 yds, got {gap:.1} (modern={:.1}, vintage={:.1})",
-            modern.carry_yards, vintage.carry_yards
+            modern.carry_yards,
+            vintage.carry_yards
         );
     }
 
@@ -671,7 +682,8 @@ mod tests {
             assert!(
                 modern.carry_yards > vintage.carry_yards,
                 "{label}: modern ({:.1}) should carry farther than vintage ({:.1})",
-                modern.carry_yards, vintage.carry_yards
+                modern.carry_yards,
+                vintage.carry_yards
             );
         }
     }
@@ -712,11 +724,23 @@ mod tests {
     use crate::rollout::RolloutSurface;
 
     fn shot_on_fairway(input: &ShotInput) -> ShotResult {
-        simulate_shot(input, &BALL, &Environment::SEA_LEVEL, &BounceSurface::FAIRWAY, &RolloutSurface::FAIRWAY)
+        simulate_shot(
+            input,
+            &BALL,
+            &Environment::SEA_LEVEL,
+            &BounceSurface::FAIRWAY,
+            &RolloutSurface::FAIRWAY,
+        )
     }
 
     fn shot_on_green(input: &ShotInput) -> ShotResult {
-        simulate_shot(input, &BALL, &Environment::SEA_LEVEL, &BounceSurface::GREEN, &RolloutSurface::GREEN)
+        simulate_shot(
+            input,
+            &BALL,
+            &Environment::SEA_LEVEL,
+            &BounceSurface::GREEN,
+            &RolloutSurface::GREEN,
+        )
     }
 
     #[test]
@@ -726,7 +750,8 @@ mod tests {
         assert!(
             r.total_yards > r.flight.carry_yards,
             "driver total ({:.1}) should exceed carry ({:.1})",
-            r.total_yards, r.flight.carry_yards
+            r.total_yards,
+            r.flight.carry_yards
         );
     }
 
@@ -737,7 +762,9 @@ mod tests {
         assert!(
             r.total_yards > 290.0 && r.total_yards < 330.0,
             "driver total should be 290-330 yds, got {:.1} (carry={:.1}, rollout={:.1})",
-            r.total_yards, r.flight.carry_yards, r.total_yards - r.flight.carry_yards
+            r.total_yards,
+            r.flight.carry_yards,
+            r.total_yards - r.flight.carry_yards
         );
     }
 
@@ -755,7 +782,9 @@ mod tests {
         assert!(
             r.total_yards > 178.0 && r.total_yards < 225.0,
             "7-iron total should be 178-225 yds, got {:.1} (carry={:.1}, rollout={:.1})",
-            r.total_yards, r.flight.carry_yards, r.total_yards - r.flight.carry_yards
+            r.total_yards,
+            r.flight.carry_yards,
+            r.total_yards - r.flight.carry_yards
         );
     }
 
@@ -807,9 +836,13 @@ mod tests {
         assert!(
             flight.landing_backspin_rads < initial_backspin,
             "landing backspin ({:.1}) should be less than initial ({:.1})",
-            flight.landing_backspin_rads, initial_backspin
+            flight.landing_backspin_rads,
+            initial_backspin
         );
-        assert!(flight.landing_backspin_rads > 0.0, "should still have some backspin");
+        assert!(
+            flight.landing_backspin_rads > 0.0,
+            "should still have some backspin"
+        );
     }
 
     #[test]

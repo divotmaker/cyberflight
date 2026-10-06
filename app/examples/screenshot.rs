@@ -112,13 +112,22 @@ fn simulate_hero_shot() -> FlightSnapshot {
             time: p.time,
         })
         .collect();
-    if trail_points.last().map_or(true, |last| (last.position - ball_pos).length() > 0.01) {
-        trail_points.push(TrailPoint { position: ball_pos, time: t_current });
+    if trail_points
+        .last()
+        .map_or(true, |last| (last.position - ball_pos).length() > 0.01)
+    {
+        trail_points.push(TrailPoint {
+            position: ball_pos,
+            time: t_current,
+        });
     }
 
     eprintln!(
         "  Ball at ({:.1}, {:.1}, {:.1}) with {} trail points",
-        ball_pos.x, ball_pos.y, ball_pos.z, trail_points.len()
+        ball_pos.x,
+        ball_pos.y,
+        ball_pos.z,
+        trail_points.len()
     );
 
     FlightSnapshot {
@@ -164,13 +173,22 @@ fn simulate_seven_iron() -> FlightSnapshot {
         })
         .collect();
     // Ensure the trail ends exactly at the ball (connects to ball glow).
-    if trail_points.last().map_or(true, |last| (last.position - ball_pos).length() > 0.01) {
-        trail_points.push(TrailPoint { position: ball_pos, time: t_current });
+    if trail_points
+        .last()
+        .map_or(true, |last| (last.position - ball_pos).length() > 0.01)
+    {
+        trail_points.push(TrailPoint {
+            position: ball_pos,
+            time: t_current,
+        });
     }
 
     eprintln!(
         "  Ball at ({:.1}, {:.1}, {:.1}) with {} trail points",
-        ball_pos.x, ball_pos.y, ball_pos.z, trail_points.len()
+        ball_pos.x,
+        ball_pos.y,
+        ball_pos.z,
+        trail_points.len()
     );
 
     FlightSnapshot {
@@ -199,7 +217,14 @@ fn render_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     };
 
     let renderer = OffscreenRenderer::new_with_flight(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &flight_camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &flight_camera,
     )
     .context("failed to create flight renderer")?;
 
@@ -212,7 +237,11 @@ fn render_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
 
     // Camera to the side, far enough to frame the entire tracer + ball.
     // Trail goes from oldest point to ball_pos — center the view on the midpoint.
-    let tail_start = snap.trail_points.first().map(|p| p.position).unwrap_or(Vec3::ZERO);
+    let tail_start = snap
+        .trail_points
+        .first()
+        .map(|p| p.position)
+        .unwrap_or(Vec3::ZERO);
     let mid = (tail_start + snap.ball_pos) * 0.5;
     let trail_len = (snap.ball_pos - tail_start).length();
     // Distance = enough to fit the trail in frame with 45° FOV
@@ -228,7 +257,14 @@ fn render_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     };
 
     let renderer = OffscreenRenderer::new_with_flight(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &wide_camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &wide_camera,
     )
     .context("failed to create flight renderer")?;
 
@@ -240,7 +276,11 @@ fn render_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
     eprintln!("Rendering flight (wide 45° overhead view)...");
 
     // Camera above and to the side, looking down at ~45° onto the flight arc.
-    let tail_start = snap.trail_points.first().map(|p| p.position).unwrap_or(Vec3::ZERO);
+    let tail_start = snap
+        .trail_points
+        .first()
+        .map(|p| p.position)
+        .unwrap_or(Vec3::ZERO);
     let mid = (tail_start + snap.ball_pos) * 0.5;
     let trail_len = (snap.ball_pos - tail_start).length();
     let dist = trail_len * 0.9;
@@ -256,7 +296,14 @@ fn render_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
     };
 
     let renderer = OffscreenRenderer::new_with_flight(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &wide45_camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &wide45_camera,
     )
     .context("failed to create flight renderer")?;
 
@@ -312,7 +359,15 @@ fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     };
 
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
-    let hud = build_hud(Some(&telemetry), UnitSystem::Imperial, false, &lm, true, WIDTH as f32, HEIGHT as f32);
+    let hud = build_hud(
+        Some(&telemetry),
+        UnitSystem::Imperial,
+        false,
+        &lm,
+        true,
+        WIDTH as f32,
+        HEIGHT as f32,
+    );
 
     let mut renderer = OffscreenRenderer::new_with_flight(
         WIDTH,
@@ -409,19 +464,25 @@ fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         .set_hud(&hud.lines, &hud.fills)
         .context("failed to set HUD")?;
 
-    let frame = renderer
-        .render(&main_camera)
-        .context("render failed")?;
+    let frame = renderer.render(&main_camera).context("render failed")?;
 
     // Downscale from render resolution to output resolution
     let hi_res: ImageBuffer<Rgba<u8>, _> =
         ImageBuffer::from_raw(render_w, render_h, frame.color.clone())
             .context("failed to create hi-res buffer")?;
-    let downscaled = image::imageops::resize(&hi_res, WIDTH, HEIGHT, image::imageops::FilterType::Lanczos3);
+    let downscaled = image::imageops::resize(
+        &hi_res,
+        WIDTH,
+        HEIGHT,
+        image::imageops::FilterType::Lanczos3,
+    );
     let path = format!("{OUTPUT_DIR}/cyberflight.png");
     downscaled.save(&path).context("failed to save PNG")?;
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    eprintln!("  Saved: {path} ({WIDTH}x{HEIGHT} from {render_w}x{render_h}, {:.1} KB)", size as f64 / 1024.0);
+    eprintln!(
+        "  Saved: {path} ({WIDTH}x{HEIGHT} from {render_w}x{render_h}, {:.1} KB)",
+        size as f64 / 1024.0
+    );
     Ok(())
 }
 
@@ -436,7 +497,14 @@ fn render_rt_driving_range(grid: &GridConfig, camera: &Camera) -> Result<()> {
     eprintln!("Rendering driving range (RT)...");
     let renderer =
         OffscreenRenderer::new_rt(WIDTH, HEIGHT, grid).context("failed to create RT renderer")?;
-    eprintln!("  RT compositing: {}", if renderer.has_rt() { "enabled" } else { "fallback to raster" });
+    eprintln!(
+        "  RT compositing: {}",
+        if renderer.has_rt() {
+            "enabled"
+        } else {
+            "fallback to raster"
+        }
+    );
     let frame = renderer.render(camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/driving_range_rt.png"))
 }
@@ -452,7 +520,14 @@ fn render_rt_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         far: 600.0,
     };
     let renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &flight_camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &flight_camera,
     )
     .context("failed to create RT flight renderer")?;
     let frame = renderer.render(&flight_camera).context("render failed")?;
@@ -463,7 +538,14 @@ fn render_rt_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> 
     eprintln!("Rendering flight (RT, tee box view)...");
     let camera = Camera::driving_range();
     let renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &camera,
     )
     .context("failed to create RT flight renderer")?;
     let frame = renderer.render(&camera).context("render failed")?;
@@ -472,7 +554,11 @@ fn render_rt_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> 
 
 fn render_rt_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, wide side view)...");
-    let tail_start = snap.trail_points.first().map(|p| p.position).unwrap_or(Vec3::ZERO);
+    let tail_start = snap
+        .trail_points
+        .first()
+        .map(|p| p.position)
+        .unwrap_or(Vec3::ZERO);
     let mid = (tail_start + snap.ball_pos) * 0.5;
     let trail_len = (snap.ball_pos - tail_start).length();
     let dist = trail_len * 0.9;
@@ -485,7 +571,14 @@ fn render_rt_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
         far: 600.0,
     };
     let renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &wide_camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &wide_camera,
     )
     .context("failed to create RT flight renderer")?;
     let frame = renderer.render(&wide_camera).context("render failed")?;
@@ -494,7 +587,11 @@ fn render_rt_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
 
 fn render_rt_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, wide 45 overhead view)...");
-    let tail_start = snap.trail_points.first().map(|p| p.position).unwrap_or(Vec3::ZERO);
+    let tail_start = snap
+        .trail_points
+        .first()
+        .map(|p| p.position)
+        .unwrap_or(Vec3::ZERO);
     let mid = (tail_start + snap.ball_pos) * 0.5;
     let trail_len = (snap.ball_pos - tail_start).length();
     let dist = trail_len * 0.9;
@@ -507,7 +604,14 @@ fn render_rt_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<
         far: 600.0,
     };
     let renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH, HEIGHT, grid, snap.ball_pos, &snap.trail_points, snap.elapsed, DEFAULT_TRAIL_LIFETIME, &wide45_camera,
+        WIDTH,
+        HEIGHT,
+        grid,
+        snap.ball_pos,
+        &snap.trail_points,
+        snap.elapsed,
+        DEFAULT_TRAIL_LIFETIME,
+        &wide45_camera,
     )
     .context("failed to create RT flight renderer")?;
     let frame = renderer.render(&wide45_camera).context("render failed")?;

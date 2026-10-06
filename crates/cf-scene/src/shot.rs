@@ -46,16 +46,17 @@ impl ReceivedShot {
             sidespin_rpm: ball.sidespin_rpm.map_or(0.0, |r| r as f64),
         };
 
-        let club = shot.club.as_ref().map_or_else(ClubDelivery::default, |c| {
-            ClubDelivery {
+        let club = shot
+            .club
+            .as_ref()
+            .map_or_else(ClubDelivery::default, |c| ClubDelivery {
                 club_speed_mph: c.club_speed.map(|v| v.as_mph()),
                 path_deg: c.path,
                 attack_angle_deg: c.attack_angle,
                 face_angle_deg: c.face_angle,
                 dynamic_loft_deg: c.dynamic_loft,
                 smash_factor: c.smash_factor,
-            }
-        });
+            });
 
         let lm_carry_yards = ball.carry_distance.map(|d| d.as_yards());
 

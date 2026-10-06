@@ -1,6 +1,6 @@
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use cf_scene::camera::Camera;
 use cf_scene::color;
@@ -97,7 +97,6 @@ const OFFSCREEN_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 /// Clip bounds that effectively disable clipping (huge region).
 const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
-
 impl OffscreenRenderer {
     /// Create a headless renderer for the given grid configuration.
     /// Enables raytracing if hardware supports it.
@@ -120,11 +119,7 @@ impl OffscreenRenderer {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL
         };
 
-        let pipeline = GridPipeline::new(
-            &gpu.device,
-            OFFSCREEN_FORMAT,
-            raster_final_layout,
-        )?;
+        let pipeline = GridPipeline::new(&gpu.device, OFFSCREEN_FORMAT, raster_final_layout)?;
 
         let target = OffscreenTarget::new(
             &gpu.device,
@@ -179,26 +174,46 @@ impl OffscreenRenderer {
         // Build RT pipeline + composite pass if hardware supports it.
         let ball_center = glam::Vec3::new(0.0, tee.ball_radius, 0.0);
         let geometries = build_scene_geometry(grid_config, &tee, &[]);
-        let (rt_pipeline, composite_render_pass, composite_framebuffer, composite_pipeline,
-             composite_pipeline_layout, composite_descriptor_set_layout,
-             composite_descriptor_pool, composite_descriptor_set, composite_sampler,
-             composite_vert_module, composite_frag_module) =
-            if rt_available {
-                let rtp = RtPipeline::new(&mut gpu, width, height, &geometries)?;
-                let composite = Self::create_composite_pass(
-                    &gpu.device,
-                    OFFSCREEN_FORMAT,
-                    target.view,
-                    rtp.storage_view,
-                    width,
-                    height,
-                )?;
-                (Some(rtp), Some(composite.0), Some(composite.1), Some(composite.2),
-                 Some(composite.3), Some(composite.4), Some(composite.5),
-                 Some(composite.6), Some(composite.7), Some(composite.8), Some(composite.9))
-            } else {
-                (None, None, None, None, None, None, None, None, None, None, None)
-            };
+        let (
+            rt_pipeline,
+            composite_render_pass,
+            composite_framebuffer,
+            composite_pipeline,
+            composite_pipeline_layout,
+            composite_descriptor_set_layout,
+            composite_descriptor_pool,
+            composite_descriptor_set,
+            composite_sampler,
+            composite_vert_module,
+            composite_frag_module,
+        ) = if rt_available {
+            let rtp = RtPipeline::new(&mut gpu, width, height, &geometries)?;
+            let composite = Self::create_composite_pass(
+                &gpu.device,
+                OFFSCREEN_FORMAT,
+                target.view,
+                rtp.storage_view,
+                width,
+                height,
+            )?;
+            (
+                Some(rtp),
+                Some(composite.0),
+                Some(composite.1),
+                Some(composite.2),
+                Some(composite.3),
+                Some(composite.4),
+                Some(composite.5),
+                Some(composite.6),
+                Some(composite.7),
+                Some(composite.8),
+                Some(composite.9),
+            )
+        } else {
+            (
+                None, None, None, None, None, None, None, None, None, None, None,
+            )
+        };
 
         Ok(Self {
             gpu,
@@ -325,20 +340,28 @@ impl OffscreenRenderer {
 
         // Ball glow sphere + trail glow ribbon (with endcap to bridge the junction).
         let mut glow_verts = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
-        glow_verts.extend(generate_trail_glow(trail_points, current_time, max_lifetime, camera.position, tee.ball_radius));
+        glow_verts.extend(generate_trail_glow(
+            trail_points,
+            current_time,
+            max_lifetime,
+            camera.position,
+            tee.ball_radius,
+        ));
         let glow_count = glow_verts.len() as u32;
         let (glow_buffer, glow_allocation) =
             Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &glow_verts)?;
 
         // Trail centerline (LINE_LIST — always visible regardless of viewing angle).
         let trail_line_verts = generate_trail_line(trail_points, current_time, max_lifetime);
-        let (trail_line_buffer, trail_line_allocation, trail_line_count) = if trail_line_verts.is_empty() {
-            (None, None, 0)
-        } else {
-            let count = trail_line_verts.len() as u32;
-            let (buf, alloc) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &trail_line_verts)?;
-            (Some(buf), Some(alloc), count)
-        };
+        let (trail_line_buffer, trail_line_allocation, trail_line_count) =
+            if trail_line_verts.is_empty() {
+                (None, None, 0)
+            } else {
+                let count = trail_line_verts.len() as u32;
+                let (buf, alloc) =
+                    Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &trail_line_verts)?;
+                (Some(buf), Some(alloc), count)
+            };
 
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
@@ -414,15 +437,20 @@ impl OffscreenRenderer {
     /// Create a headless renderer with RT reflection compositing for the static range.
     ///
     /// Falls back to raster-only if RT hardware is not available.
-    pub fn new_rt(
-        width: u32,
-        height: u32,
-        grid_config: &GridConfig,
-    ) -> Result<Self, RenderError> {
+    pub fn new_rt(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let ball_center = glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
         let geometries = build_scene_geometry(grid_config, &tee, &[]);
-        Self::create_rt(width, height, grid_config, &tee, ball_center, &geometries, None, 0.0)
+        Self::create_rt(
+            width,
+            height,
+            grid_config,
+            &tee,
+            ball_center,
+            &geometries,
+            None,
+            0.0,
+        )
     }
 
     /// Create a headless renderer with RT reflection compositing and a ball in flight.
@@ -445,13 +473,16 @@ impl OffscreenRenderer {
         // Build RT geometry from trail positions.
         let trail_positions: Vec<glam::Vec3> = trail_points.iter().map(|p| p.position).collect();
         let trimmed = crate::rt_offscreen::trim_trail_from_ball_pub(&trail_positions, 0.8);
-        let trim_len: f32 = trimmed.windows(2)
-            .map(|w| (w[1] - w[0]).length())
-            .sum();
+        let trim_len: f32 = trimmed.windows(2).map(|w| (w[1] - w[0]).length()).sum();
         let geometries = build_scene_geometry(grid_config, &tee, &trimmed);
 
         Self::create_rt(
-            width, height, grid_config, &tee, ball_center, &geometries,
+            width,
+            height,
+            grid_config,
+            &tee,
+            ball_center,
+            &geometries,
             Some((ball_pos, trail_points, current_time, max_lifetime, camera)),
             trim_len,
         )
@@ -488,11 +519,7 @@ impl OffscreenRenderer {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL
         };
 
-        let pipeline = GridPipeline::new(
-            &gpu.device,
-            OFFSCREEN_FORMAT,
-            raster_final_layout,
-        )?;
+        let pipeline = GridPipeline::new(&gpu.device, OFFSCREEN_FORMAT, raster_final_layout)?;
 
         let target = OffscreenTarget::new(
             &gpu.device,
@@ -510,58 +537,73 @@ impl OffscreenRenderer {
             Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &grid_verts)?;
 
         // Tee box + ball geometry
-        let (tee_fill_count, tee_border_count, ball_count, fill_buffer, fill_allocation,
-             glow_count, glow_buffer, glow_allocation,
-             trail_line_buffer, trail_line_allocation, trail_line_count) =
-            if let Some((ball_pos, trail_points, current_time, max_lifetime, camera)) = flight {
-                let tee_fill_verts = generate_tee_fill(tee);
-                let tee_border_verts = generate_tee_border(tee);
-                let ball_verts = generate_ball_at(ball_center, tee.ball_radius, 12, 24);
-                let tfc = tee_fill_verts.len() as u32;
-                let tbc = tee_border_verts.len() as u32;
-                let bc = ball_verts.len() as u32;
-                let mut fv = tee_fill_verts;
-                fv.extend(tee_border_verts);
-                fv.extend(ball_verts);
-                let (fb, fa) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fv)?;
+        let (
+            tee_fill_count,
+            tee_border_count,
+            ball_count,
+            fill_buffer,
+            fill_allocation,
+            glow_count,
+            glow_buffer,
+            glow_allocation,
+            trail_line_buffer,
+            trail_line_allocation,
+            trail_line_count,
+        ) = if let Some((ball_pos, trail_points, current_time, max_lifetime, camera)) = flight {
+            let tee_fill_verts = generate_tee_fill(tee);
+            let tee_border_verts = generate_tee_border(tee);
+            let ball_verts = generate_ball_at(ball_center, tee.ball_radius, 12, 24);
+            let tfc = tee_fill_verts.len() as u32;
+            let tbc = tee_border_verts.len() as u32;
+            let bc = ball_verts.len() as u32;
+            let mut fv = tee_fill_verts;
+            fv.extend(tee_border_verts);
+            fv.extend(ball_verts);
+            let (fb, fa) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fv)?;
 
-                let mut gv = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
-                gv.extend(generate_trail_glow(trail_points, current_time, max_lifetime, camera.position, tee.ball_radius));
-                let gc = gv.len() as u32;
-                let (gb, ga) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &gv)?;
+            let mut gv = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
+            gv.extend(generate_trail_glow(
+                trail_points,
+                current_time,
+                max_lifetime,
+                camera.position,
+                tee.ball_radius,
+            ));
+            let gc = gv.len() as u32;
+            let (gb, ga) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &gv)?;
 
-                // Trail centerline (LINE_LIST).
-                let tlv = generate_trail_line(trail_points, current_time, max_lifetime);
-                let (tlb, tla, tlc) = if tlv.is_empty() {
-                    (None, None, 0u32)
-                } else {
-                    let c = tlv.len() as u32;
-                    let (b, a) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &tlv)?;
-                    (Some(b), Some(a), c)
-                };
-
-                // Suppress unused variable warning for ball_pos (used via ball_center).
-                let _ = ball_pos;
-
-                (tfc, tbc, bc, fb, fa, gc, gb, ga, tlb, tla, tlc)
+            // Trail centerline (LINE_LIST).
+            let tlv = generate_trail_line(trail_points, current_time, max_lifetime);
+            let (tlb, tla, tlc) = if tlv.is_empty() {
+                (None, None, 0u32)
             } else {
-                let tee_fill_verts = generate_tee_fill(tee);
-                let tee_border_verts = generate_tee_border(tee);
-                let ball_verts = generate_ball(tee, 12, 24);
-                let tfc = tee_fill_verts.len() as u32;
-                let tbc = tee_border_verts.len() as u32;
-                let bc = ball_verts.len() as u32;
-                let mut fv = tee_fill_verts;
-                fv.extend(tee_border_verts);
-                fv.extend(ball_verts);
-                let (fb, fa) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fv)?;
-
-                let gv = generate_ball_glow(tee, 16, 32);
-                let gc = gv.len() as u32;
-                let (gb, ga) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &gv)?;
-
-                (tfc, tbc, bc, fb, fa, gc, gb, ga, None, None, 0u32)
+                let c = tlv.len() as u32;
+                let (b, a) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &tlv)?;
+                (Some(b), Some(a), c)
             };
+
+            // Suppress unused variable warning for ball_pos (used via ball_center).
+            let _ = ball_pos;
+
+            (tfc, tbc, bc, fb, fa, gc, gb, ga, tlb, tla, tlc)
+        } else {
+            let tee_fill_verts = generate_tee_fill(tee);
+            let tee_border_verts = generate_tee_border(tee);
+            let ball_verts = generate_ball(tee, 12, 24);
+            let tfc = tee_fill_verts.len() as u32;
+            let tbc = tee_border_verts.len() as u32;
+            let bc = ball_verts.len() as u32;
+            let mut fv = tee_fill_verts;
+            fv.extend(tee_border_verts);
+            fv.extend(ball_verts);
+            let (fb, fa) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fv)?;
+
+            let gv = generate_ball_glow(tee, 16, 32);
+            let gc = gv.len() as u32;
+            let (gb, ga) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &gv)?;
+
+            (tfc, tbc, bc, fb, fa, gc, gb, ga, None, None, 0u32)
+        };
 
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
@@ -580,28 +622,48 @@ impl OffscreenRenderer {
         let max_fade_dist = (dr * dr + lat * lat).sqrt();
 
         // Build RT pipeline + composite pass if hardware supports it.
-        let (rt_pipeline, composite_render_pass, composite_framebuffer, composite_pipeline,
-             composite_pipeline_layout, composite_descriptor_set_layout,
-             composite_descriptor_pool, composite_descriptor_set, composite_sampler,
-             composite_vert_module, composite_frag_module) =
-            if rt_available {
-                let rtp = RtPipeline::new(&mut gpu, width, height, geometries)?;
+        let (
+            rt_pipeline,
+            composite_render_pass,
+            composite_framebuffer,
+            composite_pipeline,
+            composite_pipeline_layout,
+            composite_descriptor_set_layout,
+            composite_descriptor_pool,
+            composite_descriptor_set,
+            composite_sampler,
+            composite_vert_module,
+            composite_frag_module,
+        ) = if rt_available {
+            let rtp = RtPipeline::new(&mut gpu, width, height, geometries)?;
 
-                let composite = Self::create_composite_pass(
-                    &gpu.device,
-                    OFFSCREEN_FORMAT,
-                    target.view,
-                    rtp.storage_view,
-                    width,
-                    height,
-                )?;
+            let composite = Self::create_composite_pass(
+                &gpu.device,
+                OFFSCREEN_FORMAT,
+                target.view,
+                rtp.storage_view,
+                width,
+                height,
+            )?;
 
-                (Some(rtp), Some(composite.0), Some(composite.1), Some(composite.2),
-                 Some(composite.3), Some(composite.4), Some(composite.5),
-                 Some(composite.6), Some(composite.7), Some(composite.8), Some(composite.9))
-            } else {
-                (None, None, None, None, None, None, None, None, None, None, None)
-            };
+            (
+                Some(rtp),
+                Some(composite.0),
+                Some(composite.1),
+                Some(composite.2),
+                Some(composite.3),
+                Some(composite.4),
+                Some(composite.5),
+                Some(composite.6),
+                Some(composite.7),
+                Some(composite.8),
+                Some(composite.9),
+            )
+        } else {
+            (
+                None, None, None, None, None, None, None, None, None, None, None,
+            )
+        };
 
         Ok(Self {
             gpu,
@@ -684,128 +746,189 @@ impl OffscreenRenderer {
         // SAFETY: Caller guarantees we're inside an active render pass with valid
         // command buffer. All buffers and pipelines are created during construction.
         unsafe {
-        let device = &self.gpu.device;
-        let cb = self.command_buffer;
+            let device = &self.gpu.device;
+            let cb = self.command_buffer;
 
-        let pc_cyan = GridPushConstants {
-            view_proj,
-            color: color::CYAN.into(),
-            clip_bounds: NO_CLIP,
-        };
-        let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
-            std::ptr::from_ref(&pc_cyan).cast::<u8>(),
-            std::mem::size_of::<GridPushConstants>(),
-        );
-        let pc_black = GridPushConstants {
-            view_proj,
-            color: [0.0, 0.0, 0.0, 1.0],
-            clip_bounds: NO_CLIP,
-        };
-        let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
-            std::ptr::from_ref(&pc_black).cast::<u8>(),
-            std::mem::size_of::<GridPushConstants>(),
-        );
-        let pc_magenta = GridPushConstants {
-            view_proj,
-            color: color::MAGENTA.into(),
-            clip_bounds: NO_CLIP,
-        };
-        let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
-            std::ptr::from_ref(&pc_magenta).cast::<u8>(),
-            std::mem::size_of::<GridPushConstants>(),
-        );
-
-        // Grid lines (LINE_LIST, cyan)
-        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
-        device.cmd_set_line_width(cb, 1.0);
-        device.cmd_push_constants(
-            cb, self.pipeline.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_cyan_bytes,
-        );
-        device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
-        device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
-
-        // Tee box fill (black)
-        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill_pipeline);
-        device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
-        device.cmd_push_constants(
-            cb, self.pipeline.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_black_bytes,
-        );
-        device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
-
-        // Tee box border (cyan)
-        device.cmd_push_constants(
-            cb, self.pipeline.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_cyan_bytes,
-        );
-        device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
-
-        if self.ball_on_tee_box {
-            // Static ball: trail + glow + ball from construction-time buffers.
-            if let Some(trail_buf) = self.trail_line_buffer {
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
-                device.cmd_set_line_width(cb, 1.0);
-                device.cmd_bind_vertex_buffers(cb, 0, &[trail_buf], &[0]);
-                device.cmd_push_constants(
-                    cb, self.pipeline.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_magenta_bytes,
-                );
-                device.cmd_draw(cb, self.trail_line_count, 1, 0, 0);
-            }
-
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow_pipeline);
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer], &[0]);
-            device.cmd_push_constants(
-                cb, self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_magenta_bytes,
+            let pc_cyan = GridPushConstants {
+                view_proj,
+                color: color::CYAN.into(),
+                clip_bounds: NO_CLIP,
+            };
+            let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
+                std::ptr::from_ref(&pc_cyan).cast::<u8>(),
+                std::mem::size_of::<GridPushConstants>(),
             );
-            device.cmd_draw(cb, self.glow_count, 1, 0, 0);
+            let pc_black = GridPushConstants {
+                view_proj,
+                color: [0.0, 0.0, 0.0, 1.0],
+                clip_bounds: NO_CLIP,
+            };
+            let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
+                std::ptr::from_ref(&pc_black).cast::<u8>(),
+                std::mem::size_of::<GridPushConstants>(),
+            );
+            let pc_magenta = GridPushConstants {
+                view_proj,
+                color: color::MAGENTA.into(),
+                clip_bounds: NO_CLIP,
+            };
+            let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
+                std::ptr::from_ref(&pc_magenta).cast::<u8>(),
+                std::mem::size_of::<GridPushConstants>(),
+            );
 
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill_pipeline);
+            // Grid lines (LINE_LIST, cyan)
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            device.cmd_set_line_width(cb, 1.0);
+            device.cmd_push_constants(
+                cb,
+                self.pipeline.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                pc_cyan_bytes,
+            );
+            device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
+            device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
+
+            // Tee box fill (black)
+            device.cmd_bind_pipeline(
+                cb,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline.fill_pipeline,
+            );
             device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
             device.cmd_push_constants(
-                cb, self.pipeline.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_black_bytes,
+                cb,
+                self.pipeline.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                pc_black_bytes,
             );
-            device.cmd_draw(cb, self.ball_count, 1, self.tee_fill_count + self.tee_border_count, 0);
-        } else {
-            // Dynamic flight geometry from pre-allocated streaming buffers.
-            if let Some(flight_line_buf) = self.flight_line_buffer {
-                if self.flight_line_count > 0 {
-                    device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
+
+            // Tee box border (cyan)
+            device.cmd_push_constants(
+                cb,
+                self.pipeline.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                pc_cyan_bytes,
+            );
+            device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
+
+            if self.ball_on_tee_box {
+                // Static ball: trail + glow + ball from construction-time buffers.
+                if let Some(trail_buf) = self.trail_line_buffer {
+                    device.cmd_bind_pipeline(
+                        cb,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipeline.pipeline,
+                    );
                     device.cmd_set_line_width(cb, 1.0);
-                    device.cmd_bind_vertex_buffers(cb, 0, &[flight_line_buf], &[0]);
+                    device.cmd_bind_vertex_buffers(cb, 0, &[trail_buf], &[0]);
                     device.cmd_push_constants(
-                        cb, self.pipeline.pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_magenta_bytes,
+                        cb,
+                        self.pipeline.pipeline_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        pc_magenta_bytes,
                     );
-                    device.cmd_draw(cb, self.flight_line_count, 1, 0, 0);
+                    device.cmd_draw(cb, self.trail_line_count, 1, 0, 0);
+                }
+
+                device.cmd_bind_pipeline(
+                    cb,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline.glow_pipeline,
+                );
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer], &[0]);
+                device.cmd_push_constants(
+                    cb,
+                    self.pipeline.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    pc_magenta_bytes,
+                );
+                device.cmd_draw(cb, self.glow_count, 1, 0, 0);
+
+                device.cmd_bind_pipeline(
+                    cb,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline.fill_pipeline,
+                );
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
+                device.cmd_push_constants(
+                    cb,
+                    self.pipeline.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    pc_black_bytes,
+                );
+                device.cmd_draw(
+                    cb,
+                    self.ball_count,
+                    1,
+                    self.tee_fill_count + self.tee_border_count,
+                    0,
+                );
+            } else {
+                // Dynamic flight geometry from pre-allocated streaming buffers.
+                if let Some(flight_line_buf) = self.flight_line_buffer {
+                    if self.flight_line_count > 0 {
+                        device.cmd_bind_pipeline(
+                            cb,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.pipeline.pipeline,
+                        );
+                        device.cmd_set_line_width(cb, 1.0);
+                        device.cmd_bind_vertex_buffers(cb, 0, &[flight_line_buf], &[0]);
+                        device.cmd_push_constants(
+                            cb,
+                            self.pipeline.pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            pc_magenta_bytes,
+                        );
+                        device.cmd_draw(cb, self.flight_line_count, 1, 0, 0);
+                    }
+                }
+                if let Some(flight_glow_buf) = self.flight_glow_buffer {
+                    if self.flight_glow_count > 0 {
+                        device.cmd_bind_pipeline(
+                            cb,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.pipeline.glow_pipeline,
+                        );
+                        device.cmd_bind_vertex_buffers(cb, 0, &[flight_glow_buf], &[0]);
+                        device.cmd_push_constants(
+                            cb,
+                            self.pipeline.pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            pc_magenta_bytes,
+                        );
+                        device.cmd_draw(cb, self.flight_glow_count, 1, 0, 0);
+                    }
+                }
+                if let Some(flight_fill_buf) = self.flight_fill_buffer {
+                    if self.flight_fill_count > 0 {
+                        device.cmd_bind_pipeline(
+                            cb,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.pipeline.fill_pipeline,
+                        );
+                        device.cmd_bind_vertex_buffers(cb, 0, &[flight_fill_buf], &[0]);
+                        device.cmd_push_constants(
+                            cb,
+                            self.pipeline.pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            pc_black_bytes,
+                        );
+                        device.cmd_draw(cb, self.flight_fill_count, 1, 0, 0);
+                    }
                 }
             }
-            if let Some(flight_glow_buf) = self.flight_glow_buffer {
-                if self.flight_glow_count > 0 {
-                    device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow_pipeline);
-                    device.cmd_bind_vertex_buffers(cb, 0, &[flight_glow_buf], &[0]);
-                    device.cmd_push_constants(
-                        cb, self.pipeline.pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_magenta_bytes,
-                    );
-                    device.cmd_draw(cb, self.flight_glow_count, 1, 0, 0);
-                }
-            }
-            if let Some(flight_fill_buf) = self.flight_fill_buffer {
-                if self.flight_fill_count > 0 {
-                    device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill_pipeline);
-                    device.cmd_bind_vertex_buffers(cb, 0, &[flight_fill_buf], &[0]);
-                    device.cmd_push_constants(
-                        cb, self.pipeline.pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pc_black_bytes,
-                    );
-                    device.cmd_draw(cb, self.flight_fill_count, 1, 0, 0);
-                }
-            }
-        }
         } // unsafe
     }
 
@@ -819,7 +942,11 @@ impl OffscreenRenderer {
         self.chase_camera = Some(camera);
     }
 
-    pub fn set_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) -> Result<(), RenderError> {
+    pub fn set_hud(
+        &mut self,
+        lines: &[GridVertex],
+        fills: &[GridVertex],
+    ) -> Result<(), RenderError> {
         if !lines.is_empty() {
             let (buf, alloc) =
                 Self::create_vertex_buffer(&self.gpu.device, &mut self.gpu.allocator, lines)?;
@@ -845,7 +972,11 @@ impl OffscreenRenderer {
         // Flight line: trail centerlines, ~2000 points × 2 verts × 16 bytes = ~64 KB
         let line_cap: vk::DeviceSize = 128 * 1024;
         let (lb, la) = Self::create_dynamic_buffer(
-            &self.gpu.device, &mut self.gpu.allocator, line_cap, "stream flight line")?;
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            line_cap,
+            "stream flight line",
+        )?;
         self.flight_line_buffer = Some(lb);
         self.flight_line_allocation = Some(la);
         self.flight_line_capacity = line_cap;
@@ -853,7 +984,11 @@ impl OffscreenRenderer {
         // Flight fill: up to 5 in-flight balls × 1728 verts = ~140 KB
         let fill_cap: vk::DeviceSize = 256 * 1024;
         let (fb, fa) = Self::create_dynamic_buffer(
-            &self.gpu.device, &mut self.gpu.allocator, fill_cap, "stream flight fill")?;
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            fill_cap,
+            "stream flight fill",
+        )?;
         self.flight_fill_buffer = Some(fb);
         self.flight_fill_allocation = Some(fa);
         self.flight_fill_capacity = fill_cap;
@@ -861,7 +996,11 @@ impl OffscreenRenderer {
         // Flight glow: up to 5 balls × (ball glow + trail glow) ≈ 6 MB
         let glow_cap: vk::DeviceSize = 8 * 1024 * 1024;
         let (gb, ga) = Self::create_dynamic_buffer(
-            &self.gpu.device, &mut self.gpu.allocator, glow_cap, "stream flight glow")?;
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            glow_cap,
+            "stream flight glow",
+        )?;
         self.flight_glow_buffer = Some(gb);
         self.flight_glow_allocation = Some(ga);
         self.flight_glow_capacity = glow_cap;
@@ -869,11 +1008,17 @@ impl OffscreenRenderer {
         // Pre-allocate HUD buffers (replaces set_hud's per-call allocations).
         let hud_line_cap: vk::DeviceSize = 128 * 1024;
         let (hlb, hla) = Self::create_dynamic_buffer(
-            &self.gpu.device, &mut self.gpu.allocator, hud_line_cap, "stream hud line")?;
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            hud_line_cap,
+            "stream hud line",
+        )?;
         // Free old HUD buffers if set_hud was called before.
         if let Some(old) = self.hud_line_buffer {
             // SAFETY: Buffer is no longer in use after device_wait_idle in drop.
-            unsafe { self.gpu.device.destroy_buffer(old, None); }
+            unsafe {
+                self.gpu.device.destroy_buffer(old, None);
+            }
         }
         if let Some(alloc) = self.hud_line_allocation.take() {
             let _ = self.gpu.allocator.free(alloc);
@@ -883,9 +1028,15 @@ impl OffscreenRenderer {
 
         let hud_fill_cap: vk::DeviceSize = 4 * 1024;
         let (hfb, hfa) = Self::create_dynamic_buffer(
-            &self.gpu.device, &mut self.gpu.allocator, hud_fill_cap, "stream hud fill")?;
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            hud_fill_cap,
+            "stream hud fill",
+        )?;
         if let Some(old) = self.hud_fill_buffer {
-            unsafe { self.gpu.device.destroy_buffer(old, None); }
+            unsafe {
+                self.gpu.device.destroy_buffer(old, None);
+            }
         }
         if let Some(alloc) = self.hud_fill_allocation.take() {
             let _ = self.gpu.allocator.free(alloc);
@@ -912,27 +1063,40 @@ impl OffscreenRenderer {
 
         for flight in flights {
             fill_verts.extend(generate_ball_at(flight.ball_pos, tee.ball_radius, 8, 16));
-            glow_verts.extend(generate_ball_glow_at(flight.ball_pos, tee.ball_radius, 8, 16));
+            glow_verts.extend(generate_ball_glow_at(
+                flight.ball_pos,
+                tee.ball_radius,
+                8,
+                16,
+            ));
 
             if flight.trail_points.len() >= 2 {
                 glow_verts.extend(generate_trail_glow(
-                    &flight.trail_points, flight.current_time, DEFAULT_TRAIL_LIFETIME,
-                    camera.position, tee.ball_radius,
+                    &flight.trail_points,
+                    flight.current_time,
+                    DEFAULT_TRAIL_LIFETIME,
+                    camera.position,
+                    tee.ball_radius,
                 ));
                 line_verts.extend(generate_trail_line(
-                    &flight.trail_points, flight.current_time, DEFAULT_TRAIL_LIFETIME,
+                    &flight.trail_points,
+                    flight.current_time,
+                    DEFAULT_TRAIL_LIFETIME,
                 ));
             }
         }
 
         if let Some(alloc) = &self.flight_line_allocation {
-            self.flight_line_count = Self::upload_to_mapped(alloc, &line_verts, self.flight_line_capacity);
+            self.flight_line_count =
+                Self::upload_to_mapped(alloc, &line_verts, self.flight_line_capacity);
         }
         if let Some(alloc) = &self.flight_fill_allocation {
-            self.flight_fill_count = Self::upload_to_mapped(alloc, &fill_verts, self.flight_fill_capacity);
+            self.flight_fill_count =
+                Self::upload_to_mapped(alloc, &fill_verts, self.flight_fill_capacity);
         }
         if let Some(alloc) = &self.flight_glow_allocation {
-            self.flight_glow_count = Self::upload_to_mapped(alloc, &glow_verts, self.flight_glow_capacity);
+            self.flight_glow_count =
+                Self::upload_to_mapped(alloc, &glow_verts, self.flight_glow_capacity);
         }
 
         // Rebuild RT TLAS with updated ball/trail positions.
@@ -1095,12 +1259,19 @@ impl OffscreenRenderer {
                 let clear_rect = vk::ClearRect {
                     rect: vk::Rect2D {
                         offset: vk::Offset2D { x: chase_x, y: 0 },
-                        extent: vk::Extent2D { width: chase_w, height },
+                        extent: vk::Extent2D {
+                            width: chase_w,
+                            height,
+                        },
                     },
                     base_array_layer: 0,
                     layer_count: 1,
                 };
-                device.cmd_clear_attachments(self.command_buffer, &clear_attachments, &[clear_rect]);
+                device.cmd_clear_attachments(
+                    self.command_buffer,
+                    &clear_attachments,
+                    &[clear_rect],
+                );
 
                 let chase_viewport = vk::Viewport {
                     x: chase_x as f32,
@@ -1114,7 +1285,10 @@ impl OffscreenRenderer {
 
                 let chase_scissor = vk::Rect2D {
                     offset: vk::Offset2D { x: chase_x, y: 0 },
-                    extent: vk::Extent2D { width: chase_w, height },
+                    extent: vk::Extent2D {
+                        width: chase_w,
+                        height,
+                    },
                 };
                 device.cmd_set_scissor(self.command_buffer, 0, &[chase_scissor]);
 
@@ -1328,138 +1502,141 @@ impl OffscreenRenderer {
         // SAFETY: The command buffer is in the recording state, outside any render pass.
         // All Vulkan handles are valid (created in the constructor, not yet destroyed).
         unsafe {
-        let device = &self.gpu.device;
-        let rt = self.rt_pipeline.as_ref().expect("RT pipeline present");
+            let device = &self.gpu.device;
+            let rt = self.rt_pipeline.as_ref().expect("RT pipeline present");
 
-        let subresource_range = vk::ImageSubresourceRange::default()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .base_mip_level(0)
-            .level_count(1)
-            .base_array_layer(0)
-            .layer_count(1);
+            let subresource_range = vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1);
 
-        // Build RT push constants.
-        let aspect = width as f32 / height as f32;
-        let view = camera.view_matrix();
-        let mut proj = camera.projection_matrix(aspect);
-        proj.y_axis.y *= -1.0; // Vulkan Y-flip
-        let view_proj = proj * view;
-        let inv_view_proj = view_proj.inverse();
+            // Build RT push constants.
+            let aspect = width as f32 / height as f32;
+            let view = camera.view_matrix();
+            let mut proj = camera.projection_matrix(aspect);
+            proj.y_axis.y *= -1.0; // Vulkan Y-flip
+            let view_proj = proj * view;
+            let inv_view_proj = view_proj.inverse();
 
-        let pc = RtPushConstants {
-            camera_pos: [
-                camera.position.x,
-                camera.position.y,
-                camera.position.z,
-                0.0,
-            ],
-            inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            grid_params: [
-                self.grid_spacing_m,
-                0.15, // line half-width in meters
-                self.grid_max_fade_dist,
-                self.rt_trail_fade_dist,
-            ],
-            ball_pos: [
-                self.rt_ball_center.x,
-                self.rt_ball_center.y,
-                self.rt_ball_center.z,
-                self.rt_ball_radius,
-            ],
-        };
+            let pc = RtPushConstants {
+                camera_pos: [camera.position.x, camera.position.y, camera.position.z, 0.0],
+                inv_view_proj: inv_view_proj.to_cols_array_2d(),
+                grid_params: [
+                    self.grid_spacing_m,
+                    0.15, // line half-width in meters
+                    self.grid_max_fade_dist,
+                    self.rt_trail_fade_dist,
+                ],
+                ball_pos: [
+                    self.rt_ball_center.x,
+                    self.rt_ball_center.y,
+                    self.rt_ball_center.z,
+                    self.rt_ball_radius,
+                ],
+            };
 
-        // Step 1: Transition RT storage image: UNDEFINED -> GENERAL
-        device.cmd_pipeline_barrier(
-            self.command_buffer,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .image(rt.storage_image)
-                .subresource_range(subresource_range)],
-        );
+            // Step 1: Transition RT storage image: UNDEFINED -> GENERAL
+            device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .image(rt.storage_image)
+                    .subresource_range(subresource_range)],
+            );
 
-        // Step 2: Trace RT reflection rays.
-        rt.record_trace(device, self.command_buffer, &pc, width, height);
+            // Step 2: Trace RT reflection rays.
+            rt.record_trace(device, self.command_buffer, &pc, width, height);
 
-        // Step 3: Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
-        device.cmd_pipeline_barrier(
-            self.command_buffer,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .old_layout(vk::ImageLayout::GENERAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(rt.storage_image)
-                .subresource_range(subresource_range)],
-        );
+            // Step 3: Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
+            device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(rt.storage_image)
+                    .subresource_range(subresource_range)],
+            );
 
-        // Step 4: Composite render pass (LOAD, additive blend fullscreen triangle).
-        let composite_rp = self.composite_render_pass.expect("composite render pass present");
-        let composite_fb = self.composite_framebuffer.expect("composite framebuffer present");
-        let composite_pl = self.composite_pipeline.expect("composite pipeline present");
-        let composite_layout = self.composite_pipeline_layout.expect("composite layout present");
-        let composite_ds = self.composite_descriptor_set.expect("composite descriptor set present");
+            // Step 4: Composite render pass (LOAD, additive blend fullscreen triangle).
+            let composite_rp = self
+                .composite_render_pass
+                .expect("composite render pass present");
+            let composite_fb = self
+                .composite_framebuffer
+                .expect("composite framebuffer present");
+            let composite_pl = self.composite_pipeline.expect("composite pipeline present");
+            let composite_layout = self
+                .composite_pipeline_layout
+                .expect("composite layout present");
+            let composite_ds = self
+                .composite_descriptor_set
+                .expect("composite descriptor set present");
 
-        let render_pass_info = vk::RenderPassBeginInfo::default()
-            .render_pass(composite_rp)
-            .framebuffer(composite_fb)
-            .render_area(vk::Rect2D {
+            let render_pass_info = vk::RenderPassBeginInfo::default()
+                .render_pass(composite_rp)
+                .framebuffer(composite_fb)
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent,
+                });
+
+            device.cmd_begin_render_pass(
+                self.command_buffer,
+                &render_pass_info,
+                vk::SubpassContents::INLINE,
+            );
+
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+
+            let scissor = vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent,
-            });
+            };
+            device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
 
-        device.cmd_begin_render_pass(
-            self.command_buffer,
-            &render_pass_info,
-            vk::SubpassContents::INLINE,
-        );
+            device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                composite_pl,
+            );
+            device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                composite_layout,
+                0,
+                &[composite_ds],
+                &[],
+            );
 
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: width as f32,
-            height: height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+            // Fullscreen triangle: 3 vertices, no vertex buffer.
+            device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
 
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        };
-        device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
-
-        device.cmd_bind_pipeline(
-            self.command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            composite_pl,
-        );
-        device.cmd_bind_descriptor_sets(
-            self.command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            composite_layout,
-            0,
-            &[composite_ds],
-            &[],
-        );
-
-        // Fullscreen triangle: 3 vertices, no vertex buffer.
-        device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
-
-        device.cmd_end_render_pass(self.command_buffer);
+            device.cmd_end_render_pass(self.command_buffer);
         } // unsafe
     }
 
@@ -1476,11 +1653,21 @@ impl OffscreenRenderer {
         rt_storage_view: vk::ImageView,
         width: u32,
         height: u32,
-    ) -> Result<(
-        vk::RenderPass, vk::Framebuffer, vk::Pipeline, vk::PipelineLayout,
-        vk::DescriptorSetLayout, vk::DescriptorPool, vk::DescriptorSet,
-        vk::Sampler, vk::ShaderModule, vk::ShaderModule,
-    ), RenderError> {
+    ) -> Result<
+        (
+            vk::RenderPass,
+            vk::Framebuffer,
+            vk::Pipeline,
+            vk::PipelineLayout,
+            vk::DescriptorSetLayout,
+            vk::DescriptorPool,
+            vk::DescriptorSet,
+            vk::Sampler,
+            vk::ShaderModule,
+            vk::ShaderModule,
+        ),
+        RenderError,
+    > {
         // Render pass: color-only, LOAD existing content, final_layout = TRANSFER_SRC_OPTIMAL.
         let render_pass = GridPipeline::create_hud_render_pass(
             device,
@@ -1524,8 +1711,7 @@ impl OffscreenRenderer {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [binding];
-        let ds_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
         let descriptor_set_layout = unsafe {
             device
@@ -1535,8 +1721,7 @@ impl OffscreenRenderer {
 
         // Pipeline layout (descriptor set, no push constants).
         let set_layouts = [descriptor_set_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layouts);
+        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         // SAFETY: Creating pipeline layout.
         let pipeline_layout = unsafe {
             device
@@ -1594,8 +1779,8 @@ impl OffscreenRenderer {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE)
             .alpha_blend_op(vk::BlendOp::ADD);
         let blend_attachments = [blend_attachment];
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&blend_attachments);
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
 
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state =
@@ -1617,11 +1802,7 @@ impl OffscreenRenderer {
         // SAFETY: Creating graphics pipeline.
         let pipeline = unsafe {
             device
-                .create_graphics_pipelines(
-                    vk::PipelineCache::null(),
-                    &[create_info],
-                    None,
-                )
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
                 .map_err(|(_pipelines, err)| RenderError::Vulkan(err))?[0]
         };
 
@@ -1665,9 +1846,16 @@ impl OffscreenRenderer {
         unsafe { device.update_descriptor_sets(&[write], &[]) };
 
         Ok((
-            render_pass, framebuffer, pipeline, pipeline_layout,
-            descriptor_set_layout, descriptor_pool, descriptor_set,
-            sampler, vert_module, frag_module,
+            render_pass,
+            framebuffer,
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+            sampler,
+            vert_module,
+            frag_module,
         ))
     }
 
@@ -1769,7 +1957,11 @@ impl OffscreenRenderer {
     /// Write vertices into a pre-allocated mapped buffer.
     ///
     /// Returns the number of vertices written. Silently truncates if over capacity.
-    fn upload_to_mapped(allocation: &Allocation, vertices: &[GridVertex], capacity: vk::DeviceSize) -> u32 {
+    fn upload_to_mapped(
+        allocation: &Allocation,
+        vertices: &[GridVertex],
+        capacity: vk::DeviceSize,
+    ) -> u32 {
         if vertices.is_empty() {
             return 0;
         }

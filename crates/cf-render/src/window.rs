@@ -86,13 +86,12 @@ impl Swapchain {
             }
         };
 
-        let image_count = (capabilities.min_image_count + 1).min(
-            if capabilities.max_image_count == 0 {
+        let image_count =
+            (capabilities.min_image_count + 1).min(if capabilities.max_image_count == 0 {
                 u32::MAX
             } else {
                 capabilities.max_image_count
-            },
-        );
+            });
 
         let queue_family_indices = [queue_family_index];
         let create_info = vk::SwapchainCreateInfoKHR::default()
@@ -191,13 +190,12 @@ impl Swapchain {
             }
         };
 
-        let image_count = (capabilities.min_image_count + 1).min(
-            if capabilities.max_image_count == 0 {
+        let image_count =
+            (capabilities.min_image_count + 1).min(if capabilities.max_image_count == 0 {
                 u32::MAX
             } else {
                 capabilities.max_image_count
-            },
-        );
+            });
 
         let queue_family_indices = [queue_family_index];
         let create_info = vk::SwapchainCreateInfoKHR::default()

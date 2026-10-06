@@ -66,7 +66,10 @@ impl BallFlight {
     /// Update the ball position and append to trail.
     pub fn update_position(&mut self, pos: Vec3, time: f64) {
         self.position = pos;
-        self.trail.push(TrailPoint { position: pos, time });
+        self.trail.push(TrailPoint {
+            position: pos,
+            time,
+        });
 
         // Safety cap
         if self.trail.len() > MAX_TRAIL_POINTS {
@@ -249,8 +252,10 @@ pub fn generate_trail_glow(
 
             // Outer shells fade faster — glow narrows before disappearing.
             let shell_fade_boost = 1.0 + 2.0 * st;
-            let fade0 = (GLOW_SHELL_FADE + (1.0 - GLOW_SHELL_FADE) * (1.0 - t0) * shell_fade_boost).min(1.0);
-            let fade1 = (GLOW_SHELL_FADE + (1.0 - GLOW_SHELL_FADE) * (1.0 - t1) * shell_fade_boost).min(1.0);
+            let fade0 = (GLOW_SHELL_FADE + (1.0 - GLOW_SHELL_FADE) * (1.0 - t0) * shell_fade_boost)
+                .min(1.0);
+            let fade1 = (GLOW_SHELL_FADE + (1.0 - GLOW_SHELL_FADE) * (1.0 - t1) * shell_fade_boost)
+                .min(1.0);
 
             let a0 = p0 - right * w0;
             let b0 = p0 + right * w0;
@@ -282,8 +287,8 @@ pub fn generate_trail_glow(
         };
 
         if right.length_squared() > 0.001 {
-            let t_last = (1.0 - (current_time - trail[n - 1].time) / max_lifetime)
-                .clamp(0.0, 1.0) as f32;
+            let t_last =
+                (1.0 - (current_time - trail[n - 1].time) / max_lifetime).clamp(0.0, 1.0) as f32;
 
             let cap_segments: u32 = 8;
 
@@ -315,8 +320,7 @@ pub fn generate_trail_glow(
 
                 for s in 0..cap_segments {
                     let theta0 = std::f32::consts::PI * s as f32 / cap_segments as f32;
-                    let theta1 =
-                        std::f32::consts::PI * (s + 1) as f32 / cap_segments as f32;
+                    let theta1 = std::f32::consts::PI * (s + 1) as f32 / cap_segments as f32;
                     let p0 = last + w * (theta0.cos() * right + theta0.sin() * tangent);
                     let p1 = last + w * (theta1.cos() * right + theta1.sin() * tangent);
                     out.push(v(last, fade));
@@ -364,12 +368,17 @@ pub fn generate_trail_line(
         let fade0 = 1.0 - t0;
         let fade1 = 1.0 - t1;
 
-        out.push(GridVertex { position: trail[i].position.into(), fade: fade0 });
-        out.push(GridVertex { position: trail[i + 1].position.into(), fade: fade1 });
+        out.push(GridVertex {
+            position: trail[i].position.into(),
+            fade: fade0,
+        });
+        out.push(GridVertex {
+            position: trail[i + 1].position.into(),
+            fade: fade1,
+        });
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -471,7 +480,10 @@ mod tests {
 
     #[test]
     fn trail_glow_empty_on_single_point() {
-        let trail = vec![TrailPoint { position: Vec3::ZERO, time: 0.0 }];
+        let trail = vec![TrailPoint {
+            position: Vec3::ZERO,
+            time: 0.0,
+        }];
         let verts = generate_trail_glow(&trail, 0.0, 10.0, Vec3::new(0.0, 3.0, -10.0), 0.021);
         assert!(verts.is_empty());
     }
@@ -490,7 +502,13 @@ mod tests {
     fn trail_glow_fade_range() {
         let trail = make_trail(10);
         let current_time = trail.last().unwrap().time;
-        let verts = generate_trail_glow(&trail, current_time, 10.0, Vec3::new(0.0, 3.0, -10.0), 0.021);
+        let verts = generate_trail_glow(
+            &trail,
+            current_time,
+            10.0,
+            Vec3::new(0.0, 3.0, -10.0),
+            0.021,
+        );
         for v in &verts {
             assert!(
                 v.fade >= 0.0 && v.fade <= 1.01,

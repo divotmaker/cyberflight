@@ -21,7 +21,6 @@ use crate::units::G;
 #[derive(Debug, Clone, Copy)]
 pub struct BallModel {
     // ── Physical properties ──
-
     /// Ball mass (kg). USGA max: 1.620 oz (0.04593 kg).
     /// Heavier balls carry more momentum but also experience more gravitational drop.
     pub mass_kg: f64,
@@ -36,7 +35,6 @@ pub struct BallModel {
     // Cd = cd_base(Re) + cd_spin × SR / (1 + SR / sr_sat)
     //   where cd_base = cd_sub + (cd_super - cd_sub) × σ(Re)
     //   and σ(Re) = sigmoid transition at the drag crisis
-
     /// Drag coefficient in the subcritical regime (Re < re_crit).
     /// This is the base Cd before the ball's dimples trigger the drag crisis.
     /// Lower values mean less drag at low speeds (late in flight, short chips).
@@ -67,7 +65,6 @@ pub struct BallModel {
     //
     // Cl = cl_max(Re) × (1 - exp(-SR / sr_scale))
     //   where cl_max = cl_sub + (cl_super - cl_sub) × σ(Re)
-
     /// Lift coefficient ceiling in the subcritical regime (Re < re_crit).
     /// Controls how much Magnus lift the ball generates at low speeds (late in
     /// flight). Critical for high-trajectory shots (wedges, high-launch drivers)
@@ -89,7 +86,6 @@ pub struct BallModel {
     pub sr_scale: f64,
 
     // ── Drag crisis transition ──
-
     /// Critical Reynolds number where the dimple-triggered drag crisis occurs.
     /// Below this Re, airflow is subcritical (different Cd/Cl behavior).
     /// For dimpled golf balls, this is around Re = 100,000 — much lower than
@@ -135,7 +131,7 @@ impl BallModel {
     /// RMSE=2.6ft. Denver altitude gain +6.9% (published ~6.1%), hot-cold
     /// delta ~9y (published ~8y).
     pub const TOUR: Self = Self {
-        mass_kg: 0.04593,   // 1.62 oz (USGA max)
+        mass_kg: 0.04593,    // 1.62 oz (USGA max)
         diameter_m: 0.04267, // 1.68 in (USGA min)
         cd_sub: 0.295,
         cd_super: 0.186,
@@ -168,7 +164,7 @@ impl BallModel {
     /// only case where lower spin produces higher drag. Likely measurement noise.
     /// Our model gives Cd=0.296 there (within ±0.02 of all other points).
     pub const PATENT_1997: Self = Self {
-        mass_kg: 0.04593,   // same physical ball (USGA limits unchanged since 1990)
+        mass_kg: 0.04593, // same physical ball (USGA limits unchanged since 1990)
         diameter_m: 0.04267,
         cd_sub: 0.19,
         cd_super: 0.29,
@@ -238,12 +234,7 @@ impl BallModel {
     /// Golf-convention sign flips (positive azimuth/lateral = right) are applied
     /// at the input/output boundary in `trajectory.rs`, not here.
     #[must_use]
-    pub fn acceleration(
-        &self,
-        vel: DVec3,
-        aero: &AeroParams,
-        air_density: f64,
-    ) -> DVec3 {
+    pub fn acceleration(&self, vel: DVec3, aero: &AeroParams, air_density: f64) -> DVec3 {
         let speed = vel.length();
         if speed < 1e-10 {
             return DVec3::new(0.0, -G, 0.0);
@@ -348,13 +339,9 @@ mod tests {
             spin_rate: 0.0,
             spin_decay: 0.0,
         };
-        let accel =
-            TOUR.acceleration(DVec3::new(50.0, 0.0, 0.0), &aero, SEA_LEVEL_RHO);
+        let accel = TOUR.acceleration(DVec3::new(50.0, 0.0, 0.0), &aero, SEA_LEVEL_RHO);
         assert!((accel.y + G).abs() < 5.0, "gravity should dominate y");
-        assert!(
-            (accel.z).abs() < 1e-10,
-            "no lateral force without sidespin"
-        );
+        assert!((accel.z).abs() < 1e-10, "no lateral force without sidespin");
     }
 
     #[test]
@@ -528,10 +515,10 @@ mod tests {
         // the lowest spin ratio tested (SR≈0.04).
         let cases: &[(f64, f64, f64, f64)] = &[
             //  V fps  spin rev/s  patent Cd  patent Cl
-            (250.0,     46.0,       0.306,     0.282),
-            (200.0,     36.0,       0.302,     0.276),
-            (150.0,     47.0,       0.303,     0.275),
-            (150.0,     27.0,       0.300,     0.274),
+            (250.0, 46.0, 0.306, 0.282),
+            (200.0, 36.0, 0.302, 0.276),
+            (150.0, 47.0, 0.303, 0.275),
+            (150.0, 27.0, 0.300, 0.274),
         ];
         for &(v, spin, pat_cd, pat_cl) in cases {
             let (cd, cl) = patent_cd_cl(v, spin);
@@ -580,10 +567,8 @@ mod tests {
         // This transition is the defining aerodynamic feature of dimpled balls.
         // Smooth spheres have the opposite pattern (high Cd subcritical, low Cd
         // supercritical at Re≈300k). Dimples shift the crisis to Re≈100k.
-        let cases: &[(f64, f64, f64, f64)] = &[
-            (100.0, 43.0, 0.229, 0.151),
-            (100.0, 19.0, 0.222, 0.148),
-        ];
+        let cases: &[(f64, f64, f64, f64)] =
+            &[(100.0, 43.0, 0.229, 0.151), (100.0, 19.0, 0.222, 0.148)];
         for &(v, spin, pat_cd, pat_cl) in cases {
             let (cd, cl) = patent_cd_cl(v, spin);
             assert!(

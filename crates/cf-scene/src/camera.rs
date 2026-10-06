@@ -24,8 +24,8 @@ impl Camera {
     #[must_use]
     pub fn driving_range() -> Self {
         Self {
-            position: Vec3::new(0.0, 1.7, -4.5),      // behind tee box, standing eye height
-            target: Vec3::new(0.0, 1.7, 100.0),     // looking at horizon, downrange
+            position: Vec3::new(0.0, 1.7, -4.5), // behind tee box, standing eye height
+            target: Vec3::new(0.0, 1.7, 100.0),  // looking at horizon, downrange
             up: Vec3::Y,
             fov_y: std::f32::consts::FRAC_PI_4, // 45 degrees
             near: 0.1,

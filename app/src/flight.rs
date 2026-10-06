@@ -8,15 +8,18 @@ use cf_math::aero::BallModel;
 use cf_math::bounce::BounceSurface;
 use cf_math::environment::Environment;
 use cf_math::rollout::RolloutSurface;
-use cf_math::trajectory::{simulate_shot, ShotInput, ShotResult};
+use cf_math::trajectory::{ShotInput, ShotResult, simulate_shot};
 use cf_render::render::FlightRenderData;
 use cf_scene::camera::Camera;
-use cf_scene::hud::{build_hud, ShotTelemetry, UnitSystem};
+use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::surface;
 use cf_scene::trail::TrailPoint;
 
-use flightrelay::{FrpClient, FrpEvent, FrpMessage, ShotAggregator};
+use flightrelay::{
+    EndpointConfig, FrpConnection, FrpEndpoint, FrpEvent, FrpMessage, Role, ShotAggregator,
+    Transport,
+};
 
 /// FRP spec version we support.
 const FRP_VERSION: &str = flightrelay::SPEC_VERSION;
@@ -343,9 +346,50 @@ impl AnimatedFlight {
     }
 }
 
+/// Open the FRP endpoint cyberflight dials.
+///
+/// Cyberflight is an FRP *controller*: it receives shot data and drives the
+/// device. Opening a dialing endpoint performs no I/O, so this only fails on a
+/// malformed configuration.
+///
+/// # Errors
+///
+/// Returns an error if the endpoint cannot be opened.
+pub fn frp_endpoint() -> Result<FrpEndpoint, flightrelay::FrpError> {
+    FrpEndpoint::open(
+        EndpointConfig::new(
+            Role::Controller,
+            Transport::connect(flightrelay::DEFAULT_URL),
+        )
+        .with_name("cyberflight")
+        .with_versions(&[FRP_VERSION]),
+    )
+}
+
+/// Dial the device and complete the FRP handshake. Returns `(conn, connected)`.
+pub fn try_establish(endpoint: &mut FrpEndpoint) -> (Option<FrpConnection>, bool) {
+    eprintln!("Connecting to FRP at {}...", flightrelay::DEFAULT_URL);
+    match endpoint.establish() {
+        Ok(conn) => {
+            eprintln!("Connected (FRP {})", conn.version());
+            if let Err(e) = conn.set_nonblocking(true) {
+                eprintln!("set_nonblocking failed: {e}");
+                return (None, false);
+            }
+            (Some(conn), true)
+        }
+        Err(e) => {
+            eprintln!("FRP not available (expected {FRP_VERSION}): {e}");
+            (None, false)
+        }
+    }
+}
+
 /// Shared FRP connection state used by both windowed and streaming modes.
 pub struct FrpState {
-    pub client: Option<FrpClient>,
+    /// Outlives the connections it produces; `establish` again to reconnect.
+    pub endpoint: FrpEndpoint,
+    pub conn: Option<FrpConnection>,
     pub shots: ShotAggregator,
     pub lm_states: HashMap<String, bool>,
     pub connected: bool,
@@ -353,51 +397,38 @@ pub struct FrpState {
 }
 
 impl FrpState {
-    pub fn new() -> Self {
-        let (client, connected) = Self::try_connect();
-        Self {
-            client,
+    /// # Errors
+    ///
+    /// Returns an error if the FRP endpoint cannot be opened.
+    pub fn new() -> Result<Self, flightrelay::FrpError> {
+        let mut endpoint = frp_endpoint()?;
+        let (conn, connected) = try_establish(&mut endpoint);
+        Ok(Self {
+            endpoint,
+            conn,
             shots: ShotAggregator::new(),
             lm_states: HashMap::new(),
             connected,
             last_reconnect_attempt: 0.0,
-        }
-    }
-
-    pub fn try_connect() -> (Option<FrpClient>, bool) {
-        eprintln!("Connecting to FRP at {}...", flightrelay::DEFAULT_URL);
-        match FrpClient::connect(flightrelay::DEFAULT_URL, "cyberflight", &[FRP_VERSION]) {
-            Ok(client) => {
-                eprintln!("Connected (FRP {})", client.version());
-                if let Err(e) = client.set_nonblocking(true) {
-                    eprintln!("set_nonblocking failed: {e}");
-                    return (None, false);
-                }
-                (Some(client), true)
-            }
-            Err(e) => {
-                eprintln!("FRP not available (expected {FRP_VERSION}): {e}");
-                (None, false)
-            }
-        }
+        })
     }
 
     /// Poll FRP for new shots. Returns any completed ReceivedShot.
     pub fn poll(&mut self, now: f64, animating: bool) -> Option<ReceivedShot> {
         // Reconnect if disconnected (try every 5 seconds).
-        if self.client.is_none() && now - self.last_reconnect_attempt >= 5.0 {
+        if self.conn.is_none() && now - self.last_reconnect_attempt >= 5.0 {
             self.last_reconnect_attempt = now;
-            let (client, connected) = Self::try_connect();
-            self.client = client;
+            let (conn, connected) = try_establish(&mut self.endpoint);
+            self.conn = conn;
             self.connected = connected;
         }
 
         let mut result = None;
         let mut disconnected = false;
 
-        if let Some(client) = &mut self.client {
+        if let Some(conn) = &mut self.conn {
             loop {
-                match client.try_recv() {
+                match conn.try_recv() {
                     Ok(Some(msg)) => {
                         // Update launch monitor ready state from device telemetry.
                         if let FrpMessage::Envelope(env) = &msg {
@@ -432,7 +463,7 @@ impl FrpState {
 
         if disconnected {
             self.connected = false;
-            self.client = None;
+            self.conn = None;
             self.lm_states.clear();
         }
 

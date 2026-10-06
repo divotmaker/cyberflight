@@ -34,5 +34,5 @@ cf-math = { path = "crates/cf-math" }
 cf-scene = { path = "crates/cf-scene" }
 cf-render = { path = "crates/cf-render" }
 cf-test = { path = "crates/cf-test" }
-flightrelay = { version = "0.1.7", features = ["client", "controller"] }
+flightrelay = { version = "0.2.1", features = ["transport", "controller"] }
 tiny_http = "0.12"

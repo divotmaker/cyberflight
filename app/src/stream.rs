@@ -36,7 +36,9 @@ fn parse_stream_args() -> StreamArgs {
                     if let Some(p) = StreamPreset::parse(name) {
                         preset = p;
                     } else {
-                        eprintln!("Unknown preset '{name}', using quality. Options: quality, balanced, lite");
+                        eprintln!(
+                            "Unknown preset '{name}', using quality. Options: quality, balanced, lite"
+                        );
                     }
                 }
                 i += 2;
@@ -81,7 +83,10 @@ pub fn run_stream() -> Result<()> {
     let config = stream_args.config;
 
     eprintln!("cyberflight streaming mode");
-    eprintln!("  Resolution: {}x{} @ {}fps, {}bps", config.width, config.height, config.fps, config.bitrate);
+    eprintln!(
+        "  Resolution: {}x{} @ {}fps, {}bps",
+        config.width, config.height, config.fps, config.bitrate
+    );
 
     let range = Range::new();
     let environment = Environment::SEA_LEVEL;
@@ -90,12 +95,13 @@ pub fn run_stream() -> Result<()> {
     eprintln!("Initializing headless Vulkan renderer...");
     let mut renderer = OffscreenRenderer::new(config.width, config.height, &range.grid)
         .context("failed to create offscreen renderer")?;
-    renderer.init_streaming()
+    renderer
+        .init_streaming()
         .context("failed to initialize streaming buffers")?;
 
     // Start ffmpeg encoder.
-    let mut encoder = StreamEncoder::new(config.clone())
-        .context("failed to start stream encoder")?;
+    let mut encoder =
+        StreamEncoder::new(config.clone()).context("failed to start stream encoder")?;
 
     // Start built-in HTTP server for HLS if requested.
     if let Some(port) = stream_args.serve_port {
@@ -119,7 +125,7 @@ pub fn run_stream() -> Result<()> {
     }
 
     // Connect to FRP device.
-    let mut fh = FrpState::new();
+    let mut fh = FrpState::new().context("open FRP endpoint")?;
     let mut fm = FlightManager::new();
 
     let start = Instant::now();
@@ -150,7 +156,11 @@ pub fn run_stream() -> Result<()> {
         let animating = fm.is_animating(now);
         if let Some(received) = fh.poll(now, animating) {
             fm.flights.push(AnimatedFlight::from_received(
-                &received, now, &BallModel::TOUR, &environment, &range.targets,
+                &received,
+                now,
+                &BallModel::TOUR,
+                &environment,
+                &range.targets,
             ));
         }
 
@@ -167,13 +177,19 @@ pub fn run_stream() -> Result<()> {
         }
 
         // Build and update HUD.
-        let hud = fm.build_hud(now, chase_camera.is_some(), &fh.lm_states, fh.connected, config.width as f32, config.height as f32);
+        let hud = fm.build_hud(
+            now,
+            chase_camera.is_some(),
+            &fh.lm_states,
+            fh.connected,
+            config.width as f32,
+            config.height as f32,
+        );
         renderer.update_hud_streaming(&hud.lines, &hud.fills);
 
         // Render frame.
         let render_t = Instant::now();
-        let frame = renderer.render(&range.camera)
-            .context("render failed")?;
+        let frame = renderer.render(&range.camera).context("render failed")?;
         let render_us = render_t.elapsed().as_micros() as u64;
 
         // Pipe to ffmpeg.
@@ -223,18 +239,26 @@ fn start_http_server(port: u16, dir: PathBuf) -> Result<()> {
     let server = tiny_http::Server::http(&addr)
         .map_err(|e| anyhow::anyhow!("failed to start HTTP server on {addr}: {e}"))?;
 
-    eprintln!("HTTP server listening on port {port} (serving {}/)", dir.display());
+    eprintln!(
+        "HTTP server listening on port {port} (serving {}/)",
+        dir.display()
+    );
 
     thread::spawn(move || {
         for request in server.incoming_requests() {
             let url_path = request.url().trim_start_matches('/');
             // Prevent path traversal.
             if url_path.contains("..") {
-                let _ = request.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
+                let _ = request
+                    .respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
                 continue;
             }
 
-            let file_path = dir.join(if url_path.is_empty() { "stream.m3u8" } else { url_path });
+            let file_path = dir.join(if url_path.is_empty() {
+                "stream.m3u8"
+            } else {
+                url_path
+            });
 
             let content_type = match file_path.extension().and_then(|e| e.to_str()) {
                 Some("m3u8") => "application/vnd.apple.mpegurl",
@@ -246,15 +270,22 @@ fn start_http_server(port: u16, dir: PathBuf) -> Result<()> {
                 Ok(file) => {
                     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
                     let response = tiny_http::Response::from_file(file)
-                        .with_header(tiny_http::Header::from_bytes("Content-Type", content_type).unwrap())
-                        .with_header(tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap())
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", content_type).unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*")
+                                .unwrap(),
+                        )
                         .with_status_code(200);
                     let _ = request.respond(response.with_header(
                         tiny_http::Header::from_bytes("Content-Length", len.to_string()).unwrap(),
                     ));
                 }
                 Err(_) => {
-                    let _ = request.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+                    let _ = request.respond(
+                        tiny_http::Response::from_string("not found").with_status_code(404),
+                    );
                 }
             }
         }

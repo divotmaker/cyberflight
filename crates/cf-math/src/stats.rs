@@ -69,9 +69,7 @@ pub struct SessionStats {
 impl SessionStats {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            shots: Vec::new(),
-        }
+        Self { shots: Vec::new() }
     }
 
     pub fn add_shot(&mut self, stats: ShotStats) {
@@ -225,7 +223,11 @@ mod tests {
 
     #[test]
     fn shot_stats_from_seven_iron() {
-        let result = simulate_flight(&ShotInput::seven_iron(), &BallModel::TOUR, &Environment::SEA_LEVEL);
+        let result = simulate_flight(
+            &ShotInput::seven_iron(),
+            &BallModel::TOUR,
+            &Environment::SEA_LEVEL,
+        );
         let stats = ShotStats::from_flight(&result);
         assert!(stats.carry_yards > 100.0);
         assert!(stats.apex_feet > 0.0);

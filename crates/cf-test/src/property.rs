@@ -5,8 +5,14 @@ use cf_render::readback::FrameBuffers;
 /// # Panics
 /// Panics if all pixels are black (RGB all zero).
 pub fn assert_not_all_black(fb: &FrameBuffers) {
-    let has_content = fb.color.chunks_exact(4).any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0);
-    assert!(has_content, "frame is entirely black — nothing was rendered");
+    let has_content = fb
+        .color
+        .chunks_exact(4)
+        .any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0);
+    assert!(
+        has_content,
+        "frame is entirely black — nothing was rendered"
+    );
 }
 
 /// Assert that the background is predominantly dark.
@@ -58,7 +64,7 @@ pub fn assert_has_bright_pixels(fb: &FrameBuffers, threshold: u8, min_count: usi
 /// Panics if no pixels in the region match the expected color.
 pub fn assert_region_has_color(
     fb: &FrameBuffers,
-    region: [u32; 4], // [x0, y0, x1, y1]
+    region: [u32; 4],  // [x0, y0, x1, y1]
     expected: [u8; 3], // [R, G, B]
     tolerance: u8,
 ) {

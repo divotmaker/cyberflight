@@ -1,6 +1,6 @@
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
@@ -99,8 +99,7 @@ impl RtPipeline {
     ) -> Result<Self, RenderError> {
         let accel_loader =
             ash::khr::acceleration_structure::Device::new(&gpu.instance, &gpu.device);
-        let rt_loader =
-            ash::khr::ray_tracing_pipeline::Device::new(&gpu.instance, &gpu.device);
+        let rt_loader = ash::khr::ray_tracing_pipeline::Device::new(&gpu.instance, &gpu.device);
 
         // Query RT pipeline properties for SBT alignment
         let mut rt_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
@@ -115,18 +114,12 @@ impl RtPipeline {
         let base_alignment = rt_props.shader_group_base_alignment;
 
         // ── Shaders ──
-        let rgen_module = Self::create_shader_module(
-            &gpu.device,
-            include_bytes!("../shaders/rt.rgen.spv"),
-        )?;
-        let rmiss_module = Self::create_shader_module(
-            &gpu.device,
-            include_bytes!("../shaders/rt.rmiss.spv"),
-        )?;
-        let rchit_module = Self::create_shader_module(
-            &gpu.device,
-            include_bytes!("../shaders/rt.rchit.spv"),
-        )?;
+        let rgen_module =
+            Self::create_shader_module(&gpu.device, include_bytes!("../shaders/rt.rgen.spv"))?;
+        let rmiss_module =
+            Self::create_shader_module(&gpu.device, include_bytes!("../shaders/rt.rmiss.spv"))?;
+        let rchit_module =
+            Self::create_shader_module(&gpu.device, include_bytes!("../shaders/rt.rchit.spv"))?;
 
         // ── Descriptor set layout: TLAS + storage image ──
         let bindings = [
@@ -143,8 +136,7 @@ impl RtPipeline {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR),
         ];
-        let ds_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
         let descriptor_set_layout = unsafe {
             gpu.device
@@ -154,9 +146,7 @@ impl RtPipeline {
 
         // ── Pipeline layout (push constants + descriptor set) ──
         let push_range = vk::PushConstantRange::default()
-            .stage_flags(
-                vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-            )
+            .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR)
             .offset(0)
             .size(std::mem::size_of::<RtPushConstants>() as u32);
         let push_ranges = [push_range];
@@ -338,9 +328,8 @@ impl RtPipeline {
 
         // ── Update descriptor set ──
         let tlas_handle = tlas.accel;
-        let mut as_write_info =
-            vk::WriteDescriptorSetAccelerationStructureKHR::default()
-                .acceleration_structures(std::slice::from_ref(&tlas_handle));
+        let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(std::slice::from_ref(&tlas_handle));
 
         let image_info = vk::DescriptorImageInfo::default()
             .image_view(storage_view)
@@ -462,11 +451,7 @@ impl RtPipeline {
 
         // SAFETY: Recording RT commands into a valid command buffer.
         unsafe {
-            device.cmd_bind_pipeline(
-                cb,
-                vk::PipelineBindPoint::RAY_TRACING_KHR,
-                self.pipeline,
-            );
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::RAY_TRACING_KHR, self.pipeline);
 
             device.cmd_bind_descriptor_sets(
                 cb,
@@ -561,9 +546,7 @@ impl RtPipeline {
 
             let as_geometry = vk::AccelerationStructureGeometryKHR::default()
                 .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                .geometry(vk::AccelerationStructureGeometryDataKHR {
-                    triangles,
-                })
+                .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
                 .flags(vk::GeometryFlagsKHR::OPAQUE);
 
             let as_geometries = [as_geometry];
@@ -613,8 +596,7 @@ impl RtPipeline {
                 &gpu.device,
                 &mut gpu.allocator,
                 sizes.build_scratch_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 MemoryLocation::GpuOnly,
                 "blas scratch",
             )?;
@@ -622,16 +604,15 @@ impl RtPipeline {
             let scratch_addr = buffer_device_address(&gpu.device, scratch_buffer);
 
             // Build BLAS on device
-            let build_info_final =
-                vk::AccelerationStructureBuildGeometryInfoKHR::default()
-                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                    .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-                    .dst_acceleration_structure(accel)
-                    .geometries(&as_geometries)
-                    .scratch_data(vk::DeviceOrHostAddressKHR {
-                        device_address: scratch_addr,
-                    });
+            let build_info_final = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .dst_acceleration_structure(accel)
+                .geometries(&as_geometries)
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: scratch_addr,
+                });
 
             let range_info = vk::AccelerationStructureBuildRangeInfoKHR::default()
                 .primitive_count(tri_count)
@@ -650,12 +631,8 @@ impl RtPipeline {
                     );
                     // Barrier: AS build → AS read
                     let barrier = vk::MemoryBarrier::default()
-                        .src_access_mask(
-                            vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
-                        )
-                        .dst_access_mask(
-                            vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
-                        );
+                        .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
+                        .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
                     device.cmd_pipeline_barrier(
                         cb,
                         vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
@@ -717,9 +694,8 @@ impl RtPipeline {
             let m = geom.transform;
             let transform = vk::TransformMatrixKHR {
                 matrix: [
-                    m.x_axis.x, m.y_axis.x, m.z_axis.x, m.w_axis.x,
-                    m.x_axis.y, m.y_axis.y, m.z_axis.y, m.w_axis.y,
-                    m.x_axis.z, m.y_axis.z, m.z_axis.z, m.w_axis.z,
+                    m.x_axis.x, m.y_axis.x, m.z_axis.x, m.w_axis.x, m.x_axis.y, m.y_axis.y,
+                    m.z_axis.y, m.w_axis.y, m.x_axis.z, m.y_axis.z, m.z_axis.z, m.w_axis.z,
                 ],
             };
 
@@ -738,20 +714,17 @@ impl RtPipeline {
                 GEOM_TRAIL => 0x04,
                 _ => 0x02, // tee box border
             };
-            instances.push(
-                vk::AccelerationStructureInstanceKHR {
-                    transform,
-                    instance_custom_index_and_mask: vk::Packed24_8::new(geom.geom_type, mask),
-                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                        0,
-                        vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw()
-                            as u8,
-                    ),
-                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                        device_handle: blas_addr,
-                    },
+            instances.push(vk::AccelerationStructureInstanceKHR {
+                transform,
+                instance_custom_index_and_mask: vk::Packed24_8::new(geom.geom_type, mask),
+                instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                    0,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
+                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                    device_handle: blas_addr,
                 },
-            );
+            });
             let _ = i; // suppress unused warning
         }
 
@@ -840,23 +813,21 @@ impl RtPipeline {
             &gpu.device,
             &mut gpu.allocator,
             sizes.build_scratch_size,
-            vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             MemoryLocation::GpuOnly,
             "tlas scratch",
         )?;
         let scratch_addr = buffer_device_address(&gpu.device, scratch_buffer);
 
-        let build_info_final =
-            vk::AccelerationStructureBuildGeometryInfoKHR::default()
-                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-                .dst_acceleration_structure(tlas_accel)
-                .geometries(&tlas_geometries)
-                .scratch_data(vk::DeviceOrHostAddressKHR {
-                    device_address: scratch_addr,
-                });
+        let build_info_final = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+            .dst_acceleration_structure(tlas_accel)
+            .geometries(&tlas_geometries)
+            .scratch_data(vk::DeviceOrHostAddressKHR {
+                device_address: scratch_addr,
+            });
 
         let range_info = vk::AccelerationStructureBuildRangeInfoKHR::default()
             .primitive_count(instance_count)
@@ -1010,9 +981,7 @@ impl RtPipeline {
     ) -> Result<(), RenderError> {
         // SAFETY: Waiting for device idle before destroying AS resources.
         unsafe {
-            gpu.device
-                .device_wait_idle()
-                .map_err(RenderError::Vulkan)?;
+            gpu.device.device_wait_idle().map_err(RenderError::Vulkan)?;
         }
 
         // SAFETY: Device is idle, AS resources are not in use.
@@ -1038,9 +1007,8 @@ impl RtPipeline {
 
         // Update TLAS descriptor binding (handle changed on rebuild).
         let tlas_handle = self.tlas.as_ref().expect("just built").accel;
-        let mut as_write_info =
-            vk::WriteDescriptorSetAccelerationStructureKHR::default()
-                .acceleration_structures(std::slice::from_ref(&tlas_handle));
+        let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(std::slice::from_ref(&tlas_handle));
 
         let write = vk::WriteDescriptorSet::default()
             .dst_set(self.descriptor_set)
@@ -1151,9 +1119,7 @@ fn align_up(value: u32, alignment: u32) -> u32 {
 fn buffer_device_address(device: &ash::Device, buffer: vk::Buffer) -> vk::DeviceAddress {
     // SAFETY: Buffer was created with SHADER_DEVICE_ADDRESS usage.
     unsafe {
-        device.get_buffer_device_address(
-            &vk::BufferDeviceAddressInfo::default().buffer(buffer),
-        )
+        device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
     }
 }
 
@@ -1238,8 +1204,7 @@ fn submit_immediate(
             .queue_wait_idle(gpu.graphics_queue)
             .map_err(RenderError::Vulkan)?;
 
-        gpu.device
-            .free_command_buffers(gpu.command_pool, &cbs);
+        gpu.device.free_command_buffers(gpu.command_pool, &cbs);
     }
 
     Ok(())

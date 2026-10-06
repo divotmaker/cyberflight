@@ -49,14 +49,10 @@ impl GridPipeline {
         final_layout: vk::ImageLayout,
     ) -> Result<Self, RenderError> {
         let render_pass = Self::create_render_pass(device, color_format, final_layout)?;
-        let vert_module = Self::create_shader_module(
-            device,
-            include_bytes!("../shaders/grid.vert.spv"),
-        )?;
-        let frag_module = Self::create_shader_module(
-            device,
-            include_bytes!("../shaders/grid.frag.spv"),
-        )?;
+        let vert_module =
+            Self::create_shader_module(device, include_bytes!("../shaders/grid.vert.spv"))?;
+        let frag_module =
+            Self::create_shader_module(device, include_bytes!("../shaders/grid.frag.spv"))?;
         let pipeline_layout = Self::create_pipeline_layout(device)?;
         let pipeline = Self::create_pipeline(
             device,

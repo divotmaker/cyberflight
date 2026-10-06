@@ -41,9 +41,8 @@ impl Range {
 
     /// Remove landed flights older than `max_age` seconds.
     pub fn cleanup_old_flights(&mut self, current_time: f64, max_age: f64) {
-        self.flights.retain(|f| {
-            f.active || (current_time - f.start_time) < max_age
-        });
+        self.flights
+            .retain(|f| f.active || (current_time - f.start_time) < max_age);
     }
 }
 

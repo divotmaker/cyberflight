@@ -78,13 +78,37 @@ pub fn generate_tee_border(tee: &TeeBox) -> Vec<GridVertex> {
     let mut verts = Vec::with_capacity(24);
 
     // Top strip (+Z edge)
-    quad(&mut verts, v(-outer, inner), v(outer, inner), v(outer, outer), v(-outer, outer));
+    quad(
+        &mut verts,
+        v(-outer, inner),
+        v(outer, inner),
+        v(outer, outer),
+        v(-outer, outer),
+    );
     // Bottom strip (-Z edge)
-    quad(&mut verts, v(-outer, -outer), v(outer, -outer), v(outer, -inner), v(-outer, -inner));
+    quad(
+        &mut verts,
+        v(-outer, -outer),
+        v(outer, -outer),
+        v(outer, -inner),
+        v(-outer, -inner),
+    );
     // Left strip (-X edge, between inner Z extents)
-    quad(&mut verts, v(-outer, -inner), v(-inner, -inner), v(-inner, inner), v(-outer, inner));
+    quad(
+        &mut verts,
+        v(-outer, -inner),
+        v(-inner, -inner),
+        v(-inner, inner),
+        v(-outer, inner),
+    );
     // Right strip (+X edge, between inner Z extents)
-    quad(&mut verts, v(inner, -inner), v(outer, -inner), v(outer, inner), v(inner, inner));
+    quad(
+        &mut verts,
+        v(inner, -inner),
+        v(outer, -inner),
+        v(outer, inner),
+        v(inner, inner),
+    );
 
     verts
 }
@@ -212,7 +236,13 @@ pub fn generate_ball_glow(tee: &TeeBox, rings: u32, segments: u32) -> Vec<GridVe
     generate_ball_glow_at(center, tee.ball_radius, rings, segments)
 }
 
-fn quad(verts: &mut Vec<GridVertex>, bl: GridVertex, br: GridVertex, tr: GridVertex, tl: GridVertex) {
+fn quad(
+    verts: &mut Vec<GridVertex>,
+    bl: GridVertex,
+    br: GridVertex,
+    tr: GridVertex,
+    tl: GridVertex,
+) {
     verts.push(bl);
     verts.push(br);
     verts.push(tr);
@@ -275,8 +305,14 @@ mod tests {
         let min_y = verts.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min);
         let max_y = verts.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
         // Bottom of sphere touches tee box surface, top at TEE_ELEVATION + 2*radius
-        assert!((min_y - TEE_ELEVATION).abs() < 1e-4, "ball bottom should touch tee box, got {min_y}");
-        assert!((max_y - (TEE_ELEVATION + 2.0 * tee.ball_radius)).abs() < 1e-4, "ball top");
+        assert!(
+            (min_y - TEE_ELEVATION).abs() < 1e-4,
+            "ball bottom should touch tee box, got {min_y}"
+        );
+        assert!(
+            (max_y - (TEE_ELEVATION + 2.0 * tee.ball_radius)).abs() < 1e-4,
+            "ball top"
+        );
     }
 
     #[test]
