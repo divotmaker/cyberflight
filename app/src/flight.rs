@@ -4,17 +4,17 @@ use std::collections::HashMap;
 
 use glam::{DVec3, Vec3};
 
-use cf_math::aero::BallModel;
-use cf_math::bounce::BounceSurface;
-use cf_math::environment::Environment;
-use cf_math::rollout::RolloutSurface;
-use cf_math::trajectory::{ShotInput, ShotResult, simulate_shot};
 use cf_render::render::FlightRenderData;
 use cf_scene::camera::Camera;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::surface;
 use cf_scene::trail::TrailPoint;
+use dimple::aero::BallModel;
+use dimple::bounce::BounceSurface;
+use dimple::environment::Environment;
+use dimple::rollout::RolloutSurface;
+use dimple::trajectory::{ShotInput, ShotResult, simulate_shot};
 
 use flightrelay::{
     EndpointConfig, FrpConnection, FrpEndpoint, FrpEvent, FrpMessage, Role, ShotAggregator,
@@ -32,7 +32,7 @@ pub const DEFAULT_TRAIL_SUBSAMPLE: usize = 1;
 /// Trail tail as a fraction of elapsed flight time.
 pub const TRAIL_TAIL_FRACTION: f64 = 1.2;
 /// Gravity for parabolic bounce arcs.
-pub const G: f64 = cf_math::units::G;
+pub const G: f64 = dimple::units::G;
 /// Default smash factor for estimating club speed.
 pub const DEFAULT_SMASH_FACTOR: f64 = 1.40;
 
@@ -43,10 +43,19 @@ pub struct TimelinePoint {
     pub pos: DVec3,
 }
 
-/// Map trajectory coordinates (x=forward, y=up, z=left) to
+/// Map trajectory coordinates (x=forward, y=up, z=right) to
 /// scene coordinates (+Z=downrange, +Y=up, +X=right).
 pub fn traj_to_scene(p: DVec3) -> Vec3 {
-    Vec3::new(-p.z as f32, p.y as f32, p.x as f32)
+    Vec3::new(p.z as f32, p.y as f32, p.x as f32)
+}
+
+/// Surface under a trajectory-frame ground point.
+///
+/// Targets live in the scene frame, so the point is mapped through the same
+/// axes as [`traj_to_scene`]: scene x = trajectory z (right), scene z =
+/// trajectory x (downrange).
+pub fn landing_surface(p: DVec3, targets: &[cf_scene::target::Target]) -> surface::Surface {
+    surface::surface_at(p.z, p.x, targets)
 }
 
 /// Interpolate position in the unified timeline.
@@ -142,15 +151,13 @@ impl AnimatedFlight {
     ) -> Self {
         let input = &shot.input;
 
-        let flight = cf_math::trajectory::simulate_flight(input, ball, env);
-        let landing_x = flight.points.last().map_or(0.0, |p| p.pos.x);
-        let landing_z = flight.points.last().map_or(0.0, |p| p.pos.z);
+        let flight = dimple::trajectory::simulate_flight(input, ball, env);
+        let landing = flight.points.last().map_or(DVec3::ZERO, |p| p.pos);
 
-        let (bounce_surface, rollout_surface) =
-            match surface::surface_at(landing_x, landing_z, targets) {
-                surface::Surface::Green => (BounceSurface::GREEN, RolloutSurface::GREEN),
-                surface::Surface::Fairway => (BounceSurface::FAIRWAY, RolloutSurface::FAIRWAY),
-            };
+        let (bounce_surface, rollout_surface) = match landing_surface(landing, targets) {
+            surface::Surface::Green => (BounceSurface::GREEN, RolloutSurface::GREEN),
+            surface::Surface::Fairway => (BounceSurface::FAIRWAY, RolloutSurface::FAIRWAY),
+        };
 
         let result = simulate_shot(input, ball, env, &bounce_surface, &rollout_surface);
         let timeline = build_timeline(&result);
@@ -190,7 +197,7 @@ impl AnimatedFlight {
         let downrange_m = pos.x;
 
         let carry_yards = if shot_t < self.result.flight.flight_time {
-            cf_math::units::meters_to_yards(total_m)
+            dimple::units::meters_to_yards(total_m)
         } else {
             self.result.flight.carry_yards
         };
@@ -219,9 +226,9 @@ impl AnimatedFlight {
             },
             carry_yards,
             lm_carry_yards: self.lm_carry_yards,
-            total_yards: cf_math::units::meters_to_yards(total_m),
-            downrange_yards: cf_math::units::meters_to_yards(downrange_m),
-            lateral_m: -pos.z,
+            total_yards: dimple::units::meters_to_yards(total_m),
+            downrange_yards: dimple::units::meters_to_yards(downrange_m),
+            lateral_m: pos.z,
             flight_time_s: self.result.flight.flight_time,
             elapsed_s: shot_t.min(self.result.flight.flight_time),
             in_flight: self.is_animating(now),
@@ -296,6 +303,8 @@ impl AnimatedFlight {
             } else {
                 DVec3::new(1.0, 0.0, 0.0)
             };
+            // Same axis map as `traj_to_scene` (trajectory z = right = scene x),
+            // so the chase direction matches the ball's actual lateral motion.
             let velocity = Vec3::new(vel.z as f32, vel.y as f32, vel.x as f32);
 
             let horiz_speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
@@ -546,5 +555,71 @@ impl FlightManager {
             screen_w,
             screen_h,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cf_scene::target::Target;
+
+    /// 10m right of the target line, 150m downrange, 15m radius.
+    fn right_target() -> Vec<Target> {
+        vec![Target {
+            center: [10.0, 0.0, 150.0],
+            num_rings: 3,
+            ring_spacing_m: 5.0,
+            label: "R".to_owned(),
+        }]
+    }
+
+    #[test]
+    fn traj_to_scene_maps_right_to_scene_x() {
+        let p = traj_to_scene(DVec3::new(100.0, 5.0, 10.0));
+        assert_eq!(p, Vec3::new(10.0, 5.0, 100.0));
+    }
+
+    #[test]
+    fn landing_surface_uses_scene_frame_targets() {
+        let targets = right_target();
+        assert_eq!(
+            landing_surface(DVec3::new(150.0, 0.0, 10.0), &targets),
+            surface::Surface::Green
+        );
+        assert_eq!(
+            landing_surface(DVec3::new(150.0, 0.0, -10.0), &targets),
+            surface::Surface::Fairway
+        );
+    }
+
+    #[test]
+    fn pushed_shot_lands_on_target_right_of_line() {
+        let input = ShotInput {
+            launch_azimuth_deg: 4.0,
+            ..ShotInput::seven_iron()
+        };
+        let flight =
+            dimple::trajectory::simulate_flight(&input, &BallModel::TOUR, &Environment::SEA_LEVEL);
+        let landing = flight.points.last().expect("flight has points").pos;
+        assert!(
+            landing.z > 5.0,
+            "pushed shot should land right: z={:.2}",
+            landing.z
+        );
+        assert!(traj_to_scene(landing).x > 5.0);
+
+        let target_at = |lateral: f64| Target {
+            center: [lateral as f32, 0.0, landing.x as f32],
+            num_rings: 1,
+            ring_spacing_m: 3.0,
+            label: "T".to_owned(),
+        };
+        let on_line = [target_at(landing.z)];
+        let mirrored = [target_at(-landing.z)];
+        assert_eq!(landing_surface(landing, &on_line), surface::Surface::Green);
+        assert_eq!(
+            landing_surface(landing, &mirrored),
+            surface::Surface::Fairway
+        );
     }
 }

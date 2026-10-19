@@ -12,7 +12,6 @@ gpu-tests = ["cf-render/gpu-tests"]
 [dependencies]
 cf-render.workspace = true
 cf-scene.workspace = true
-cf-math.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 image.workspace = true

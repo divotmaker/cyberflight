@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 /// A target zone on the driving range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Target {
-    /// Target center position in world space (Y=0 ground plane).
+    /// Target center in the scene frame (+X right, +Y up, +Z downrange),
+    /// on the Y=0 ground plane.
     pub center: [f32; 3],
     /// Number of scoring rings (including bullseye).
     pub num_rings: u32,
@@ -19,7 +20,7 @@ impl Target {
     #[must_use]
     pub fn at_distance(distance_m: f32, label: &str) -> Self {
         Self {
-            center: [distance_m, 0.0, 0.0],
+            center: [0.0, 0.0, distance_m],
             num_rings: 5,
             ring_spacing_m: 5.0,
             label: label.to_owned(),
@@ -128,6 +129,6 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let t2: Target = serde_json::from_str(&json).unwrap();
         assert_eq!(t.label, t2.label);
-        assert!((t.center[0] - t2.center[0]).abs() < 1e-6);
+        assert!((t.center[2] - t2.center[2]).abs() < 1e-6);
     }
 }

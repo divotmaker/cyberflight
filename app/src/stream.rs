@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use cf_math::aero::BallModel;
-use cf_math::environment::Environment;
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::stream::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_scene::range::Range;
+use dimple::aero::BallModel;
+use dimple::environment::Environment;
 
 use crate::flight::{AnimatedFlight, FlightManager, FrpState};
 

@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-cf-math.workspace = true
+dimple.workspace = true
 cf-scene.workspace = true
 cf-render.workspace = true
 flightrelay.workspace = true

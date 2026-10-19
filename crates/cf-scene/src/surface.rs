@@ -80,18 +80,20 @@ impl SurfaceParams {
     /// energy goes into both translational and rotational deceleration.
     #[must_use]
     pub fn rolling_decel(&self) -> f64 {
-        (5.0 / 7.0) * self.mu_roll * cf_math::units::G
+        (5.0 / 7.0) * self.mu_roll * dimple::units::G
     }
 
     /// Sliding deceleration magnitude (m/s²).
     #[must_use]
     pub fn sliding_decel(&self) -> f64 {
-        (5.0 / 7.0) * self.mu_slide * cf_math::units::G
+        (5.0 / 7.0) * self.mu_slide * dimple::units::G
     }
 }
 
-/// Query the surface type at a world-space point on the range.
+/// Query the surface type at a ground point on the range.
 ///
+/// `x` and `z` are scene-frame coordinates (+X right, +Z downrange), the
+/// same frame as [`Target::center`](crate::target::Target::center).
 /// Returns `Green` if the point is inside any target's outer radius,
 /// `Fairway` otherwise. Targets are circles on the Y=0 plane.
 #[must_use]
@@ -108,7 +110,7 @@ pub fn surface_at(x: f64, z: f64, targets: &[crate::target::Target]) -> Surface 
     Surface::Fairway
 }
 
-/// Query surface params at a world-space point.
+/// Query surface params at a scene-frame ground point (see [`surface_at`]).
 #[must_use]
 pub fn surface_params_at(x: f64, z: f64, targets: &[crate::target::Target]) -> SurfaceParams {
     SurfaceParams::for_surface(surface_at(x, z, targets))
@@ -175,6 +177,7 @@ mod tests {
         let targets = crate::target::default_targets();
         // First target is at 45.72m downrange (50 yards)
         let t = &targets[0];
+        assert!((t.center[2] - 45.72).abs() < 1e-4);
         assert_eq!(
             surface_at(f64::from(t.center[0]), f64::from(t.center[2]), &targets),
             Surface::Green
@@ -184,15 +187,29 @@ mod tests {
     #[test]
     fn surface_at_target_edge_is_green() {
         let targets = vec![Target::at_distance(100.0, "100")];
-        // Just inside outer radius (5 rings × 5m = 25m)
-        assert_eq!(surface_at(100.0, 24.9, &targets), Surface::Green);
+        // Just inside outer radius (5 rings × 5m = 25m), off to the right
+        assert_eq!(surface_at(24.9, 100.0, &targets), Surface::Green);
     }
 
     #[test]
     fn surface_outside_target_is_fairway() {
         let targets = vec![Target::at_distance(100.0, "100")];
         // Just outside outer radius
-        assert_eq!(surface_at(100.0, 25.1, &targets), Surface::Fairway);
+        assert_eq!(surface_at(25.1, 100.0, &targets), Surface::Fairway);
+    }
+
+    #[test]
+    fn surface_at_off_centre_target_is_lateral_sensitive() {
+        // 10m right of the target line, 100m downrange, 5m radius.
+        let targets = vec![Target {
+            center: [10.0, 0.0, 100.0],
+            num_rings: 1,
+            ring_spacing_m: 5.0,
+            label: "R".to_owned(),
+        }];
+        assert_eq!(surface_at(10.0, 100.0, &targets), Surface::Green);
+        assert_eq!(surface_at(-10.0, 100.0, &targets), Surface::Fairway);
+        assert_eq!(surface_at(100.0, 10.0, &targets), Surface::Fairway);
     }
 
     #[test]

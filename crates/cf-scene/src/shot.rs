@@ -1,9 +1,9 @@
-//! Shot data model — bridges flightrelay (FRP) schemas to cyberflight's physics engine.
+//! Shot data model — bridges flightrelay (FRP) schemas to the dimple physics engine.
 //!
-//! Converts `flightrelay::CompletedShot` into `cf_math::ShotInput` for flight simulation,
+//! Converts `flightrelay::CompletedShot` into `dimple::trajectory::ShotInput` for flight simulation,
 //! and extracts club/ball data for HUD display.
 
-use cf_math::trajectory::ShotInput;
+use dimple::trajectory::ShotInput;
 
 /// Club delivery data extracted from an FRP shot.
 ///

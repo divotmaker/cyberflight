@@ -12,14 +12,14 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use cf_math::aero::BallModel;
-use cf_math::environment::Environment;
 use cf_render::context::{GpuConfig, GpuContext};
 use cf_render::render::{FlightRenderData, Renderer};
 use cf_render::window::Swapchain;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::range::Range;
 use cf_scene::shot::ReceivedShot;
+use dimple::aero::BallModel;
+use dimple::environment::Environment;
 
 use flightrelay::{FrpConnection, FrpEndpoint, FrpEvent, FrpMessage, ShotAggregator};
 

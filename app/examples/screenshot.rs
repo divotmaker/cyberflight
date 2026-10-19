@@ -19,15 +19,15 @@ use anyhow::{Context, Result};
 use glam::Vec3;
 use image::{ImageBuffer, Rgba};
 
-use cf_math::aero::BallModel;
-use cf_math::environment::Environment;
-use cf_math::trajectory::{ShotInput, simulate_flight};
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::FrameBuffers;
 use cf_scene::camera::Camera;
 use cf_scene::grid::GridConfig;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, TrailPoint};
+use dimple::aero::BallModel;
+use dimple::environment::Environment;
+use dimple::trajectory::{ShotInput, simulate_flight};
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -50,10 +50,10 @@ fn save_png(frame: &FrameBuffers, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Map trajectory coordinates (x=forward, y=up, z=left) to
+/// Map trajectory coordinates (x=forward, y=up, z=right) to
 /// scene coordinates (+Z=downrange, +Y=up, +X=right).
 fn traj_to_scene(p: glam::DVec3) -> Vec3 {
-    Vec3::new(-p.z as f32, p.y as f32, p.x as f32)
+    Vec3::new(p.z as f32, p.y as f32, p.x as f32)
 }
 
 fn render_driving_range(grid: &GridConfig, camera: &Camera) -> Result<()> {
@@ -95,7 +95,7 @@ fn simulate_hero_shot() -> FlightSnapshot {
     // Sample at 55% of flight — past apex, descending toward target
     let t_current = result.flight_time * 0.55;
 
-    let ball_pos = cf_math::trajectory::interpolate_trajectory(&result.points, t_current)
+    let ball_pos = dimple::trajectory::interpolate_trajectory(&result.points, t_current)
         .map(traj_to_scene)
         .unwrap_or(Vec3::ZERO);
 
@@ -153,7 +153,7 @@ fn simulate_seven_iron() -> FlightSnapshot {
     // Sample at 40% of flight time (ascending, approaching apex)
     let t_current = result.flight_time * 0.40;
 
-    let ball_pos = cf_math::trajectory::interpolate_trajectory(&result.points, t_current)
+    let ball_pos = dimple::trajectory::interpolate_trajectory(&result.points, t_current)
         .map(|p| traj_to_scene(p))
         .unwrap_or(Vec3::ZERO);
 
