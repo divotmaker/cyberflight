@@ -139,10 +139,10 @@ pub fn generate_grid_vertices(config: &GridConfig) -> Vec<GridVertex> {
 ///         -lat          -th    +th          +lat
 ///           |            |      |            |
 ///    dr   ──┼────────────┼──────┼────────────┤
-///           │  left wing │center│ right wing │
+///           │  -X wing   │center│  +X wing   │
 ///           │            │above │            │
 ///    th   ──┼────────────┼──────┼────────────┤
-///           │ left wing  │ TEE  │ right wing │
+///           │  -X wing   │ TEE  │  +X wing   │
 ///     0   ──┼────────────┼──BOX─┼────────────┤
 ///           :            │      │            :
 ///   -th     :            └──────┘            :
@@ -171,7 +171,7 @@ pub fn generate_floor_quad(config: &GridConfig, tee_half_size: f32) -> Vec<GridV
         v(-th, th),
     ]);
 
-    // 2. Left wing: X ∈ [-lat, -th], Z ∈ [0, dr]
+    // 2. -X wing: X ∈ [-lat, -th], Z ∈ [0, dr]
     verts.extend_from_slice(&[
         v(-lat, 0.0),
         v(-th, 0.0),
@@ -191,7 +191,7 @@ pub fn generate_floor_quad(config: &GridConfig, tee_half_size: f32) -> Vec<GridV
         v(-th, dr),
     ]);
 
-    // 4. Right wing: X ∈ [+th, +lat], Z ∈ [0, dr]
+    // 4. +X wing: X ∈ [+th, +lat], Z ∈ [0, dr]
     verts.extend_from_slice(&[
         v(th, 0.0),
         v(lat, 0.0),

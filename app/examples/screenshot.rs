@@ -22,6 +22,7 @@ use image::{ImageBuffer, Rgba};
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::FrameBuffers;
 use cf_scene::camera::Camera;
+use cf_scene::frame::physics_to_scene;
 use cf_scene::grid::GridConfig;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, TrailPoint};
@@ -50,10 +51,9 @@ fn save_png(frame: &FrameBuffers, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Map trajectory coordinates (x=forward, y=up, z=right) to
-/// scene coordinates (+Z=downrange, +Y=up, +X=right).
+/// A dimple-frame trajectory point as a scene-frame render position.
 fn traj_to_scene(p: glam::DVec3) -> Vec3 {
-    Vec3::new(p.z as f32, p.y as f32, p.x as f32)
+    physics_to_scene(p).as_vec3()
 }
 
 fn render_driving_range(grid: &GridConfig, camera: &Camera) -> Result<()> {
@@ -114,7 +114,7 @@ fn simulate_hero_shot() -> FlightSnapshot {
         .collect();
     if trail_points
         .last()
-        .map_or(true, |last| (last.position - ball_pos).length() > 0.01)
+        .is_none_or(|last| (last.position - ball_pos).length() > 0.01)
     {
         trail_points.push(TrailPoint {
             position: ball_pos,
@@ -154,7 +154,7 @@ fn simulate_seven_iron() -> FlightSnapshot {
     let t_current = result.flight_time * 0.40;
 
     let ball_pos = dimple::trajectory::interpolate_trajectory(&result.points, t_current)
-        .map(|p| traj_to_scene(p))
+        .map(traj_to_scene)
         .unwrap_or(Vec3::ZERO);
 
     // Tracer tail: last 120% of elapsed flight time (long tail visible at distance).
@@ -175,7 +175,7 @@ fn simulate_seven_iron() -> FlightSnapshot {
     // Ensure the trail ends exactly at the ball (connects to ball glow).
     if trail_points
         .last()
-        .map_or(true, |last| (last.position - ball_pos).length() > 0.01)
+        .is_none_or(|last| (last.position - ball_pos).length() > 0.01)
     {
         trail_points.push(TrailPoint {
             position: ball_pos,

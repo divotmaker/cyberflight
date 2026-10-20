@@ -309,15 +309,10 @@ mod tests {
     fn glyph_coords_in_bounds() {
         for ch in ('0'..='9').chain('A'..='Z') {
             for &[x1, y1, x2, y2] in glyph_segments(ch) {
+                let x_ok = |x: f32| (-0.5..=5.0).contains(&x);
+                let y_ok = |y: f32| (-0.5..=7.0).contains(&y);
                 assert!(
-                    x1 >= -0.5
-                        && x1 <= 5.0
-                        && y1 >= -0.5
-                        && y1 <= 7.0
-                        && x2 >= -0.5
-                        && x2 <= 5.0
-                        && y2 >= -0.5
-                        && y2 <= 7.0,
+                    x_ok(x1) && y_ok(y1) && x_ok(x2) && y_ok(y2),
                     "glyph '{ch}' has out-of-bounds segment: [{x1},{y1},{x2},{y2}]"
                 );
             }

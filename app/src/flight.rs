@@ -6,15 +6,14 @@ use glam::{DVec3, Vec3};
 
 use cf_render::render::FlightRenderData;
 use cf_scene::camera::Camera;
+use cf_scene::frame::physics_to_scene;
+use cf_scene::ground;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
-use cf_scene::surface;
 use cf_scene::trail::TrailPoint;
 use dimple::aero::BallModel;
-use dimple::bounce::BounceSurface;
 use dimple::environment::Environment;
-use dimple::rollout::RolloutSurface;
-use dimple::trajectory::{ShotInput, ShotResult, simulate_shot};
+use dimple::trajectory::{ShotInput, ShotResult};
 
 use flightrelay::{
     EndpointConfig, FrpConnection, FrpEndpoint, FrpEvent, FrpMessage, Role, ShotAggregator,
@@ -31,31 +30,20 @@ pub const CHASE_CAM_SMOOTHING_TAU: f64 = 0.3;
 pub const DEFAULT_TRAIL_SUBSAMPLE: usize = 1;
 /// Trail tail as a fraction of elapsed flight time.
 pub const TRAIL_TAIL_FRACTION: f64 = 1.2;
-/// Gravity for parabolic bounce arcs.
-pub const G: f64 = dimple::units::G;
 /// Default smash factor for estimating club speed.
 pub const DEFAULT_SMASH_FACTOR: f64 = 1.40;
 
-/// A point in the unified shot timeline (flight + bounce arcs + rollout).
+/// A point in the unified shot timeline (flight, then hops, slide and roll),
+/// in dimple's frame.
 #[derive(Debug, Clone, Copy)]
 pub struct TimelinePoint {
     pub time: f64,
     pub pos: DVec3,
 }
 
-/// Map trajectory coordinates (x=forward, y=up, z=right) to
-/// scene coordinates (+Z=downrange, +Y=up, +X=right).
-pub fn traj_to_scene(p: DVec3) -> Vec3 {
-    Vec3::new(p.z as f32, p.y as f32, p.x as f32)
-}
-
-/// Surface under a trajectory-frame ground point.
-///
-/// Targets live in the scene frame, so the point is mapped through the same
-/// axes as [`traj_to_scene`]: scene x = trajectory z (right), scene z =
-/// trajectory x (downrange).
-pub fn landing_surface(p: DVec3, targets: &[cf_scene::target::Target]) -> surface::Surface {
-    surface::surface_at(p.z, p.x, targets)
+/// A dimple-frame vector as a scene-frame render position.
+fn to_scene(p: DVec3) -> Vec3 {
+    physics_to_scene(p).as_vec3()
 }
 
 /// Interpolate position in the unified timeline.
@@ -77,54 +65,22 @@ pub fn interpolate_timeline(points: &[TimelinePoint], t: f64) -> Option<DVec3> {
     Some(a.pos.lerp(b.pos, frac))
 }
 
-/// Build a unified timeline from a ShotResult.
+/// Build the unified timeline from a ShotResult: the flight points, then the
+/// ground points (hops, slide, roll). Both carry absolute shot times; a
+/// ground point at or before the previous point's time (the landing, shared
+/// by both) is skipped so times strictly increase.
 pub fn build_timeline(result: &ShotResult) -> Vec<TimelinePoint> {
-    let mut timeline =
-        Vec::with_capacity(result.flight.points.len() + result.rollout.points.len() + 200);
-
-    for p in &result.flight.points {
-        timeline.push(TimelinePoint {
-            time: p.time,
-            pos: p.pos,
-        });
-    }
-
-    let mut t_offset = result.flight.flight_time;
-
-    for (i, bounce) in result.bounces.iter().enumerate() {
-        let is_last = i + 1 == result.bounces.len();
-        if is_last {
-            break;
+    let mut timeline = Vec::with_capacity(result.flight.points.len() + result.ground.points.len());
+    let flight = result.flight.points.iter().map(|p| (p.time, p.pos));
+    let ground = result.ground.points.iter().map(|p| (p.time, p.pos));
+    for (time, pos) in flight.chain(ground) {
+        if timeline
+            .last()
+            .is_none_or(|last: &TimelinePoint| time > last.time)
+        {
+            timeline.push(TimelinePoint { time, pos });
         }
-        let vel = bounce.vel_out;
-        if vel.y <= 0.0 {
-            continue;
-        }
-        let t_arc = 2.0 * vel.y / G;
-        let num_samples = ((t_arc / 0.01) as usize).clamp(2, 200);
-
-        for s in 1..=num_samples {
-            let dt = t_arc * s as f64 / num_samples as f64;
-            let pos = DVec3::new(
-                bounce.pos.x + vel.x * dt,
-                (bounce.pos.y + vel.y * dt - 0.5 * G * dt * dt).max(0.0),
-                bounce.pos.z + vel.z * dt,
-            );
-            timeline.push(TimelinePoint {
-                time: t_offset + dt,
-                pos,
-            });
-        }
-        t_offset += t_arc;
     }
-
-    for rp in &result.rollout.points {
-        timeline.push(TimelinePoint {
-            time: t_offset + rp.time,
-            pos: rp.pos,
-        });
-    }
-
     timeline
 }
 
@@ -150,16 +106,7 @@ impl AnimatedFlight {
         targets: &[cf_scene::target::Target],
     ) -> Self {
         let input = &shot.input;
-
-        let flight = dimple::trajectory::simulate_flight(input, ball, env);
-        let landing = flight.points.last().map_or(DVec3::ZERO, |p| p.pos);
-
-        let (bounce_surface, rollout_surface) = match landing_surface(landing, targets) {
-            surface::Surface::Green => (BounceSurface::GREEN, RolloutSurface::GREEN),
-            surface::Surface::Fairway => (BounceSurface::FAIRWAY, RolloutSurface::FAIRWAY),
-        };
-
-        let result = simulate_shot(input, ball, env, &bounce_surface, &rollout_surface);
+        let result = ground::simulate_shot(input, ball, env, targets);
         let timeline = build_timeline(&result);
         let total_time = timeline.last().map_or(0.0, |p| p.time);
 
@@ -191,9 +138,15 @@ impl AnimatedFlight {
         let shot_t = (now - self.launch_time).max(0.0);
         let t_clamped = shot_t.min(self.total_time);
 
-        let pos = interpolate_timeline(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO);
+        // Live position while the ball moves; dimple's rest position once it
+        // has stopped.
+        let pos = if shot_t >= self.total_time {
+            self.result.final_pos
+        } else {
+            interpolate_timeline(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO)
+        };
 
-        let total_m = (pos.x * pos.x + pos.z * pos.z).sqrt();
+        let total_m = pos.x.hypot(pos.z);
         let downrange_m = pos.x;
 
         let carry_yards = if shot_t < self.result.flight.flight_time {
@@ -243,7 +196,7 @@ impl AnimatedFlight {
 
         let t_clamped = shot_t.min(self.total_time);
 
-        let ball_pos = interpolate_timeline(&self.timeline, t_clamped).map(traj_to_scene)?;
+        let ball_pos = interpolate_timeline(&self.timeline, t_clamped).map(to_scene)?;
 
         let tail_duration = t_clamped * TRAIL_TAIL_FRACTION;
         let tail_start = (t_clamped - tail_duration).max(0.0);
@@ -254,7 +207,7 @@ impl AnimatedFlight {
             .enumerate()
             .filter(|(i, _)| i % trail_subsample == 0)
             .map(|(_, p)| TrailPoint {
-                position: traj_to_scene(p.pos),
+                position: to_scene(p.pos),
                 time: p.time,
             })
             .collect();
@@ -282,7 +235,7 @@ impl AnimatedFlight {
             return None;
         }
 
-        let final_pos = traj_to_scene(self.result.final_pos);
+        let final_pos = to_scene(self.result.final_pos);
 
         let shot_dir = if final_pos.length_squared() > 0.01 {
             final_pos.normalize()
@@ -291,7 +244,7 @@ impl AnimatedFlight {
         };
 
         let ideal = if shot_t < self.total_time {
-            let ball_pos = interpolate_timeline(&self.timeline, shot_t).map(traj_to_scene)?;
+            let ball_pos = interpolate_timeline(&self.timeline, shot_t).map(to_scene)?;
 
             let idx = self.timeline.partition_point(|p| p.time <= shot_t);
             let vel_idx = if idx > 0 { idx - 1 } else { 0 };
@@ -303,9 +256,7 @@ impl AnimatedFlight {
             } else {
                 DVec3::new(1.0, 0.0, 0.0)
             };
-            // Same axis map as `traj_to_scene` (trajectory z = right = scene x),
-            // so the chase direction matches the ball's actual lateral motion.
-            let velocity = Vec3::new(vel.z as f32, vel.y as f32, vel.x as f32);
+            let velocity = to_scene(vel);
 
             let horiz_speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
             let direction = if horiz_speed > 2.0 {
@@ -324,7 +275,7 @@ impl AnimatedFlight {
 
         // During carry, snap to the ball's direction of travel so hooks/slices
         // stay visible. Smoothing only kicks in after landing to avoid jarring
-        // camera motion from bounces and slow rollout direction changes.
+        // camera motion from hops and slow roll direction changes.
         let in_carry = shot_t < self.result.flight.flight_time;
         let smoothed = if in_carry {
             ideal
@@ -561,65 +512,105 @@ impl FlightManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cf_scene::target::Target;
+    use cf_scene::shot::ClubDelivery;
+    use cf_scene::target::{Target, default_targets};
 
-    /// 10m right of the target line, 150m downrange, 15m radius.
-    fn right_target() -> Vec<Target> {
-        vec![Target {
-            center: [10.0, 0.0, 150.0],
-            num_rings: 3,
-            ring_spacing_m: 5.0,
-            label: "R".to_owned(),
-        }]
-    }
-
-    #[test]
-    fn traj_to_scene_maps_right_to_scene_x() {
-        let p = traj_to_scene(DVec3::new(100.0, 5.0, 10.0));
-        assert_eq!(p, Vec3::new(10.0, 5.0, 100.0));
-    }
-
-    #[test]
-    fn landing_surface_uses_scene_frame_targets() {
-        let targets = right_target();
-        assert_eq!(
-            landing_surface(DVec3::new(150.0, 0.0, 10.0), &targets),
-            surface::Surface::Green
-        );
-        assert_eq!(
-            landing_surface(DVec3::new(150.0, 0.0, -10.0), &targets),
-            surface::Surface::Fairway
-        );
-    }
-
-    #[test]
-    fn pushed_shot_lands_on_target_right_of_line() {
-        let input = ShotInput {
-            launch_azimuth_deg: 4.0,
-            ..ShotInput::seven_iron()
+    fn animate(input: ShotInput, targets: &[Target]) -> AnimatedFlight {
+        let shot = ReceivedShot {
+            device: "test.0".to_owned(),
+            shot_number: 1,
+            input,
+            club: ClubDelivery::default(),
+            lm_carry_yards: None,
         };
-        let flight =
-            dimple::trajectory::simulate_flight(&input, &BallModel::TOUR, &Environment::SEA_LEVEL);
-        let landing = flight.points.last().expect("flight has points").pos;
+        AnimatedFlight::from_received(
+            &shot,
+            0.0,
+            &BallModel::TOUR,
+            &Environment::SEA_LEVEL,
+            targets,
+        )
+    }
+
+    #[test]
+    fn timeline_is_flight_then_ground() {
+        let f = animate(ShotInput::driver(), &default_targets());
+        let r = &f.result;
         assert!(
-            landing.z > 5.0,
-            "pushed shot should land right: z={:.2}",
-            landing.z
+            f.timeline.windows(2).all(|w| w[1].time > w[0].time),
+            "times strictly increase"
         );
-        assert!(traj_to_scene(landing).x > 5.0);
+        assert_eq!(f.timeline[0].pos, DVec3::ZERO);
+        let landing = r.flight.points.last().expect("flight has points");
+        let i = f
+            .timeline
+            .iter()
+            .position(|p| p.time == landing.time)
+            .expect("landing in timeline");
+        assert_eq!(f.timeline[i].pos, landing.pos);
+        assert!(f.timeline[i + 1..].iter().all(|p| p.pos.y >= -1e-9));
+        assert!(f.timeline.len() > r.flight.points.len());
+        let last = f.timeline.last().expect("timeline has points");
+        assert_eq!(last.pos, r.final_pos);
+        assert_eq!(f.total_time, last.time);
+        assert!(f.total_time > r.flight.flight_time + 1.0, "ball runs out");
+    }
 
-        let target_at = |lateral: f64| Target {
-            center: [lateral as f32, 0.0, landing.x as f32],
-            num_rings: 1,
-            ring_spacing_m: 3.0,
-            label: "T".to_owned(),
+    #[test]
+    fn motionless_shot_is_a_single_point() {
+        let input = ShotInput {
+            ball_speed_mph: 0.0,
+            backspin_rpm: 0.0,
+            sidespin_rpm: 0.0,
+            ..ShotInput::driver()
         };
-        let on_line = [target_at(landing.z)];
-        let mirrored = [target_at(-landing.z)];
-        assert_eq!(landing_surface(landing, &on_line), surface::Surface::Green);
-        assert_eq!(
-            landing_surface(landing, &mirrored),
-            surface::Surface::Fairway
-        );
+        let f = animate(input, &[]);
+        assert_eq!(f.timeline.len(), 1);
+        assert_eq!(f.total_time, 0.0);
+        assert!(!f.is_animating(1.0));
+    }
+
+    #[test]
+    fn interpolates_through_the_ground_phase() {
+        let f = animate(ShotInput::seven_iron(), &[]);
+        let t = f.result.flight.flight_time + 0.5;
+        let pos = interpolate_timeline(&f.timeline, t).expect("inside timeline");
+        assert!(pos.x > f.result.flight.carry_m * 0.99);
+        assert!(pos.x < f.result.final_pos.x + 1e-9);
+    }
+
+    #[test]
+    fn telemetry_at_rest_reports_dimple_results() {
+        let input = ShotInput {
+            launch_azimuth_deg: 1.0,
+            sidespin_rpm: 600.0,
+            ..ShotInput::driver()
+        };
+        let f = animate(input, &default_targets());
+        let t = f.telemetry(f.total_time + 1.0);
+        let r = &f.result;
+        assert!((t.carry_yards - r.flight.carry_yards).abs() < 1e-9);
+        assert!((t.total_yards - r.total_yards).abs() < 1e-9);
+        assert!((t.lateral_m - r.final_pos.z).abs() < 1e-9);
+        assert!(t.lateral_m > 0.0, "slice finishes right");
+        assert!(!t.in_flight);
+    }
+
+    #[test]
+    fn slice_is_drawn_right_of_the_line() {
+        let input = ShotInput {
+            launch_azimuth_deg: 1.0,
+            sidespin_rpm: 600.0,
+            ..ShotInput::driver()
+        };
+        let f = animate(input, &default_targets());
+        let data = f.render_data(f.total_time, 1).expect("launched");
+        // Scene +X is the golfer's left (see `cf_scene::frame`).
+        assert!(data.ball_pos.x < -10.0, "ball at {:?}", data.ball_pos);
+        let camera = Camera::driving_range();
+        let mut proj = camera.projection_matrix(16.0 / 9.0);
+        proj.y_axis.y *= -1.0;
+        let clip = proj * camera.view_matrix() * data.ball_pos.extend(1.0);
+        assert!(clip.x / clip.w > 0.0, "slice is on the right of the screen");
     }
 }

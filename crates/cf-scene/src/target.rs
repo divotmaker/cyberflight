@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 /// A target zone on the driving range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Target {
-    /// Target center in the scene frame (+X right, +Y up, +Z downrange),
-    /// on the Y=0 ground plane.
+    /// Target center in the scene frame (+X left of the target line, +Y up,
+    /// +Z downrange; see [`frame`](crate::frame)), on the Y=0 ground plane.
     pub center: [f32; 3],
     /// Number of scoring rings (including bullseye).
     pub num_rings: u32,

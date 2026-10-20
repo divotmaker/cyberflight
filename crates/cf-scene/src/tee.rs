@@ -93,7 +93,7 @@ pub fn generate_tee_border(tee: &TeeBox) -> Vec<GridVertex> {
         v(outer, -inner),
         v(-outer, -inner),
     );
-    // Left strip (-X edge, between inner Z extents)
+    // -X strip (between inner Z extents)
     quad(
         &mut verts,
         v(-outer, -inner),
@@ -101,7 +101,7 @@ pub fn generate_tee_border(tee: &TeeBox) -> Vec<GridVertex> {
         v(-inner, inner),
         v(-outer, inner),
     );
-    // Right strip (+X edge, between inner Z extents)
+    // +X strip (between inner Z extents)
     quad(
         &mut verts,
         v(inner, -inner),
@@ -295,7 +295,7 @@ mod tests {
                 v.position[1]
             );
         }
-        assert!(TEE_BORDER_ELEVATION > TEE_ELEVATION);
+        const { assert!(TEE_BORDER_ELEVATION > TEE_ELEVATION) };
     }
 
     #[test]
