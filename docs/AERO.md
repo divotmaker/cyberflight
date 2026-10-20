@@ -8,7 +8,9 @@ phase: impacts, hops, slide and roll) comes from the **dimple** crate:
 - API docs: [docs.rs/dimple](https://docs.rs/dimple)
 
 The aerodynamic and ground models, their coefficients, sources, validation
-and known limitations are documented in dimple's `docs/AERO.md`.
+and known limitations are documented in dimple's `docs/AERO.md`. dimple's
+ground model is beta: the run and total distances shown after landing are
+not yet validated against measured data and may change between releases.
 
 ## How cyberflight uses it
 
