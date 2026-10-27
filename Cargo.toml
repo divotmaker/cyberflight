@@ -26,9 +26,9 @@ image-compare = "0.4"
 winit = "0.30"
 ash-window = "0.13"
 raw-window-handle = "0.6"
-dimple = "0.0.4"
+dimple = "0.0.7"
 cf-scene = { path = "crates/cf-scene" }
 cf-render = { path = "crates/cf-render" }
 cf-test = { path = "crates/cf-test" }
-flightrelay = { version = "0.2.1", features = ["transport", "controller"] }
+flightrelay = { version = "0.3.1", features = ["transport", "controller"] }
 tiny_http = "0.12"

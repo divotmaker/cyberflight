@@ -34,9 +34,12 @@ impl ReceivedShot {
     /// Convert an FRP `CompletedShot` into a `ReceivedShot`.
     ///
     /// Returns `None` if the shot has no ball flight data (nothing to simulate).
+    /// Backspin and sidespin come from the FRP components, or from
+    /// `total_spin_rpm` + `spin_axis` when the device sends only that pair.
     #[must_use]
     pub fn from_frp(shot: &flightrelay::CompletedShot) -> Option<Self> {
-        let ball = shot.ball.as_ref()?;
+        let mut ball = shot.ball.clone()?;
+        ball.complete_spin();
 
         let input = ShotInput {
             ball_speed_mph: ball.launch_speed?.as_mph(),
@@ -86,13 +89,9 @@ mod tests {
                 launch_speed: Some(Velocity::MilesPerHour(167.0)),
                 launch_elevation: Some(10.5),
                 launch_azimuth: Some(-1.2),
-                carry_distance: None,
-                total_distance: None,
-                max_height: None,
-                flight_time: None,
-                roll_distance: None,
                 backspin_rpm: Some(2700),
                 sidespin_rpm: Some(-300),
+                ..BallFlight::default()
             }),
             club: Some(ClubData {
                 club_speed: Some(Velocity::MilesPerHour(112.0)),
@@ -101,11 +100,7 @@ mod tests {
                 face_angle: Some(0.8),
                 dynamic_loft: Some(14.2),
                 smash_factor: Some(1.49),
-                club_speed_post: None,
-                swing_plane_horizontal: None,
-                swing_plane_vertical: None,
-                club_offset: None,
-                club_height: None,
+                ..ClubData::default()
             }),
             impact: None,
         }
@@ -149,6 +144,20 @@ mod tests {
         let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!((shot.input.backspin_rpm - 2500.0).abs() < 0.01);
         assert!((shot.input.sidespin_rpm - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn uses_total_spin_and_axis_without_components() {
+        let mut data = sample_completed_shot();
+        let ball = data.ball.as_mut().unwrap();
+        ball.backspin_rpm = None;
+        ball.sidespin_rpm = None;
+        ball.total_spin_rpm = Some(3000);
+        ball.spin_axis = Some(-10.0);
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        // 3000 × cos(-10°) = 2954.4, 3000 × sin(-10°) = -520.9
+        assert!((shot.input.backspin_rpm - 2954.0).abs() < 0.01);
+        assert!((shot.input.sidespin_rpm - -521.0).abs() < 0.01);
     }
 
     #[test]

@@ -186,8 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn green_is_more_receptive_than_fairway() {
-        // Full shots check up on the softer green and run less.
+    fn fairway_runs_shorter_than_green() {
+        // Fairway and green bounce alike; the fairway's higher rolling
+        // resistance makes full shots finish shorter there.
         for input in [
             ShotInput::driver(),
             ShotInput::seven_iron(),
@@ -202,10 +203,10 @@ mod tests {
                 "the floor does not change the carry"
             );
             assert!(
-                green.total_m < fairway.total_m,
-                "green total {:.1} m, fairway {:.1} m",
-                green.total_m,
-                fairway.total_m
+                fairway.total_m < green.total_m,
+                "fairway total {:.1} m, green {:.1} m",
+                fairway.total_m,
+                green.total_m
             );
         }
     }
