@@ -164,7 +164,7 @@ fn create_buffer(
 }
 
 /// Device address of `buffer`, which was created with `SHADER_DEVICE_ADDRESS`.
-fn device_address(device: &ash::Device, buffer: vk::Buffer) -> vk::DeviceAddress {
+pub(crate) fn device_address(device: &ash::Device, buffer: vk::Buffer) -> vk::DeviceAddress {
     // SAFETY: Callers only pass buffers created with `SHADER_DEVICE_ADDRESS`
     // usage on a device with `bufferDeviceAddress` enabled.
     unsafe {

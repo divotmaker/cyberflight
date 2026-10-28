@@ -6,18 +6,18 @@ use glam::Vec3;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
-use cf_scene::grid::{GridConfig, GridVertex};
+use cf_scene::grid::GridConfig;
 use cf_scene::tee::TeeBox;
 
 use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::flight::tee_ball_centre;
-use crate::frame::FrameContent;
+use crate::frame::TracerBuffers;
 use crate::gpu::{Image2d, Image2dDesc};
 use crate::mirror::{Mirror, MirrorTracer};
 use crate::rt_offscreen::build_scene_geometry;
-use crate::rt_pipeline::{RtGeometry, RtPipeline, RtPushConstants};
+use crate::rt_pipeline::{RtPipeline, RtPushConstants};
 
 /// Format of the reflection image (`rgba16f` in `rt.rgen`).
 ///
@@ -27,40 +27,6 @@ use crate::rt_pipeline::{RtGeometry, RtPipeline, RtPushConstants};
 /// more precision than 8 bits for dark tones. Vulkan requires storage,
 /// sampled and blendable colour attachment support for this format.
 pub(crate) const REFLECTION_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
-
-/// The tracer the ray tracer's acceleration structures are built from: the
-/// newest flight's, as the raster pass draws it.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RtTracer {
-    /// The tracer tube's triangles.
-    trail: Vec<GridVertex>,
-    /// The tracer's centre line segments.
-    line: Vec<GridVertex>,
-}
-
-impl RtTracer {
-    #[cfg(test)]
-    pub(crate) fn new(trail: &[GridVertex], line: &[GridVertex]) -> Self {
-        Self {
-            trail: trail.to_vec(),
-            line: line.to_vec(),
-        }
-    }
-
-    /// The newest flight's tracer in `content`: no tracer without a flight.
-    pub(crate) fn from_content(content: &FrameContent) -> Self {
-        Self {
-            trail: content.flight_glows[..content.newest_tube].to_vec(),
-            line: content.flight_lines[..content.newest_line].to_vec(),
-        }
-    }
-
-    /// The acceleration-structure geometry: the floor of `grid`, the tee
-    /// box of `tee` and the tracer.
-    fn geometry(&self, grid: &GridConfig, tee: &TeeBox) -> Vec<RtGeometry> {
-        build_scene_geometry(grid, tee, &self.trail, &self.line)
-    }
-}
 
 /// One view of a frame: a camera and the rectangle of the frame (and of the
 /// reflection image) it fills.
@@ -123,8 +89,8 @@ pub(crate) struct ReflectionFrame<'a> {
 /// composite it onto the raster scene.
 ///
 /// Both paths shade the floor with the code of `floor_shading.glsl` and
-/// show the same tracer (the newest flight's, as the raster pass draws it)
-/// and ball, so they show the same reflection.
+/// show the same tracer (the newest flight's, drawn from the vertex buffers
+/// the raster pass draws from) and ball, so they show the same reflection.
 pub(crate) struct Reflections {
     /// The image both paths write and the composite reads: the floor's
     /// colour, with the reflections in it, per pixel.
@@ -133,11 +99,6 @@ pub(crate) struct Reflections {
     mirror: Mirror,
     /// `None` without ray tracing.
     rt: Option<RtPipeline>,
-    /// The tracer the acceleration structures were built from.
-    rt_tracer: RtTracer,
-    /// The acceleration structures may hold an older tracer than the
-    /// newest flight's: the mirror drew since they were built.
-    rt_stale: bool,
     /// Centre of the reflected ball.
     ball_centre: Vec3,
 }
@@ -166,8 +127,8 @@ fn create_target(
 impl Reflections {
     /// Create the reflections for an `extent` frame of the floor of `grid`
     /// and the tee box of `tee`, showing the ball on the tee, composited onto
-    /// a `color_format` target. The raster mirror is always there; with
-    /// `ray_tracing`, so is the ray tracer, unless it fails to set up (it
+    /// a `color_format` target. The raster mirror is always there; given the
+    /// `tracer` buffers, so is the ray tracer, unless it fails to set up (it
     /// says so on stderr and the mirror remains).
     ///
     /// # Errors
@@ -179,7 +140,7 @@ impl Reflections {
         extent: vk::Extent2D,
         grid: &GridConfig,
         tee: &TeeBox,
-        ray_tracing: bool,
+        tracer: Option<&TracerBuffers>,
     ) -> Result<Self, RenderError> {
         let target = create_target(&gpu.device, &mut gpu.allocator, extent)?;
         let composite = match CompositePass::new(&gpu.device, color_format, target.view()) {
@@ -209,25 +170,21 @@ impl Reflections {
                 return Err(e);
             }
         };
-        let rt_tracer = RtTracer::default();
-        let rt = if ray_tracing {
-            match RtPipeline::new(gpu, target.view(), &rt_tracer.geometry(grid, tee)) {
+        let rt = tracer.and_then(|tracer| {
+            let geometries = build_scene_geometry(grid, tee);
+            match RtPipeline::new(gpu, target.view(), &geometries, tracer) {
                 Ok(rt) => Some(rt),
                 Err(e) => {
                     eprintln!("RT setup failed, using mirror reflections: {e}");
                     None
                 }
             }
-        } else {
-            None
-        };
+        });
         Ok(Self {
             target,
             composite,
             mirror,
             rt,
-            rt_tracer,
-            rt_stale: false,
             ball_centre: tee_ball_centre(tee),
         })
     }
@@ -240,54 +197,6 @@ impl Reflections {
     /// Reflect the ball with centre `ball_centre`.
     pub(crate) fn set_ball(&mut self, ball_centre: Vec3) {
         self.ball_centre = ball_centre;
-    }
-
-    /// Note that the mirror, which draws from the frame's own buffers, drew
-    /// a tracer the ray tracer's acceleration structures may not have.
-    pub(crate) fn mirror_drew(&mut self) {
-        self.rt_stale = true;
-    }
-
-    /// Show `tracer` in the ray tracer. Rebuilds the acceleration structures
-    /// (with the floor of `grid` and the tee box of `tee`) only when the
-    /// tracer differs from the one they were built from; `update_scene`
-    /// waits for the device to go idle first.
-    ///
-    /// # Errors
-    /// The rebuild fails. The old structures are destroyed by then, so the
-    /// ray tracer must not record again; [`Self::drop_ray_tracing`] it.
-    pub(crate) fn set_tracer(
-        &mut self,
-        gpu: &mut GpuContext,
-        tracer: RtTracer,
-        grid: &GridConfig,
-        tee: &TeeBox,
-    ) -> Result<(), RenderError> {
-        let Some(rt) = &mut self.rt else {
-            return Ok(());
-        };
-        if self.rt_stale || tracer != self.rt_tracer {
-            rt.update_scene(gpu, &tracer.geometry(grid, tee))?;
-            self.rt_tracer = tracer;
-            self.rt_stale = false;
-        }
-        Ok(())
-    }
-
-    /// Destroy the ray tracer, leaving the mirror.
-    ///
-    /// # Safety
-    /// Nothing records with the ray tracer any more; `gpu` is the context the
-    /// reflections were created with.
-    pub(crate) unsafe fn drop_ray_tracing(&mut self, gpu: &mut GpuContext) {
-        if let Some(rt) = self.rt.take() {
-            // SAFETY: The caller guarantees nothing records with it; the wait
-            // covers a failure inside a build submission.
-            unsafe {
-                gpu.device.device_wait_idle().ok();
-                rt.destroy(&gpu.device, &mut gpu.allocator);
-            }
-        }
     }
 
     /// Recreate the reflection image at `extent` (if it differs) and point
@@ -327,7 +236,8 @@ impl Reflections {
     ///
     /// # Safety
     /// `cb` is recording, outside a render pass; the buffers of
-    /// `frame.tracer` are live and hold its vertices; the colour image
+    /// `frame.tracer` are live and hold its vertices (and, with ray tracing,
+    /// the line AABBs of its centre line); the colour image
     /// is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image extent equals
     /// `frame.extent` and every view lies within it. Afterwards the
     /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the colour
@@ -342,7 +252,9 @@ impl Reflections {
         // and the tracer's buffers.
         unsafe {
             match &self.rt {
-                Some(rt) if frame.ray_traced => self.record_trace(rt, device, cb, frame.views),
+                Some(rt) if frame.ray_traced => {
+                    self.record_trace(rt, device, cb, frame.views, frame.tracer);
+                }
                 _ => self.mirror.record(
                     device,
                     cb,
@@ -367,7 +279,8 @@ impl Reflections {
         )
     }
 
-    /// Trace each of `views` into the reflection image with `rt`.
+    /// Rebuild `rt`'s structures for `tracer`, then trace each of `views`
+    /// into the reflection image.
     ///
     /// # Safety
     /// As [`Self::record`].
@@ -377,6 +290,7 @@ impl Reflections {
         device: &ash::Device,
         cb: vk::CommandBuffer,
         views: &[TraceView],
+        tracer: &MirrorTracer,
     ) {
         let storage = self.target.image();
         let subresource_range = vk::ImageSubresourceRange::default()
@@ -386,8 +300,11 @@ impl Reflections {
             .base_array_layer(0)
             .layer_count(1);
 
-        // SAFETY: The caller guarantees the command buffer and image states.
+        // SAFETY: The caller guarantees the command buffer and image states
+        // and the tracer's buffers.
         unsafe {
+            rt.record_build(device, cb, tracer.tube, tracer.line);
+
             // Storage image: UNDEFINED → GENERAL. The transition is a write,
             // so it waits for what last used the image: the composite
             // sampling it (fragment shader) and, after mirrored frames, the
@@ -468,17 +385,10 @@ impl Reflections {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flight::{FlightRenderData, flight_trail_line, flight_trail_tube, flight_vertices};
+    use crate::flight::{FlightRenderData, flight_vertices};
+    use crate::frame::FrameContent;
     use cf_scene::tee::TEE_ELEVATION;
     use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, TrailPoint, generate_trail_tube};
-
-    fn tube(z: f32) -> Vec<GridVertex> {
-        let v = |z: f32| GridVertex {
-            position: [0.0, 1.0, z],
-            fade: 0.5,
-        };
-        vec![v(z), v(z + 1.0), v(z + 2.0)]
-    }
 
     fn flight(z: f32, current_time: f64) -> FlightRenderData {
         FlightRenderData {
@@ -501,29 +411,18 @@ mod tests {
     }
 
     #[test]
-    fn no_flight_is_no_tracer() {
-        let tracer = RtTracer::from_content(&content(&[]));
-        assert_eq!(tracer, RtTracer::default());
-        assert!(tracer.trail.is_empty());
-        assert!(tracer.line.is_empty());
-    }
-
-    #[test]
     fn the_newest_flights_tracer_is_the_raster_tracer() {
         let tee = TeeBox::default();
-        let older = flight(30.0, 3.9);
         let newest = flight(60.0, 3.5);
-        let tracer = RtTracer::from_content(&content(&[older, flight(60.0, 3.5)]));
-        assert!(!tracer.trail.is_empty());
-        assert_eq!(tracer.trail, flight_trail_tube(&newest, &tee));
-        assert_eq!(tracer.line, flight_trail_line(&newest));
+        let content = content(&[flight(30.0, 3.9), flight(60.0, 3.5)]);
         let raster = generate_trail_tube(
             &newest.trail_points,
             newest.current_time,
             DEFAULT_TRAIL_LIFETIME,
             tee.ball_radius,
         );
-        assert_eq!(tracer.trail, raster);
+        assert!(!raster.is_empty());
+        assert_eq!(content.flight_glows[..content.newest_tube], raster[..]);
     }
 
     #[test]
@@ -538,33 +437,6 @@ mod tests {
             content(&[flight(30.0, 3.9), flight(60.0, 3.5)]).ball_centre,
             newest.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0)
         );
-    }
-
-    #[test]
-    fn geometry_uses_the_given_grid() {
-        let tee = TeeBox::default();
-        let tracer = RtTracer::from_content(&content(&[flight(60.0, 3.5)]));
-        let grid = GridConfig {
-            downrange: 200.0,
-            ..GridConfig::default()
-        };
-        let built = tracer.geometry(&grid, &tee);
-        let expected = build_scene_geometry(&grid, &tee, &tracer.trail, &tracer.line);
-        let default_floor = &build_scene_geometry(&GridConfig::default(), &tee, &[], &[])[0];
-        assert_eq!(built.len(), expected.len());
-        for (b, e) in built.iter().zip(&expected) {
-            assert_eq!(b.positions, e.positions);
-            assert_eq!(b.geom_type, e.geom_type);
-        }
-        assert_ne!(built[0].positions, default_floor.positions);
-    }
-
-    #[test]
-    fn tracers_are_equal_only_for_the_same_vertices() {
-        let a = RtTracer::new(&tube(1.0), &tube(1.0)[..2]);
-        assert_eq!(a, RtTracer::new(&tube(1.0), &tube(1.0)[..2]));
-        assert_ne!(a, RtTracer::new(&tube(2.0), &tube(1.0)[..2]));
-        assert_ne!(a, RtTracer::new(&tube(1.0), &tube(2.0)[..2]));
     }
 
     #[test]

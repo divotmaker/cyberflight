@@ -416,7 +416,7 @@ impl Renderer {
         // SAFETY: Waiting for the device to go idle, so no frame in flight
         // reads what the switch rewrites.
         unsafe { self.gpu.device.device_wait_idle().ok() };
-        self.recorder.set_mode(&mut self.gpu, mode);
+        self.recorder.set_mode(mode);
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
@@ -437,11 +437,9 @@ impl Renderer {
     ///
     /// Builds ball + ball glow + tracer tube vertices for each active flight; the
     /// next `draw_frame` uploads them. Reflections show the newest flight's
-    /// ball and its tracer, or the ball on the tee; in `RayTraced` mode the RT
-    /// scene is rebuilt only when the tracer changed. If that rebuild fails,
-    /// the renderer says so on stderr and mirrors the reflections from then on.
+    /// ball and its tracer, or the ball on the tee.
     pub fn update_flight(&mut self, flights: &[FlightRenderData]) {
-        self.recorder.update_flight(&mut self.gpu, flights);
+        self.recorder.update_flight(flights);
     }
 
     /// Update HUD overlay geometry (pixel coordinates) for the next frame.

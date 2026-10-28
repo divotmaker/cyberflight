@@ -15,7 +15,7 @@ use crate::flight::{FlightRenderData, flight_vertices};
 use crate::frame::{FrameContent, FrameResources};
 use crate::mode::{RenderMode, RtMode};
 use crate::pipeline::ScenePipelines;
-use crate::reflections::{ReflectionFrame, Reflections, RtTracer, TraceView};
+use crate::reflections::{ReflectionFrame, Reflections, TraceView};
 use crate::scene::SceneGeometry;
 
 /// Fraction of the frame width the chase-camera inset takes (right side).
@@ -123,7 +123,7 @@ impl SceneRecorder {
                     return Err(e);
                 }
             };
-        let frame = match FrameResources::new(&gpu.device, &mut gpu.allocator) {
+        let frame = match FrameResources::new(&gpu.device, &mut gpu.allocator, gpu.rt_supported) {
             Ok(frame) => frame,
             Err(e) => {
                 // SAFETY: Just created; no GPU work has used them.
@@ -134,9 +134,15 @@ impl SceneRecorder {
                 return Err(e);
             }
         };
-        let ray_tracing = rt == RtMode::Auto && gpu.rt_supported;
-        let reflections = match Reflections::new(gpu, color_format, extent, grid, &tee, ray_tracing)
-        {
+        let tracer_buffers = frame.tracer_buffers().filter(|_| rt == RtMode::Auto);
+        let reflections = match Reflections::new(
+            gpu,
+            color_format,
+            extent,
+            grid,
+            &tee,
+            tracer_buffers.as_ref(),
+        ) {
             Ok(reflections) => Some(reflections),
             Err(e) => {
                 eprintln!("Reflections setup failed, rendering without them: {e}");
@@ -192,18 +198,14 @@ impl SceneRecorder {
     }
 
     /// Switch the reflections between ray-traced and mirrored; `RayTraced`
-    /// without a ray tracer gives `Rasterized`. The path switched to shows
-    /// the current scene from the next frame on.
-    ///
-    /// If the ray tracer fails to rebuild its scene, it says so on stderr,
-    /// is destroyed and the mode is `Rasterized` from then on.
-    pub(crate) fn set_mode(&mut self, gpu: &mut GpuContext, mode: RenderMode) {
+    /// without a ray tracer gives `Rasterized`. The next frame shows the
+    /// current scene with the path switched to.
+    pub(crate) fn set_mode(&mut self, mode: RenderMode) {
         self.mode = if mode == RenderMode::RayTraced && !self.has_ray_tracing() {
             RenderMode::Rasterized
         } else {
             mode
         };
-        self.show_scene(gpu);
     }
 
     pub(crate) fn mode(&self) -> RenderMode {
@@ -213,45 +215,10 @@ impl SceneRecorder {
     /// Build the next frame's flight geometry from `flights` and point the
     /// reflections at the newest flight: its ball, and its tracer as drawn
     /// in the raster pass.
-    ///
-    /// If the ray tracer fails to rebuild, it says so on stderr, is
-    /// destroyed and the reflections are mirrored from then on.
-    pub(crate) fn update_flight(&mut self, gpu: &mut GpuContext, flights: &[FlightRenderData]) {
+    pub(crate) fn update_flight(&mut self, flights: &[FlightRenderData]) {
         flight_vertices(flights, &self.tee, &mut self.content);
-        self.show_scene(gpu);
-    }
-
-    /// Point the reflections at the newest flight in `content`. The mirror
-    /// draws it from the frame's buffers; only the ray tracer, when it draws,
-    /// needs its acceleration structures rebuilt.
-    fn show_scene(&mut self, gpu: &mut GpuContext) {
-        let ray_traced = self.mode == RenderMode::RayTraced;
-        let Some(reflections) = &mut self.reflections else {
-            return;
-        };
-        reflections.set_ball(self.content.ball_centre);
-        let failed = if ray_traced {
-            let tracer = RtTracer::from_content(&self.content);
-            reflections
-                .set_tracer(gpu, tracer, &self.grid, &self.tee)
-                .err()
-        } else {
-            reflections.mirror_drew();
-            None
-        };
-        if let Some(e) = failed {
-            self.lose_ray_tracing(gpu, &e);
-        }
-    }
-
-    /// The ray tracer failed with `error`: say so, destroy it and mirror the
-    /// reflections from now on.
-    fn lose_ray_tracing(&mut self, gpu: &mut GpuContext, error: &RenderError) {
-        eprintln!("RT scene update failed, using mirror reflections: {error}");
-        self.mode = RenderMode::Rasterized;
         if let Some(reflections) = &mut self.reflections {
-            // SAFETY: Nothing records with the ray tracer any more.
-            unsafe { reflections.drop_ray_tracing(gpu) };
+            reflections.set_ball(self.content.ball_centre);
         }
     }
 
@@ -297,8 +264,9 @@ impl SceneRecorder {
     /// in the output layout.
     ///
     /// The upload is a host write into the per-frame buffers, which every
-    /// frame shares; a frame the GPU has not finished may draw a mix of old
-    /// and new vertices ([`FrameResources::upload`]).
+    /// frame shares; a frame the GPU has not finished may draw, mirror or
+    /// build the ray tracer's structures from a mix of old and new vertices
+    /// ([`FrameResources::upload`]).
     ///
     /// # Safety
     /// `cb` is recording, outside a render pass. `target`'s framebuffers were

@@ -127,7 +127,7 @@ impl OffscreenRenderer {
     /// without ray tracing gives `Rasterized`; check
     /// [`render_mode`](Self::render_mode) for the result.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
-        self.recorder.set_mode(&mut self.gpu, mode);
+        self.recorder.set_mode(mode);
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
@@ -146,10 +146,9 @@ impl OffscreenRenderer {
 
     /// Update dynamic flight geometry for the next `render`. Reflections
     /// show the newest flight's ball and its tracer, or the ball on the tee
-    /// when there is no flight. If the ray tracer fails to rebuild, the
-    /// renderer says so on stderr and mirrors the reflections from then on.
+    /// when there is no flight.
     pub fn update_flight(&mut self, flights: &[FlightRenderData]) {
-        self.recorder.update_flight(&mut self.gpu, flights);
+        self.recorder.update_flight(flights);
     }
 
     /// Update HUD overlay geometry (pixel coordinates) for the next `render`.

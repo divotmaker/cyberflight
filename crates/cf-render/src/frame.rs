@@ -15,6 +15,7 @@ use crate::flight::tee_ball_centre;
 use crate::gpu::{HostBuffer, push_constants};
 use crate::mirror::MirrorTracer;
 use crate::pipeline::{GridPushConstants, ScenePipelines};
+use crate::rt_pipeline::line_aabbs;
 
 /// The next frame's CPU-side content, built by `update_*` and uploaded when
 /// the frame is recorded.
@@ -82,9 +83,37 @@ const BUFFERS: [(vk::DeviceSize, &str); SLOTS] = [
     (4 * 1024, "hud fills"),
 ];
 
+/// Extra usage of the glow and line buffers when the ray tracer reads the
+/// tracer from them: it builds its structures from them and its shaders read
+/// them as storage buffers.
+const TRACER_READ_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
+    vk::BufferUsageFlags::STORAGE_BUFFER.as_raw()
+        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR.as_raw()
+        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS.as_raw(),
+);
+
+/// The frame buffers the ray tracer reads the newest flight's tracer from:
+/// it is in the first vertices of the glow and line buffers. They live as
+/// long as the [`FrameResources`] that created them.
+pub(crate) struct TracerBuffers {
+    /// The glow buffer, which starts with the tracer tube's triangles.
+    pub(crate) tube: vk::Buffer,
+    /// Vertices the glow buffer holds.
+    pub(crate) tube_capacity: u32,
+    /// The line buffer, which starts with the tracer's centre line segments.
+    pub(crate) line: vk::Buffer,
+    /// Vertices the line buffer holds.
+    pub(crate) line_capacity: u32,
+    /// The bounds of the centre line's segments ([`line_aabbs`]), one per
+    /// segment of the line buffer's first vertices.
+    pub(crate) line_aabbs: vk::Buffer,
+}
+
 /// The GPU buffers one frame is drawn from.
 pub(crate) struct FrameResources {
     buffers: [HostBuffer; SLOTS],
+    /// Bounds of the newest centre line's segments; with ray tracing only.
+    line_aabbs: Option<HostBuffer>,
     counts: [u32; SLOTS],
     ball_on_tee: bool,
     /// Vertices of the newest flight's tube at the start of the glow buffer,
@@ -95,21 +124,29 @@ pub(crate) struct FrameResources {
 }
 
 impl FrameResources {
-    /// Allocate the mapped buffers, empty, with the ball on the tee.
+    /// Allocate the mapped buffers, empty, with the ball on the tee. With
+    /// `ray_tracing` the glow and line buffers can also be read by the ray
+    /// tracer ([`Self::tracer_buffers`]); the device must support it.
     ///
     /// # Errors
     /// An allocation fails; the buffers already allocated are freed first.
     pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
+        ray_tracing: bool,
     ) -> Result<Self, RenderError> {
         let mut made = Vec::with_capacity(SLOTS);
-        for (size, name) in BUFFERS {
+        for (slot, (size, name)) in BUFFERS.into_iter().enumerate() {
+            let usage = if ray_tracing && (slot == FLIGHT_LINES || slot == FLIGHT_GLOWS) {
+                vk::BufferUsageFlags::VERTEX_BUFFER | TRACER_READ_USAGE
+            } else {
+                vk::BufferUsageFlags::VERTEX_BUFFER
+            };
             match HostBuffer::new(
                 device,
                 allocator,
                 size,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
+                usage,
                 MemoryLocation::CpuToGpu,
                 name,
             ) {
@@ -123,16 +160,40 @@ impl FrameResources {
                 }
             }
         }
+        let line_aabbs = if ray_tracing {
+            let segments = BUFFERS[FLIGHT_LINES].0 / size_of::<GridVertex>() as vk::DeviceSize / 2;
+            match HostBuffer::new(
+                device,
+                allocator,
+                segments * 24, // VkAabbPositionsKHR: 6 × f32
+                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::CpuToGpu,
+                "line aabbs",
+            ) {
+                Ok(buffer) => Some(buffer),
+                Err(e) => {
+                    for buffer in made {
+                        // SAFETY: Just created; no GPU work has used it.
+                        unsafe { buffer.destroy(device, allocator) };
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
         match <[HostBuffer; SLOTS]>::try_from(made) {
             Ok(buffers) => Ok(Self {
                 buffers,
+                line_aabbs,
                 counts: [0; SLOTS],
                 ball_on_tee: true,
                 newest_tube: 0,
                 newest_line: 0,
             }),
             Err(made) => {
-                for buffer in made {
+                for buffer in made.into_iter().chain(line_aabbs) {
                     // SAFETY: Just created; no GPU work has used it.
                     unsafe { buffer.destroy(device, allocator) };
                 }
@@ -144,8 +205,9 @@ impl FrameResources {
     /// Copy `content` into the buffers. Each buffer keeps the leading
     /// vertices that fit (see [`HostBuffer::write`]).
     ///
-    /// The GPU must have finished the frames that read these buffers;
-    /// otherwise it may draw a mix of old and new vertices.
+    /// The GPU must have finished the frames that read these buffers (draw
+    /// from them, and build the ray tracer's structures from them);
+    /// otherwise it may see a mix of old and new vertices.
     pub(crate) fn upload(&mut self, content: &FrameContent) {
         let data: [&[GridVertex]; SLOTS] = [
             &content.flight_lines,
@@ -160,6 +222,26 @@ impl FrameResources {
         self.ball_on_tee = content.ball_on_tee;
         self.newest_tube = uploaded(content.newest_tube, self.counts[FLIGHT_GLOWS]);
         self.newest_line = uploaded(content.newest_line, self.counts[FLIGHT_LINES]);
+        if let Some(aabbs) = &mut self.line_aabbs {
+            aabbs.write(&line_aabbs(
+                &content.flight_lines[..self.newest_line as usize],
+            ));
+        }
+    }
+
+    /// The buffers the ray tracer reads the newest flight's tracer from, or
+    /// `None` when these resources were created without `ray_tracing`.
+    pub(crate) fn tracer_buffers(&self) -> Option<TracerBuffers> {
+        let aabbs = self.line_aabbs.as_ref()?;
+        let capacity =
+            |slot: usize| (BUFFERS[slot].0 / size_of::<GridVertex>() as vk::DeviceSize) as u32;
+        Some(TracerBuffers {
+            tube: self.buffers[FLIGHT_GLOWS].handle(),
+            tube_capacity: capacity(FLIGHT_GLOWS),
+            line: self.buffers[FLIGHT_LINES].handle(),
+            line_capacity: capacity(FLIGHT_LINES),
+            line_aabbs: aabbs.handle(),
+        })
     }
 
     /// The newest flight's tracer as uploaded: the buffers and vertex counts
@@ -298,7 +380,7 @@ impl FrameResources {
     /// No pending GPU work uses them; `device` and `allocator` are the ones
     /// they were created with.
     pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
-        for buffer in self.buffers {
+        for buffer in self.buffers.into_iter().chain(self.line_aabbs) {
             // SAFETY: The caller guarantees the buffers are unused.
             unsafe { buffer.destroy(device, allocator) };
         }
