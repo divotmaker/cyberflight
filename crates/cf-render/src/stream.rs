@@ -139,12 +139,19 @@ const MAX_LOG_LINE: usize = 512;
 const MAX_LOG_LINES_PER_WINDOW: u32 = 20;
 const LOG_WINDOW: Duration = Duration::from_secs(10);
 
-/// An h264_nvenc ffmpeg process that exits within this long of starting is
-/// treated as NVENC being unusable here; the encoder switches to libx264.
+/// An h264_nvenc ffmpeg process that exits within this long of starting
+/// counts as an early exit, which triggers a fresh NVENC test encode.
 const NVENC_EARLY_EXIT: Duration = Duration::from_secs(5);
+
+/// After this many consecutive early h264_nvenc exits the encoder uses
+/// libx264 for the rest of the session, whatever the test encode says.
+const NVENC_MAX_EARLY_EXITS: u32 = 2;
 
 /// Upper bound on the NVENC test encode.
 const NVENC_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Frame size of the NVENC test encode.
+const NVENC_PROBE_SIZE: (u32, u32) = (256, 256);
 
 /// H.264 encoder driven by the ffmpeg subprocess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,18 +201,101 @@ impl Codec {
     }
 
     /// Pick the encoder: NVENC if a one-frame test encode succeeds, else libx264.
-    fn detect() -> Self {
-        match probe_nvenc() {
+    ///
+    /// # Errors
+    /// Returns `RenderError` if ffmpeg is not installed.
+    fn detect(config: &StreamConfig) -> Result<Self, RenderError> {
+        match probe_nvenc(config) {
             Ok(()) => {
                 eprintln!("StreamEncoder: using h264_nvenc (hardware): test encode succeeded");
-                Self::Nvenc
+                Ok(Self::Nvenc)
             }
-            Err(reason) => {
+            Err(ProbeError::FfmpegMissing) => Err(ffmpeg_missing()),
+            Err(ProbeError::Failed(reason)) => {
                 eprintln!(
                     "StreamEncoder: using libx264 (software): h264_nvenc test encode failed: {reason}"
                 );
-                Self::X264
+                Ok(Self::X264)
             }
+        }
+    }
+}
+
+/// Codec to use for the next ffmpeg process, plus a log line explaining the
+/// choice when it is not simply "same as before".
+#[derive(Debug, PartialEq, Eq)]
+struct CodecDecision {
+    codec: Codec,
+    note: Option<String>,
+}
+
+/// Tracks the codec across encoder restarts.
+///
+/// An h264_nvenc process that exits early triggers a fresh test encode: if it
+/// fails, libx264 is used from then on; if it passes, NVENC is retried, up to
+/// `NVENC_MAX_EARLY_EXITS` consecutive early exits, after which libx264 is
+/// used for the rest of the session. libx264 is never left once chosen.
+#[derive(Debug)]
+struct CodecSelector {
+    codec: Codec,
+    early_nvenc_exits: u32,
+}
+
+impl CodecSelector {
+    fn new(codec: Codec) -> Self {
+        Self {
+            codec,
+            early_nvenc_exits: 0,
+        }
+    }
+
+    /// Decide the codec after the encoder process exited `lifetime` after
+    /// starting. `reprobe` runs a fresh NVENC test encode and is called only
+    /// when that result decides the outcome.
+    fn on_exit(
+        &mut self,
+        lifetime: Duration,
+        reprobe: impl FnOnce() -> Result<(), String>,
+    ) -> CodecDecision {
+        if self.codec == Codec::X264 {
+            return self.decision(None);
+        }
+        if lifetime >= NVENC_EARLY_EXIT {
+            self.early_nvenc_exits = 0;
+            return self.decision(None);
+        }
+
+        self.early_nvenc_exits += 1;
+        let secs = lifetime.as_secs_f64();
+        if self.early_nvenc_exits >= NVENC_MAX_EARLY_EXITS {
+            self.codec = Codec::X264;
+            return self.decision(Some(format!(
+                "switching to libx264 (software) for this session: h264_nvenc exited early \
+                 {} times in a row (last after {secs:.1}s)",
+                self.early_nvenc_exits
+            )));
+        }
+
+        match reprobe() {
+            Ok(()) => self.decision(Some(format!(
+                "retrying h264_nvenc: it exited {secs:.1}s after starting but the test encode \
+                 still succeeds (early exit {} of {NVENC_MAX_EARLY_EXITS})",
+                self.early_nvenc_exits
+            ))),
+            Err(reason) => {
+                self.codec = Codec::X264;
+                self.decision(Some(format!(
+                    "switching to libx264 (software) for this session: h264_nvenc exited \
+                     {secs:.1}s after starting and the test encode now fails: {reason}"
+                )))
+            }
+        }
+    }
+
+    fn decision(&self, note: Option<String>) -> CodecDecision {
+        CodecDecision {
+            codec: self.codec,
+            note,
         }
     }
 }
@@ -372,7 +462,7 @@ impl LogLimiter {
 /// Pipes raw RGBA frames to an ffmpeg subprocess for HLS streaming.
 pub struct StreamEncoder {
     process: FfmpegProcess,
-    codec: Codec,
+    codec: CodecSelector,
     config: StreamConfig,
     frame_count: u64,
     /// Scratch buffer for RGBA → RGB24 conversion.
@@ -393,7 +483,7 @@ impl StreamEncoder {
         std::fs::create_dir_all(&config.output_dir)
             .map_err(|e| RenderError::Stream(format!("create output dir: {e}")))?;
 
-        let codec = Codec::detect();
+        let codec = Codec::detect(&config)?;
         let process = FfmpegProcess::new(spawn_encoder(&config, codec)?)?;
         let rgb_len = if config.strip_alpha {
             (config.width * config.height * 3) as usize
@@ -412,7 +502,7 @@ impl StreamEncoder {
 
         Ok(Self {
             process,
-            codec,
+            codec: CodecSelector::new(codec),
             config,
             frame_count: 0,
             rgb_scratch: vec![0u8; rgb_len],
@@ -477,8 +567,10 @@ impl StreamEncoder {
 
     /// Restart the ffmpeg subprocess after a crash.
     ///
-    /// If an h264_nvenc process exited within `NVENC_EARLY_EXIT` of starting,
-    /// the restart (and every later one) uses libx264.
+    /// An h264_nvenc process that exited within `NVENC_EARLY_EXIT` of
+    /// starting is retried only while a fresh test encode succeeds, and at
+    /// most `NVENC_MAX_EARLY_EXITS` times in a row; otherwise the restart
+    /// (and every later one) uses libx264.
     ///
     /// # Errors
     /// Returns `RenderError` if ffmpeg cannot be restarted.
@@ -487,15 +579,19 @@ impl StreamEncoder {
         let lifetime = self.process.started.elapsed();
         self.process.shutdown(Duration::ZERO);
 
-        if self.codec == Codec::Nvenc && lifetime < NVENC_EARLY_EXIT {
+        let config = &self.config;
+        let decision = self.codec.on_exit(lifetime, || {
             eprintln!(
-                "StreamEncoder: switching to libx264 (software): h264_nvenc encoder exited {:.1}s after starting",
+                "StreamEncoder: h264_nvenc exited {:.1}s after starting, re-running the test encode",
                 lifetime.as_secs_f64()
             );
-            self.codec = Codec::X264;
+            probe_nvenc(config).map_err(|e| e.to_string())
+        });
+        if let Some(note) = &decision.note {
+            eprintln!("StreamEncoder: {note}");
         }
 
-        self.process = FfmpegProcess::new(spawn_encoder(&self.config, self.codec)?)?;
+        self.process = FfmpegProcess::new(spawn_encoder(&self.config, decision.codec)?)?;
         eprintln!(
             "StreamEncoder: restarted (was at frame {})",
             self.frame_count
@@ -545,110 +641,48 @@ fn strip_alpha(rgba: &[u8], rgb: &mut [u8]) {
 
 /// Spawn an ffmpeg encoder process using `codec`.
 fn spawn_encoder(config: &StreamConfig, codec: Codec) -> Result<Child, RenderError> {
-    let input_fmt = if config.strip_alpha { "rgb24" } else { "rgba" };
-    let is_udp = matches!(config.mode, OutputMode::Udp { .. });
-
-    spawn_ffmpeg(
-        config,
-        codec.ffmpeg_name(),
-        &codec.options(is_udp),
-        input_fmt,
-    )
-    .map_err(|e| RenderError::Stream(format!("failed to start ffmpeg: {e}")))
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-hide_banner", "-loglevel", "warning"]);
+    cmd.args(encode_args(config, codec, (config.width, config.height)));
+    cmd.args(output_args(config));
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ffmpeg_missing()
+        } else {
+            RenderError::Stream(format!("failed to start ffmpeg: {e}"))
+        }
+    })
 }
 
-/// Check that h264_nvenc actually works by encoding one small frame.
-///
-/// Listing h264_nvenc in `ffmpeg -encoders` only means ffmpeg was built with
-/// it; the encode fails without a usable NVIDIA GPU and driver.
-///
-/// # Errors
-/// Returns a short reason (ffmpeg's first error line, timeout, or spawn
-/// failure) when the test encode does not succeed.
-fn probe_nvenc() -> Result<(), String> {
-    let mut child = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=black:s=256x256:d=0.1",
-            "-frames:v",
-            "1",
-            "-c:v",
-            "h264_nvenc",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
+fn ffmpeg_missing() -> RenderError {
+    RenderError::Stream("ffmpeg not found on PATH".to_owned())
+}
 
-    // Collect the first error line on a thread so a chatty ffmpeg can't block.
-    let reader = child.stderr.take().map(|stderr| {
-        thread::spawn(move || {
-            let mut first: Option<String> = None;
-            forward_lines(stderr, |line| {
-                if first.is_none() {
-                    first = Some(line.to_owned());
-                }
-            });
-            first
-        })
-    });
-
-    let deadline = Instant::now() + NVENC_PROBE_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(format!(
-                    "timed out after {}s",
-                    NVENC_PROBE_TIMEOUT.as_secs()
-                ));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(format!("cannot wait for ffmpeg: {e}"));
-            }
-        }
-    };
-    let first_line = reader.and_then(|r| r.join().ok()).flatten();
-
-    match status? {
-        status if status.success() => Ok(()),
-        status => Err(first_line.unwrap_or_else(|| format!("ffmpeg exited with {status}"))),
+/// Raw input pixel format piped to ffmpeg, and its bytes per pixel.
+fn input_pix_fmt(config: &StreamConfig) -> (&'static str, usize) {
+    if config.strip_alpha {
+        ("rgb24", 3)
+    } else {
+        ("rgba", 4)
     }
 }
 
-fn spawn_ffmpeg(
-    config: &StreamConfig,
-    codec: &str,
-    codec_opts: &[&str],
-    input_pix_fmt: &str,
-) -> Result<Child, std::io::Error> {
-    let size = format!("{}x{}", config.width, config.height);
+/// ffmpeg arguments from the raw stdin input through the encoder settings,
+/// shared by the real encode and the NVENC test encode. `size` is the frame
+/// size in pixels.
+fn encode_args(config: &StreamConfig, codec: Codec, size: (u32, u32)) -> Vec<String> {
+    let (pix_fmt, _) = input_pix_fmt(config);
+    let low_latency = matches!(config.mode, OutputMode::Udp { .. });
+    let size = format!("{}x{}", size.0, size.1);
     let fps = config.fps.to_string();
-
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args([
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
+    let mut args = owned(&[
         "-f",
         "rawvideo",
         "-pix_fmt",
-        input_pix_fmt,
+        pix_fmt,
         "-s",
         &size,
         "-r",
@@ -656,18 +690,20 @@ fn spawn_ffmpeg(
         "-i",
         "pipe:0",
         "-c:v",
-        codec,
+        codec.ffmpeg_name(),
     ]);
-    cmd.args(codec_opts);
-    cmd.args(["-b:v", &config.bitrate, "-pix_fmt", "yuv420p"]);
+    args.extend(owned(&codec.options(low_latency)));
+    args.extend(owned(&["-b:v", &config.bitrate, "-pix_fmt", "yuv420p"]));
+    args
+}
 
-    // Output format depends on mode.
+/// ffmpeg output arguments for the configured transport.
+fn output_args(config: &StreamConfig) -> Vec<String> {
     match &config.mode {
         OutputMode::Hls => {
             let hls_time = config.hls_segment_secs.to_string();
             let hls_list = config.hls_list_size.to_string();
-            let output = config.output_dir.join("stream.m3u8");
-            cmd.args([
+            let mut args = owned(&[
                 "-f",
                 "hls",
                 "-hls_time",
@@ -677,11 +713,12 @@ fn spawn_ffmpeg(
                 "-hls_flags",
                 "delete_segments",
             ]);
-            cmd.arg(output);
+            let output = config.output_dir.join("stream.m3u8");
+            args.push(output.to_string_lossy().into_owned());
+            args
         }
         OutputMode::Udp { dest } => {
-            let udp_url = format!("udp://{dest}?pkt_size=1316");
-            cmd.args([
+            let mut args = owned(&[
                 "-f",
                 "mpegts",
                 "-flush_packets",
@@ -689,14 +726,140 @@ fn spawn_ffmpeg(
                 "-mpegts_flags",
                 "resend_headers",
             ]);
-            cmd.arg(&udp_url);
+            args.push(format!("udp://{dest}?pkt_size=1316"));
+            args
         }
     }
+}
 
-    cmd.stdin(Stdio::piped())
+fn owned(args: &[&str]) -> Vec<String> {
+    args.iter().map(|&a| a.to_owned()).collect()
+}
+
+/// Why the NVENC test encode did not succeed.
+#[derive(Debug)]
+enum ProbeError {
+    /// The `ffmpeg` executable does not exist.
+    FfmpegMissing,
+    /// The test encode failed; a short reason.
+    Failed(String),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FfmpegMissing => f.write_str("ffmpeg not found on PATH"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// Check that h264_nvenc actually works by encoding one small frame with the
+/// same input format and encoder options as the real encode.
+///
+/// Listing h264_nvenc in `ffmpeg -encoders` only means ffmpeg was built with
+/// it; the encode fails without a usable NVIDIA GPU and driver.
+///
+/// # Errors
+/// `ProbeError::FfmpegMissing` if ffmpeg is not installed, otherwise
+/// `ProbeError::Failed` with a short reason (ffmpeg's first error line,
+/// timeout, or a spawn/thread failure).
+fn probe_nvenc(config: &StreamConfig) -> Result<(), ProbeError> {
+    eprintln!(
+        "StreamEncoder: probing h264_nvenc with a test encode (up to {}s)...",
+        NVENC_PROBE_TIMEOUT.as_secs()
+    );
+
+    let (w, h) = NVENC_PROBE_SIZE;
+    let (_, bytes_per_pixel) = input_pix_fmt(config);
+    let frame = vec![0u8; w as usize * h as usize * bytes_per_pixel];
+
+    let mut child = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(encode_args(config, Codec::Nvenc, NVENC_PROBE_SIZE))
+        .args(["-frames:v", "1", "-f", "null", "-"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    cmd.spawn()
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ProbeError::FfmpegMissing
+            } else {
+                ProbeError::Failed(format!("cannot run ffmpeg: {e}"))
+            }
+        })?;
+
+    let abort = |child: &mut Child, reason: String| {
+        let _ = child.kill();
+        let _ = child.wait();
+        ProbeError::Failed(reason)
+    };
+
+    // Feed the frame and collect the first error line on threads, so neither
+    // a stalled nor a chatty ffmpeg can block us past the timeout. A write
+    // error just means ffmpeg exited early; its status says why.
+    let writer = match child.stdin.take().map(|mut stdin| {
+        thread::Builder::new()
+            .name("ffmpeg-probe-in".to_owned())
+            .spawn(move || {
+                let _ = stdin.write_all(&frame);
+            })
+    }) {
+        Some(Err(e)) => return Err(abort(&mut child, format!("cannot start probe thread: {e}"))),
+        Some(Ok(handle)) => Some(handle),
+        None => None,
+    };
+    let reader = match child.stderr.take().map(|stderr| {
+        thread::Builder::new()
+            .name("ffmpeg-probe-err".to_owned())
+            .spawn(move || {
+                let mut first: Option<String> = None;
+                forward_lines(stderr, |line| {
+                    if first.is_none() {
+                        first = Some(line.to_owned());
+                    }
+                });
+                first
+            })
+    }) {
+        Some(Err(e)) => {
+            let err = abort(&mut child, format!("cannot start probe thread: {e}"));
+            if let Some(w) = writer {
+                let _ = w.join();
+            }
+            return Err(err);
+        }
+        Some(Ok(handle)) => Some(handle),
+        None => None,
+    };
+
+    let deadline = Instant::now() + NVENC_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                break Err(abort(
+                    &mut child,
+                    format!("timed out after {}s", NVENC_PROBE_TIMEOUT.as_secs()),
+                ));
+            }
+            Err(e) => break Err(abort(&mut child, format!("cannot wait for ffmpeg: {e}"))),
+        }
+    };
+    // The child has exited, so both pipes are closed and the threads finish.
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    let first_line = reader.and_then(|r| r.join().ok()).flatten();
+
+    match status? {
+        status if status.success() => Ok(()),
+        status => Err(ProbeError::Failed(
+            first_line.unwrap_or_else(|| format!("ffmpeg exited with {status}")),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +870,127 @@ mod tests {
         let mut lines = Vec::new();
         forward_lines(input, |l| lines.push(l.to_owned()));
         lines
+    }
+
+    const EARLY: Duration = Duration::from_millis(200);
+    const LATE: Duration = Duration::from_secs(60);
+
+    fn probe_must_not_run() -> Result<(), String> {
+        panic!("test encode should not run")
+    }
+
+    #[test]
+    fn selector_keeps_x264_without_probing() {
+        let mut sel = CodecSelector::new(Codec::X264);
+        for lifetime in [EARLY, LATE, EARLY] {
+            let d = sel.on_exit(lifetime, probe_must_not_run);
+            assert_eq!(
+                d,
+                CodecDecision {
+                    codec: Codec::X264,
+                    note: None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn selector_restarts_nvenc_after_late_exit_without_probing() {
+        let mut sel = CodecSelector::new(Codec::Nvenc);
+        let d = sel.on_exit(LATE, probe_must_not_run);
+        assert_eq!(d.codec, Codec::Nvenc);
+        assert!(d.note.is_none());
+    }
+
+    #[test]
+    fn selector_downgrades_when_reprobe_fails() {
+        let mut sel = CodecSelector::new(Codec::Nvenc);
+        let d = sel.on_exit(EARLY, || Err("no device".to_owned()));
+        assert_eq!(d.codec, Codec::X264);
+        let note = d.note.unwrap();
+        assert!(note.contains("libx264"), "{note}");
+        assert!(note.contains("no device"), "{note}");
+
+        // Permanent: later exits stay on libx264 and never probe again.
+        assert_eq!(sel.on_exit(EARLY, probe_must_not_run).codec, Codec::X264);
+        assert_eq!(sel.on_exit(LATE, probe_must_not_run).codec, Codec::X264);
+    }
+
+    #[test]
+    fn selector_retries_nvenc_then_downgrades_after_consecutive_early_exits() {
+        let mut sel = CodecSelector::new(Codec::Nvenc);
+        let mut probes = 0;
+        let d = sel.on_exit(EARLY, || {
+            probes += 1;
+            Ok(())
+        });
+        assert_eq!(d.codec, Codec::Nvenc);
+        assert!(d.note.unwrap().contains("retrying h264_nvenc"));
+        assert_eq!(probes, 1);
+
+        // Second early exit in a row: libx264 without another probe.
+        let d = sel.on_exit(EARLY, probe_must_not_run);
+        assert_eq!(d.codec, Codec::X264);
+        assert!(d.note.unwrap().contains("2 times in a row"));
+        assert_eq!(sel.on_exit(EARLY, probe_must_not_run).codec, Codec::X264);
+    }
+
+    #[test]
+    fn selector_resets_early_exit_count_after_a_long_run() {
+        let mut sel = CodecSelector::new(Codec::Nvenc);
+        assert_eq!(sel.on_exit(EARLY, || Ok(())).codec, Codec::Nvenc);
+        assert_eq!(sel.on_exit(LATE, probe_must_not_run).codec, Codec::Nvenc);
+        assert_eq!(sel.on_exit(EARLY, || Ok(())).codec, Codec::Nvenc);
+        assert_eq!(sel.on_exit(EARLY, probe_must_not_run).codec, Codec::X264);
+    }
+
+    #[test]
+    fn selector_always_settles_on_x264_under_repeated_early_exits() {
+        let mut sel = CodecSelector::new(Codec::Nvenc);
+        let mut probes = 0;
+        for _ in 0..100 {
+            let _ = sel.on_exit(EARLY, || {
+                probes += 1;
+                Ok(())
+            });
+        }
+        assert_eq!(sel.codec, Codec::X264);
+        assert_eq!(probes, NVENC_MAX_EARLY_EXITS - 1);
+    }
+
+    #[test]
+    fn probe_args_match_real_encode_except_frame_size() {
+        for mode in [
+            OutputMode::Hls,
+            OutputMode::Udp {
+                dest: "127.0.0.1:5004".to_owned(),
+            },
+        ] {
+            for strip_alpha in [true, false] {
+                let config = StreamConfig {
+                    mode: mode.clone(),
+                    strip_alpha,
+                    ..StreamConfig::default()
+                };
+                let real = encode_args(&config, Codec::Nvenc, (config.width, config.height));
+                let probe = encode_args(&config, Codec::Nvenc, NVENC_PROBE_SIZE);
+                let size_at = real.iter().position(|a| a == "-s").unwrap() + 1;
+                assert_eq!(real[size_at], "1920x1080");
+                assert_eq!(probe[size_at], "256x256");
+                let differing: Vec<usize> =
+                    (0..real.len()).filter(|&i| real[i] != probe[i]).collect();
+                assert_eq!(differing, [size_at]);
+
+                let joined = probe.join(" ");
+                assert!(joined.contains("-i pipe:0"), "{joined}");
+                assert!(joined.contains("-c:v h264_nvenc -preset ll"), "{joined}");
+                assert!(joined.ends_with("-pix_fmt yuv420p"), "{joined}");
+                let pix_fmt = if strip_alpha { "rgb24" } else { "rgba" };
+                assert!(joined.contains(&format!("-pix_fmt {pix_fmt} ")), "{joined}");
+                let udp = matches!(mode, OutputMode::Udp { .. });
+                assert_eq!(joined.contains("-zerolatency 1"), udp, "{joined}");
+            }
+        }
     }
 
     #[test]
