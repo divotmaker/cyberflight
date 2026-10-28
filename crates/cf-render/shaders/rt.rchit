@@ -50,6 +50,12 @@ const float EMISSIVE_REFLECTANCE = 1.1;
 const vec3 REFL_TINT = vec3(0.55, 0.75, 1.0);
 const float REFL_DESATURATE = 0.45;
 
+// Tracer and ball reflections fade with the reflected point's height above
+// the floor: full strength at the floor, falling linearly to REFLECTION_FADE_MIN
+// of it at REFLECTION_FADE_HEIGHT metres and staying there above.
+const float REFLECTION_FADE_HEIGHT = 60.0; // metres above the floor
+const float REFLECTION_FADE_MIN = 0.1;     // strength at and above that height
+
 // Dark navy glass tint, stronger at grazing angles.
 const vec3 GLASS_TINT = vec3(0.006, 0.014, 0.030);
 
@@ -59,6 +65,11 @@ const float SPEC_POWER = 200.0;
 
 // Analytical ball reflection: glow halo multiplier relative to ball radius.
 const float BALL_GLOW_MULT = 6.0;
+
+// Strength of the reflection of a point h metres above the floor.
+float height_fade(float h) {
+    return mix(1.0, REFLECTION_FADE_MIN, clamp(h / REFLECTION_FADE_HEIGHT, 0.0, 1.0));
+}
 
 void main() {
     int geom_type = gl_InstanceCustomIndexEXT;
@@ -73,7 +84,8 @@ void main() {
         float NdotV = max(dot(N, V), 0.0);
         float fresnel = F0_GLASS + (1.0 - F0_GLASS) * pow(1.0 - NdotV, 5.0);
 
-        // Trace reflection ray for trail geometry only (mask 0x04)
+        // Trace reflection ray for trail geometry only (mask 0x04). The trail
+        // returns its colour in rgb and the world height of the hit in alpha.
         vec3 refl_dir = reflect(gl_WorldRayDirectionEXT, N);
         reflPayload = vec4(0.0);
         if (gl_HitTEXT > 0.0) {
@@ -86,6 +98,7 @@ void main() {
         }
 
         vec3 trail_reflection = reflPayload.rgb * EMISSIVE_REFLECTANCE;
+        float trail_fade = height_fade(reflPayload.a - hit_pos.y);
 
         // Analytical ball reflection: glow intensity from the closest approach
         // of the reflected ray to the ball center (none if the ball is behind it).
@@ -107,6 +120,7 @@ void main() {
         float perp = length(to_ball - V * proj);
         float occlude = smoothstep(BALL_RADIUS * 1.5, BALL_RADIUS * 3.0, perp);
         vec3 ball_reflection = (MAGENTA * ball_glow * 3.0 + vec3(1.0) * core_glow * 3.0) * EMISSIVE_REFLECTANCE * occlude;
+        float ball_fade = height_fade(pc.ball_pos.y - hit_pos.y);
 
         // Glass base tint: dark navy, stronger at grazing angles. Far floor
         // fades into dark blue instead of pure black.
@@ -120,7 +134,7 @@ void main() {
         float spec = pow(max(dot(N, H), 0.0), SPEC_POWER);
         vec3 specular = CYAN * SPEC_INTENSITY * spec * fresnel;
 
-        vec3 reflection = trail_reflection + ball_reflection;
+        vec3 reflection = trail_reflection * trail_fade + ball_reflection * ball_fade;
 
         // Tinted glass: the reflection loses saturation and takes the glass hue.
         float lum = dot(reflection, vec3(0.2126, 0.7152, 0.0722));
@@ -147,7 +161,8 @@ void main() {
 
         // Only floor reflection rays reach the trail (mask 0x04), so this
         // runs at the pipeline's maximum recursion depth and traces nothing.
-        payload = vec4(MAGENTA * alpha, 1.0);
+        // Alpha carries the hit's world height for the floor's height fade.
+        payload = vec4(MAGENTA * alpha, hit_pos.y);
 
     } else if (geom_type == 4) {
         // Tee box border: bright cyan.
