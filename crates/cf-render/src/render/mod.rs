@@ -52,13 +52,24 @@ impl Renderer {
         grid_config: &GridConfig,
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
-        let mut recorder = SceneRecorder::new(
+        // Reflections when the device supports them; raster if they fail.
+        let tee = TeeBox::default();
+        let rt_scene = RtSceneState::new(
+            glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
+            RtTrail::default(),
+        );
+        let recorder = SceneRecorder::new(
             &mut gpu,
             swapchain.format,
             vk::ImageLayout::PRESENT_SRC_KHR,
+            swapchain.extent,
             grid_config,
             None,
+            Some(rt_scene),
         )?;
+        if recorder.has_reflections() {
+            eprintln!("RT pipeline: initialized (windowed mode)");
+        }
 
         let depth = Self::create_depth(
             &gpu.device,
@@ -75,19 +86,6 @@ impl Renderer {
         )?;
         let overlay_framebuffers =
             Self::create_overlay_framebuffers(&gpu.device, &swapchain, recorder.hud_pass())?;
-
-        // Build RT reflections if hardware supports it.
-        if gpu.rt_supported {
-            let tee = TeeBox::default();
-            let scene = RtSceneState::new(
-                glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
-                RtTrail::default(),
-            );
-            match recorder.enable_reflections(&mut gpu, swapchain.extent, scene) {
-                Ok(()) => eprintln!("RT pipeline: initialized (windowed mode)"),
-                Err(e) => eprintln!("RT pipeline init failed, falling back to raster: {e}"),
-            }
-        }
 
         let window_extent = swapchain.extent;
         let image_count = framebuffers.len();

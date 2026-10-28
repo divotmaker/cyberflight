@@ -106,25 +106,31 @@ pub(crate) struct SceneRecorder {
     mode: RenderMode,
     /// Chase camera for the right 20 % inset.
     chase: Option<Camera>,
-    color_format: vk::Format,
     grid: GridConfig,
     tee: TeeBox,
 }
 
 impl SceneRecorder {
-    /// Create the passes and pipelines for a `color_format` image that the
-    /// HUD pass leaves in `output_layout`, and the scene of `grid` with the
-    /// default tee box: the ball on the tee, or `snapshot`'s ball and trail.
-    /// No reflections; the mode is `Rasterized`.
+    /// Create the passes and pipelines for an `extent` image of
+    /// `color_format` that the HUD pass leaves in `output_layout`, and the
+    /// scene of `grid` with the default tee box: the ball on the tee, or
+    /// `snapshot`'s ball and trail.
+    ///
+    /// With `rt_scene` and a device that supports ray tracing, it adds
+    /// reflections showing `rt_scene` and starts in `RayTraced` mode. If they
+    /// fail to set up, it says so on stderr and renders without them, in
+    /// `Rasterized` mode, as it does without `rt_scene` or device support.
     ///
     /// # Errors
-    /// Any part fails to create; what was created is destroyed first.
+    /// Any other part fails to create; what was created is destroyed first.
     pub(crate) fn new(
         gpu: &mut GpuContext,
         color_format: vk::Format,
         output_layout: vk::ImageLayout,
+        extent: vk::Extent2D,
         grid: &GridConfig,
         snapshot: Option<&Snapshot<'_>>,
+        rt_scene: Option<RtSceneState>,
     ) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let pipelines =
@@ -155,36 +161,34 @@ impl SceneRecorder {
                 return Err(e);
             }
         };
+        let reflections = match rt_scene {
+            Some(scene) if gpu.rt_supported => {
+                match Reflections::new(gpu, color_format, extent, grid, &tee, scene) {
+                    Ok(reflections) => Some(reflections),
+                    Err(e) => {
+                        eprintln!("RT setup failed, rendering without ray tracing: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let mode = if reflections.is_some() {
+            RenderMode::RayTraced
+        } else {
+            RenderMode::Rasterized
+        };
         Ok(Self {
             pipelines,
             geometry,
             content: FrameContent::default(),
             frame,
-            reflections: None,
-            mode: RenderMode::Rasterized,
+            reflections,
+            mode,
             chase: None,
-            color_format,
             grid: *grid,
             tee,
         })
-    }
-
-    /// Add ray-traced reflections for an `extent` frame showing `scene`, and
-    /// switch to `RayTraced`. The device must support ray tracing.
-    ///
-    /// # Errors
-    /// The reflections fail to create; the recorder stays raster-only.
-    pub(crate) fn enable_reflections(
-        &mut self,
-        gpu: &mut GpuContext,
-        extent: vk::Extent2D,
-        scene: RtSceneState,
-    ) -> Result<(), RenderError> {
-        let reflections =
-            Reflections::new(gpu, self.color_format, extent, &self.grid, &self.tee, scene)?;
-        self.reflections = Some(reflections);
-        self.mode = RenderMode::RayTraced;
-        Ok(())
     }
 
     /// Whether the recorder has reflections.

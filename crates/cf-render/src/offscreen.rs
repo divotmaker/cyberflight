@@ -33,7 +33,7 @@ const OFFSCREEN_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
 impl OffscreenRenderer {
     /// Create a headless renderer for the given grid configuration.
-    /// Enables raytracing if hardware supports it.
+    /// Enables raytracing if hardware supports it and RT setup succeeds.
     pub fn new(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let scene = RtSceneState::new(
@@ -71,7 +71,7 @@ impl OffscreenRenderer {
 
     /// Create a headless renderer with RT reflection compositing for the static range.
     ///
-    /// Falls back to raster-only if RT hardware is not available.
+    /// Falls back to raster-only if RT hardware is not available or RT setup fails.
     pub fn new_rt(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let scene = RtSceneState::new(
@@ -83,7 +83,7 @@ impl OffscreenRenderer {
 
     /// Create a headless renderer with RT reflection compositing and a ball in flight.
     ///
-    /// Falls back to raster-only if RT hardware is not available.
+    /// Falls back to raster-only if RT hardware is not available or RT setup fails.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_flight_rt(
         width: u32,
@@ -123,7 +123,8 @@ impl OffscreenRenderer {
 
     /// The constructor behind every public one: a device with or without
     /// ray tracing; reflections showing `rt_scene` when it is given and the
-    /// device supports them; the ball on the tee or `snapshot`'s.
+    /// device supports them (raster when they fail to set up); the ball on
+    /// the tee or `snapshot`'s.
     fn create(
         width: u32,
         height: u32,
@@ -139,12 +140,16 @@ impl OffscreenRenderer {
 
         let mut gpu = GpuContext::new_headless(config)?;
 
-        let mut recorder = SceneRecorder::new(
+        // Reflections when `rt_scene` is given and the device supports them;
+        // raster if they fail to set up.
+        let recorder = SceneRecorder::new(
             &mut gpu,
             OFFSCREEN_FORMAT,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::Extent2D { width, height },
             grid_config,
             snapshot,
+            rt_scene,
         )?;
 
         let target = OffscreenTarget::new(
@@ -167,13 +172,6 @@ impl OffscreenRenderer {
                 .create_fence(&fence_info, None)
                 .map_err(RenderError::Vulkan)?
         };
-
-        // Build RT reflections if hardware supports it.
-        if let Some(scene) = rt_scene
-            && gpu.rt_supported
-        {
-            recorder.enable_reflections(&mut gpu, vk::Extent2D { width, height }, scene)?;
-        }
 
         Ok(Self {
             recorder: ManuallyDrop::new(recorder),
