@@ -35,11 +35,7 @@ impl OffscreenRenderer {
     /// Create a headless renderer for the given grid configuration.
     /// Enables raytracing if hardware supports it and RT setup succeeds.
     pub fn new(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
-        let tee = TeeBox::default();
-        let scene = RtSceneState::new(
-            glam::Vec3::new(0.0, tee.ball_radius, 0.0),
-            RtTrail::default(),
-        );
+        let scene = RtSceneState::on_tee(&TeeBox::default());
         Self::create(width, height, grid_config, true, Some(scene), None)
     }
 

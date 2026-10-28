@@ -10,7 +10,9 @@ use cf_scene::trail::{
 
 use crate::frame::FrameContent;
 
-/// Per-frame flight render data: ball position + trail points (scene space).
+/// One ball's frame: position, tracer samples (oldest first) and time, in
+/// scene space. `ball_pos` is dimple's reference point (a ball resting on the
+/// ground has `y == 0`); renderers draw the sphere one ball radius above it.
 pub struct FlightRenderData {
     pub ball_pos: Vec3,
     pub trail_points: Vec<TrailPoint>,
@@ -22,8 +24,9 @@ pub struct FlightRenderData {
 pub(crate) const FLIGHT_BALL_MESH: (u32, u32) = (8, 16);
 
 /// Build the raster geometry of `flights` into `out`'s flight vertices: per
-/// flight the ball, its glow, and the trail's glow ribbon (facing
-/// `camera_pos`) and core line. With no flight, the ball is on the tee.
+/// flight the ball and its glow, centred one ball radius above `ball_pos`,
+/// and the trail's glow ribbon (facing `camera_pos`) and core line. With no
+/// flight, the ball is on the tee.
 pub(crate) fn flight_vertices(
     flights: &[FlightRenderData],
     camera_pos: Vec3,
@@ -37,14 +40,11 @@ pub(crate) fn flight_vertices(
     out.ball_on_tee = flights.is_empty();
 
     for flight in flights {
-        out.flight_fills.extend(generate_ball_at(
-            flight.ball_pos,
-            tee.ball_radius,
-            rings,
-            segments,
-        ));
+        let centre = flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0);
+        out.flight_fills
+            .extend(generate_ball_at(centre, tee.ball_radius, rings, segments));
         out.flight_glows.extend(generate_ball_glow_at(
-            flight.ball_pos,
+            centre,
             tee.ball_radius,
             rings,
             segments,
@@ -95,8 +95,9 @@ mod tests {
         flight_vertices(std::slice::from_ref(&flight), camera_pos, &tee, &mut out);
 
         let r = tee.ball_radius;
-        let fills = generate_ball_at(flight.ball_pos, r, 8, 16);
-        let mut glows = generate_ball_glow_at(flight.ball_pos, r, 8, 16);
+        let centre = Vec3::new(0.0, 19.0 + r, 38.0);
+        let fills = generate_ball_at(centre, r, 8, 16);
+        let mut glows = generate_ball_glow_at(centre, r, 8, 16);
         glows.extend(generate_trail_glow(
             &flight.trail_points,
             1.9,
@@ -124,7 +125,12 @@ mod tests {
         let mut out = FrameContent::default();
         flight_vertices(&[flight], Vec3::ZERO, &tee, &mut out);
 
-        let ball_glow = generate_ball_glow_at(Vec3::new(0.0, 1.0, 2.0), tee.ball_radius, 8, 16);
+        let ball_glow = generate_ball_glow_at(
+            Vec3::new(0.0, 1.0 + tee.ball_radius, 2.0),
+            tee.ball_radius,
+            8,
+            16,
+        );
         assert!(out.flight_lines.is_empty());
         assert_eq!(as_bytes(&out.flight_glows), as_bytes(&ball_glow));
         assert!(!out.ball_on_tee);
