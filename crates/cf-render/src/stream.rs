@@ -1,7 +1,8 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::Instant;
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::error::RenderError;
 
@@ -126,9 +127,178 @@ impl StreamConfig {
     }
 }
 
+/// How long `Drop` waits for ffmpeg to finish after closing its stdin
+/// before killing it.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Longest ffmpeg log line forwarded; the rest of the line is dropped.
+const MAX_LOG_LINE: usize = 512;
+
+/// At most this many ffmpeg log lines are forwarded per `LOG_WINDOW`;
+/// the rest are counted and reported as suppressed.
+const MAX_LOG_LINES_PER_WINDOW: u32 = 20;
+const LOG_WINDOW: Duration = Duration::from_secs(10);
+
+/// A running ffmpeg process and the thread draining its stderr.
+///
+/// stderr is always drained so ffmpeg can never block on a full pipe (which
+/// would stop it reading frames from stdin).
+struct FfmpegProcess {
+    child: Child,
+    stderr_thread: Option<JoinHandle<()>>,
+}
+
+impl FfmpegProcess {
+    fn new(mut child: Child) -> Result<Self, RenderError> {
+        let stderr_thread = match child.stderr.take() {
+            Some(stderr) => match spawn_stderr_forwarder(stderr) {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(RenderError::Stream(format!(
+                        "failed to start ffmpeg stderr reader: {e}"
+                    )));
+                }
+            },
+            None => None,
+        };
+        Ok(Self {
+            child,
+            stderr_thread,
+        })
+    }
+
+    /// Close stdin, give ffmpeg up to `grace` to exit on its own, kill it if
+    /// it is still running, then join the stderr thread.
+    ///
+    /// Returns the exit status, or `None` if it could not be collected.
+    fn shutdown(&mut self, grace: Duration) -> Option<ExitStatus> {
+        drop(self.child.stdin.take());
+
+        let deadline = Instant::now() + grace;
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    if !grace.is_zero() {
+                        eprintln!(
+                            "StreamEncoder: ffmpeg still running after {}s, killing it",
+                            grace.as_secs()
+                        );
+                    }
+                    let _ = self.child.kill();
+                    break self.child.wait().ok();
+                }
+                Err(e) => {
+                    eprintln!("StreamEncoder: failed to poll ffmpeg: {e}");
+                    let _ = self.child.kill();
+                    break self.child.wait().ok();
+                }
+            }
+        };
+
+        // The child has exited, so its end of the stderr pipe is closed and
+        // the reader thread reaches EOF.
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
+        status
+    }
+}
+
+/// Forward ffmpeg's stderr to our stderr on a background thread.
+fn spawn_stderr_forwarder(stderr: ChildStderr) -> std::io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("ffmpeg-stderr".to_owned())
+        .spawn(move || {
+            let mut limiter = LogLimiter::new(Instant::now());
+            forward_lines(stderr, |line| {
+                limiter.emit(Instant::now(), line, |msg| eprintln!("ffmpeg: {msg}"));
+            });
+            limiter.finish(|msg| eprintln!("ffmpeg: {msg}"));
+        })
+}
+
+/// Read `reader` to EOF, calling `on_line` for each non-empty line.
+///
+/// Lines end at `\n` or `\r` (ffmpeg uses `\r` for progress updates) and are
+/// truncated to `MAX_LOG_LINE` bytes. Read errors end the stream.
+fn forward_lines<R: Read>(mut reader: R, mut on_line: impl FnMut(&str)) {
+    let mut buf = [0u8; 4096];
+    let mut line: Vec<u8> = Vec::with_capacity(MAX_LOG_LINE);
+    let mut flush = |line: &mut Vec<u8>| {
+        let text = String::from_utf8_lossy(line);
+        let text = text.trim();
+        if !text.is_empty() {
+            on_line(text);
+        }
+        line.clear();
+    };
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' {
+                flush(&mut line);
+            } else if line.len() < MAX_LOG_LINE {
+                line.push(b);
+            }
+        }
+    }
+    flush(&mut line);
+}
+
+/// Rate limiter for forwarded log lines: at most `MAX_LOG_LINES_PER_WINDOW`
+/// lines per `LOG_WINDOW`, with a count of anything dropped.
+struct LogLimiter {
+    window_start: Instant,
+    emitted: u32,
+    suppressed: u64,
+}
+
+impl LogLimiter {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_start: now,
+            emitted: 0,
+            suppressed: 0,
+        }
+    }
+
+    fn emit(&mut self, now: Instant, line: &str, mut out: impl FnMut(&str)) {
+        if now.duration_since(self.window_start) >= LOG_WINDOW {
+            self.finish(&mut out);
+            self.window_start = now;
+            self.emitted = 0;
+        }
+        if self.emitted < MAX_LOG_LINES_PER_WINDOW {
+            self.emitted += 1;
+            out(line);
+        } else {
+            self.suppressed += 1;
+        }
+    }
+
+    /// Report (and reset) the count of suppressed lines, if any.
+    fn finish(&mut self, mut out: impl FnMut(&str)) {
+        if self.suppressed > 0 {
+            out(&format!("({} more lines suppressed)", self.suppressed));
+            self.suppressed = 0;
+        }
+    }
+}
+
 /// Pipes raw RGBA frames to an ffmpeg subprocess for HLS streaming.
 pub struct StreamEncoder {
-    child: Child,
+    process: FfmpegProcess,
     config: StreamConfig,
     frame_count: u64,
     /// Scratch buffer for RGBA → RGB24 conversion.
@@ -148,7 +318,7 @@ impl StreamEncoder {
         std::fs::create_dir_all(&config.output_dir)
             .map_err(|e| RenderError::Stream(format!("create output dir: {e}")))?;
 
-        let child = spawn_encoder(&config)?;
+        let process = FfmpegProcess::new(spawn_encoder(&config)?)?;
         let rgb_len = if config.strip_alpha {
             (config.width * config.height * 3) as usize
         } else {
@@ -165,7 +335,7 @@ impl StreamEncoder {
         );
 
         Ok(Self {
-            child,
+            process,
             config,
             frame_count: 0,
             rgb_scratch: vec![0u8; rgb_len],
@@ -190,6 +360,7 @@ impl StreamEncoder {
         let t = Instant::now();
 
         let stdin = self
+            .process
             .child
             .stdin
             .as_mut()
@@ -214,7 +385,7 @@ impl StreamEncoder {
     /// Check if the ffmpeg subprocess is still running.
     #[must_use]
     pub fn is_healthy(&mut self) -> bool {
-        match self.child.try_wait() {
+        match self.process.child.try_wait() {
             Ok(None) => true,
             Ok(Some(status)) => {
                 eprintln!("StreamEncoder: ffmpeg exited with {status}");
@@ -233,11 +404,9 @@ impl StreamEncoder {
     /// Returns `RenderError` if ffmpeg cannot be restarted.
     pub fn restart(&mut self) -> Result<(), RenderError> {
         eprintln!("StreamEncoder: restarting ffmpeg...");
-        drop(self.child.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.process.shutdown(Duration::ZERO);
 
-        self.child = spawn_encoder(&self.config)?;
+        self.process = FfmpegProcess::new(spawn_encoder(&self.config)?)?;
         eprintln!(
             "StreamEncoder: restarted (was at frame {})",
             self.frame_count
@@ -263,15 +432,13 @@ impl StreamEncoder {
 
 impl Drop for StreamEncoder {
     fn drop(&mut self) {
-        // Close stdin to signal EOF to ffmpeg.
-        drop(self.child.stdin.take());
-        match self.child.wait() {
-            Ok(status) => {
-                if !status.success() {
-                    eprintln!("ffmpeg exited with status: {status}");
-                }
+        // Closing stdin signals EOF; ffmpeg flushes its output and exits.
+        match self.process.shutdown(SHUTDOWN_GRACE) {
+            Some(status) if !status.success() => {
+                eprintln!("ffmpeg exited with status: {status}");
             }
-            Err(e) => eprintln!("failed to wait for ffmpeg: {e}"),
+            Some(_) => {}
+            None => eprintln!("failed to wait for ffmpeg"),
         }
     }
 }
@@ -405,4 +572,51 @@ fn spawn_ffmpeg(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     cmd.spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect(input: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        forward_lines(input, |l| lines.push(l.to_owned()));
+        lines
+    }
+
+    #[test]
+    fn forward_lines_splits_on_cr_and_lf() {
+        let lines = collect(b"first\nsecond\r\nthird\rlast");
+        assert_eq!(lines, ["first", "second", "third", "last"]);
+    }
+
+    #[test]
+    fn forward_lines_skips_blank_and_truncates_long_lines() {
+        let mut input = b"\n  \n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', MAX_LOG_LINE * 3));
+        input.extend_from_slice(b"\nnext\n");
+        let lines = collect(&input);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), MAX_LOG_LINE);
+        assert_eq!(lines[1], "next");
+    }
+
+    #[test]
+    fn log_limiter_caps_lines_per_window_and_reports_suppressed() {
+        let t0 = Instant::now();
+        let mut limiter = LogLimiter::new(t0);
+        let mut out = Vec::new();
+        for i in 0..(MAX_LOG_LINES_PER_WINDOW + 5) {
+            limiter.emit(t0, &format!("line {i}"), |m| out.push(m.to_owned()));
+        }
+        assert_eq!(out.len(), MAX_LOG_LINES_PER_WINDOW as usize);
+
+        // Next window: suppressed count is reported, then lines flow again.
+        limiter.emit(t0 + LOG_WINDOW, "fresh", |m| out.push(m.to_owned()));
+        assert_eq!(out[out.len() - 2], "(5 more lines suppressed)");
+        assert_eq!(out[out.len() - 1], "fresh");
+
+        limiter.finish(|m| out.push(m.to_owned()));
+        assert_eq!(out.last().unwrap(), "fresh");
+    }
 }
