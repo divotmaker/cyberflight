@@ -9,10 +9,7 @@ use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::target::{Target, generate_target_rings};
 
 use crate::error::RenderError;
-use crate::pipeline::{GridPipeline, GridPushConstants};
-
-/// Clip bounds that disable clipping.
-const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
+use crate::pipeline::{GridPipeline, GridPushConstants, NO_CLIP};
 
 /// Creates a host-visible vertex buffer holding `vertices`.
 pub(crate) type CreateVertexBuffer = fn(
@@ -50,11 +47,12 @@ impl TargetRings {
         }))
     }
 
-    /// Record the ring draw: 1 px lines in [`color::TARGET_RING`].
+    /// Record the ring draw: 1 px lines in [`color::TARGET_RING`]. Binds
+    /// `pipeline` itself, so any pipeline may be bound before the call.
     ///
     /// # Safety
-    /// Must be called within an active render pass of `pipeline`, with
-    /// viewport and scissor set.
+    /// Must be called within an active render pass compatible with
+    /// `pipeline`, with viewport and scissor set.
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,

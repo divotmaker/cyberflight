@@ -15,7 +15,7 @@ use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
-use crate::pipeline::{GridPipeline, GridPushConstants};
+use crate::pipeline::{GridPipeline, GridPushConstants, NO_CLIP};
 use crate::readback::FrameBuffers;
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::build_scene_geometry;
@@ -95,9 +95,6 @@ pub struct OffscreenRenderer {
 
 /// Offscreen image format (RGBA8 sRGB for correct gamma in PNG output).
 const OFFSCREEN_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
-
-/// Clip bounds that effectively disable clipping (huge region).
-const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 impl OffscreenRenderer {
     /// Create a headless renderer for the given grid configuration.
@@ -1136,16 +1133,17 @@ impl OffscreenRenderer {
                 Self::upload_to_mapped(alloc, &glow_verts, self.flight_glow_capacity);
         }
 
-        // Rebuild RT TLAS with updated ball/trail positions.
+        // Rebuild RT TLAS with updated ball/trail positions. Reflections
+        // follow the newest flight, the one the HUD and chase camera show.
         if let Some(ref mut rt_pipeline) = self.rt_pipeline {
-            // Collect trail points for RT geometry.
-            let rt_trail_points: Vec<glam::Vec3> = flights
+            let newest = flights.last();
+            let rt_trail_points: Vec<glam::Vec3> = newest
                 .iter()
                 .flat_map(|f| f.trail_points.iter().map(|tp| tp.position))
                 .collect();
 
-            if let Some(first_ball) = flights.first() {
-                self.rt_ball_center = first_ball.ball_pos;
+            if let Some(newest) = newest {
+                self.rt_ball_center = newest.ball_pos;
             }
             self.rt_trail_fade_dist = rt_trail_points
                 .windows(2)

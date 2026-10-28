@@ -24,14 +24,11 @@ pub struct FlightRenderData {
 use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::mode::RenderMode;
-use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
+use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline, NO_CLIP};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::targets::TargetRings;
 use crate::window::Swapchain;
-
-/// Clip bounds that effectively disable clipping (huge region).
-const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 /// Fraction of screen width used by the chase camera viewport (right side).
 const CHASE_VIEWPORT_FRAC: f32 = 0.20;
@@ -746,7 +743,8 @@ impl Renderer {
         let mut fill_verts: Vec<GridVertex> = Vec::new();
         let mut glow_verts: Vec<GridVertex> = Vec::new();
 
-        // Track RT scene state: use the first flight's ball + trail for RT reflections.
+        // Track RT scene state: reflections show the newest flight's ball +
+        // trail, the flight the HUD and chase camera follow.
         let mut new_rt_ball =
             glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
         let mut new_rt_trail: Vec<glam::Vec3> = Vec::new();
@@ -779,10 +777,10 @@ impl Renderer {
                 ));
             }
 
-            // Use the first flight for RT reflections.
+            // Use the newest flight for RT reflections.
             // Filter trail points by the same time-based fade as the raster trail
             // so the RT reflection disappears in sync with the visible tracer.
-            if i == 0 {
+            if i + 1 == flights.len() {
                 let ball_center = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
                 let trail_positions: Vec<glam::Vec3> = flight
                     .trail_points

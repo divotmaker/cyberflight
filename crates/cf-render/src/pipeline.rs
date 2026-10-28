@@ -12,9 +12,12 @@ pub struct GridPushConstants {
     pub color: [f32; 4],
     /// World-space clip bounds [min_x, min_z, max_x, max_z].
     /// Fragments outside these XZ bounds are discarded.
-    /// Set to large values (e.g. ±1e6) to disable clipping.
+    /// [`NO_CLIP`] disables clipping.
     pub clip_bounds: [f32; 4],
 }
+
+/// Clip bounds that effectively disable clipping (huge region).
+pub(crate) const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 /// Rasterization pipelines for the neon scene.
 ///
