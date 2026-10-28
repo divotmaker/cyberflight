@@ -244,6 +244,61 @@ mod tests {
         assert_eq!(off_line.ground.contacts[0].surface, Surface::FAIRWAY);
     }
 
+    #[test]
+    fn pulled_shot_lands_on_target_left_of_line() {
+        let input = ShotInput {
+            launch_azimuth_deg: -4.0,
+            ..ShotInput::seven_iron()
+        };
+        let land = landing(&input);
+        assert!(
+            land.z < -5.0,
+            "pulled shot should land left: z={:.2}",
+            land.z
+        );
+        assert!(physics_to_scene(land).x > 5.0);
+
+        let mirrored = DVec3::new(land.x, land.y, -land.z);
+        let on_line = shot(&input, &[target_at(land, 3.0)]);
+        let off_line = shot(&input, &[target_at(mirrored, 3.0)]);
+        assert_eq!(on_line.ground.contacts[0].surface, Surface::GREEN);
+        assert_eq!(off_line.ground.contacts[0].surface, Surface::FAIRWAY);
+    }
+
+    #[test]
+    fn hook_lands_on_target_left_of_line() {
+        let input = ShotInput {
+            launch_azimuth_deg: -1.0,
+            sidespin_rpm: -900.0,
+            ..ShotInput::seven_iron()
+        };
+        let land = landing(&input);
+        assert!(land.z < -5.0, "hook should land left: z={:.2}", land.z);
+        let c = physics_to_scene(land);
+        assert!(screen_x(c) < 0.0, "hook lands on the left of the screen");
+
+        // A green centred on the landing, on scene +X (the golfer's left),
+        // catches it; the same green mirrored to the right does not.
+        let left = vec![Target {
+            center: [c.x as f32, 0.0, c.z as f32],
+            num_rings: 1,
+            ring_spacing_m: 3.0,
+            label: "L".to_owned(),
+        }];
+        let right = vec![Target {
+            center: [-c.x as f32, 0.0, c.z as f32],
+            ..left[0].clone()
+        }];
+        assert_eq!(
+            shot(&input, &left).ground.contacts[0].surface,
+            Surface::GREEN
+        );
+        assert_eq!(
+            shot(&input, &right).ground.contacts[0].surface,
+            Surface::FAIRWAY
+        );
+    }
+
     // LATERAL SIGN: a slice (positive azimuth and sidespin) finishes right
     // of the target line and is drawn on the right of the screen; a hook
     // mirrors it.
