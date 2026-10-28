@@ -197,6 +197,14 @@ mod tests {
     }
 
     #[test]
+    fn rt_trail_single_point() {
+        let rt = RtTrail::new(&[point(0.0, 0.0), point(30.0, 2.5)], 4.0, 3.0);
+        assert_eq!(rt.points, vec![glam::Vec3::new(0.0, 0.0, 30.0)]);
+        assert_eq!(rt.fade_dist, 0.0);
+        assert!((rt.tail_t - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn rt_trail_empty_when_all_points_aged_out() {
         let rt = RtTrail::new(&[point(0.0, 0.0), point(5.0, 0.5)], 10.0, 3.0);
         assert_eq!(rt, RtTrail::default());

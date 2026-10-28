@@ -60,9 +60,9 @@ impl RtPushConstants {
 
 /// Format of the RT reflection storage image (`rgba16f` in `rt.rgen`).
 ///
-/// It holds linear colour that the composite pass blends into an sRGB target,
-/// so it needs more precision than 8 bits for dark tones. Vulkan requires
-/// storage, sampled and linear-filter support for this format.
+/// It holds linear colour in [0, 1] that the composite pass samples (nearest)
+/// and blends into an sRGB target, so it needs more precision than 8 bits for
+/// dark tones. Vulkan requires storage and sampled support for this format.
 const STORAGE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
@@ -1264,8 +1264,37 @@ mod tests {
 
     #[test]
     fn push_constants_size() {
-        // Must fit in 128-byte minimum guarantee
-        assert!(std::mem::size_of::<RtPushConstants>() <= 128);
+        // The std430 push block in rt.rgen / rt.rchit, within the 128-byte
+        // minimum guarantee.
+        assert_eq!(std::mem::size_of::<RtPushConstants>(), 112);
+    }
+
+    #[test]
+    fn push_constants_lanes() {
+        let camera = Camera::default();
+        let pc = RtPushConstants::new(
+            &camera,
+            16.0 / 9.0,
+            [12.0, 34.0],
+            glam::Vec3::new(1.0, 2.0, 3.0),
+            56.0,
+            0.25,
+        );
+        assert_eq!(
+            pc.camera_pos,
+            [
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                12.0
+            ]
+        );
+        let mut proj = camera.projection_matrix(16.0 / 9.0);
+        proj.y_axis.y *= -1.0;
+        let inv_view_proj = (proj * camera.view_matrix()).inverse();
+        assert_eq!(pc.inv_view_proj, inv_view_proj.to_cols_array_2d());
+        assert_eq!(pc.params, [0.25, 0.0, 0.0, 34.0]);
+        assert_eq!(pc.ball_pos, [1.0, 2.0, 3.0, 56.0]);
     }
 
     #[test]

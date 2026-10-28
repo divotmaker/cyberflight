@@ -19,7 +19,7 @@ use crate::green::GreenEdge;
 use crate::pipeline::{GridPipeline, GridPushConstants};
 use crate::readback::FrameBuffers;
 use crate::render::FlightRenderData;
-use crate::rt_offscreen::{RtTrail, arc_length, build_scene_geometry, trail_fade_t};
+use crate::rt_offscreen::{RtTrail, build_scene_geometry};
 use crate::rt_pipeline::{RtPipeline, RtPushConstants};
 
 /// Offscreen renderer for headless PNG generation.
@@ -1107,24 +1107,22 @@ impl OffscreenRenderer {
         }
 
         // Rebuild RT TLAS with updated ball/trail positions. Reflections
-        // follow the newest flight, the one the HUD and chase camera show.
+        // follow the newest flight, the one the HUD and chase camera show,
+        // and reflect the part of its trail the raster tracer still draws.
         if let Some(ref mut rt_pipeline) = self.rt_pipeline {
             let newest = flights.last();
-            let rt_trail_points: Vec<glam::Vec3> = newest
-                .iter()
-                .flat_map(|f| f.trail_points.iter().map(|tp| tp.position))
-                .collect();
+            let trail = newest.map_or_else(RtTrail::default, |f| {
+                RtTrail::new(&f.trail_points, f.current_time, DEFAULT_TRAIL_LIFETIME)
+            });
 
             if let Some(newest) = newest {
                 self.rt_ball_center = newest.ball_pos;
-                self.rt_trail_tail_t = newest.trail_points.first().map_or(0.0, |p| {
-                    trail_fade_t(p.time, newest.current_time, DEFAULT_TRAIL_LIFETIME)
-                });
+                self.rt_trail_tail_t = trail.tail_t;
             }
-            self.rt_trail_fade_dist = arc_length(&rt_trail_points);
+            self.rt_trail_fade_dist = trail.fade_dist;
 
             let grid_config = cf_scene::grid::GridConfig::default();
-            let geometries = build_scene_geometry(&grid_config, &tee, &rt_trail_points);
+            let geometries = build_scene_geometry(&grid_config, &tee, &trail.points);
             if let Err(e) = rt_pipeline.update_scene(&mut self.gpu, &geometries) {
                 eprintln!("RT scene update failed: {e}");
             }

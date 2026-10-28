@@ -56,5 +56,8 @@ void main() {
 
     // Preserve alpha: transparent where no floor was hit,
     // reflection color where floor reflected something.
-    imageStore(outputImage, pixel, payload);
+    // Store in [0, 1] with NaN as 0, so the composite blur never spreads
+    // out-of-range or NaN values.
+    vec4 color = clamp(mix(payload, vec4(0.0), isnan(payload)), 0.0, 1.0);
+    imageStore(outputImage, pixel, color);
 }
