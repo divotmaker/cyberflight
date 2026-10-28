@@ -228,25 +228,11 @@ impl OffscreenRenderer {
         Ok(())
     }
 
-    /// Update dynamic flight geometry for the next `render`, and rebuild the
-    /// RT scene from the newest flight.
+    /// Update dynamic flight geometry for the next `render`. Reflections
+    /// show the newest flight's ball and the part of its trail the tracer
+    /// still draws, or the ball on the tee when there is no flight.
     pub fn update_flight(&mut self, flights: &[FlightRenderData], camera: &Camera) {
-        use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
-
-        // Reflections follow the newest flight, the one the HUD and chase
-        // camera show, and reflect the part of its trail the raster tracer
-        // still draws. With no flight the reflected ball stays where the
-        // last flight left it. The acceleration structures are rebuilt only
-        // when the reflected ball or trail moves.
-        let newest = flights.last();
-        self.recorder
-            .update_flight(&mut self.gpu, flights, camera, |current| {
-                let trail = newest.map_or_else(RtTrail::default, |f| {
-                    RtTrail::new(&f.trail_points, f.current_time, DEFAULT_TRAIL_LIFETIME)
-                });
-                let ball_centre = newest.map_or(current.ball_centre(), |f| f.ball_pos);
-                RtSceneState::new(ball_centre, trail)
-            });
+        self.recorder.update_flight(&mut self.gpu, flights, camera);
     }
 
     /// Update HUD overlay geometry (pixel coordinates) for the next `render`.

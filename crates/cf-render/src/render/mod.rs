@@ -7,7 +7,6 @@ use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::TeeBox;
-use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
 pub use crate::flight::FlightRenderData;
 
@@ -17,7 +16,6 @@ use crate::gpu::{Image2d, Image2dDesc};
 use crate::mode::RenderMode;
 use crate::recorder::{FrameTarget, SceneRecorder};
 use crate::reflections::RtSceneState;
-use crate::rt_offscreen::RtTrail;
 use crate::window::Swapchain;
 
 /// Complete renderer: owns GPU resources and draws frames.
@@ -53,11 +51,7 @@ impl Renderer {
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
         // Reflections when the device supports them; raster if they fail.
-        let tee = TeeBox::default();
-        let rt_scene = RtSceneState::new(
-            glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
-            RtTrail::default(),
-        );
+        let rt_scene = RtSceneState::on_tee(&TeeBox::default());
         let recorder = SceneRecorder::new(
             &mut gpu,
             swapchain.format,
@@ -417,32 +411,12 @@ impl Renderer {
     /// Update dynamic flight geometry for the next frame.
     ///
     /// Builds ball + ball glow + trail vertices for each active flight; the
-    /// next `draw_frame` uploads them. Rebuilds the RT scene when the
-    /// reflected ball or trail changed.
+    /// next `draw_frame` uploads them. Reflections show the newest flight's
+    /// ball and the part of its trail the tracer still draws, or the ball on
+    /// the tee; the RT scene is rebuilt only when the reflected ball or trail
+    /// changed.
     pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
-        // Reflections show the newest flight's ball + trail, the flight the
-        // HUD and chase camera follow, or the ball on the tee. The reflected
-        // trail is the part of the trail the raster tracer still draws, so
-        // the reflection disappears in sync with the visible tracer. The
-        // tail fade value changes as the trail ages, even between
-        // acceleration-structure rebuilds.
-        let tee = TeeBox::default();
-        let newest = flights.last();
-        self.recorder
-            .update_flight(&mut self.gpu, flights, camera, |_| match newest {
-                Some(flight) => RtSceneState::new(
-                    flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0),
-                    RtTrail::new(
-                        &flight.trail_points,
-                        flight.current_time,
-                        DEFAULT_TRAIL_LIFETIME,
-                    ),
-                ),
-                None => RtSceneState::new(
-                    glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
-                    RtTrail::default(),
-                ),
-            });
+        self.recorder.update_flight(&mut self.gpu, flights, camera);
     }
 
     /// Update HUD overlay geometry (pixel coordinates) for the next frame.

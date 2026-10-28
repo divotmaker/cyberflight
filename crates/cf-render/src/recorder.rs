@@ -231,19 +231,18 @@ impl SceneRecorder {
     }
 
     /// Build the next frame's flight geometry from `flights`, with trail
-    /// glows facing `camera`. With reflections, `rt_scene` gets the state
-    /// they show and returns the one to show next.
+    /// glows facing `camera`, and point the reflections at the newest
+    /// flight ([`RtSceneState::from_flights`]).
     pub(crate) fn update_flight(
         &mut self,
         gpu: &mut GpuContext,
         flights: &[FlightRenderData],
         camera: &Camera,
-        rt_scene: impl FnOnce(&RtSceneState) -> RtSceneState,
     ) {
         flight_vertices(flights, camera.position, &self.tee, &mut self.content);
         if let Some(reflections) = &mut self.reflections {
-            let scene = rt_scene(reflections.scene());
-            reflections.set_scene(gpu, scene, &GridConfig::default(), &self.tee);
+            let scene = RtSceneState::from_flights(flights, &self.tee);
+            reflections.set_scene(gpu, scene, &self.grid, &self.tee);
         }
     }
 

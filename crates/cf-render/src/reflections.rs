@@ -7,13 +7,15 @@ use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
 use cf_scene::grid::GridConfig;
-use cf_scene::tee::TeeBox;
+use cf_scene::tee::{TEE_ELEVATION, TeeBox};
+use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
 use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
+use crate::flight::FlightRenderData;
 use crate::rt_offscreen::{RtTrail, build_scene_geometry};
-use crate::rt_pipeline::{RtPipeline, RtPushConstants};
+use crate::rt_pipeline::{RtGeometry, RtPipeline, RtPushConstants};
 
 /// What the reflections show: the analytic ball and the reflected trail.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,8 +31,35 @@ impl RtSceneState {
         Self { ball_centre, trail }
     }
 
-    pub(crate) fn ball_centre(&self) -> Vec3 {
-        self.ball_centre
+    /// The ball resting on `tee`'s tee box, no trail.
+    pub(crate) fn on_tee(tee: &TeeBox) -> Self {
+        Self::new(
+            Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0),
+            RtTrail::default(),
+        )
+    }
+
+    /// The newest of `flights` (the one the HUD and chase camera follow):
+    /// its ball, one radius above `ball_pos`, and the part of its trail the
+    /// raster tracer still draws. With no flight, the ball on the tee.
+    pub(crate) fn from_flights(flights: &[FlightRenderData], tee: &TeeBox) -> Self {
+        match flights.last() {
+            Some(flight) => Self::new(
+                flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0),
+                RtTrail::new(
+                    &flight.trail_points,
+                    flight.current_time,
+                    DEFAULT_TRAIL_LIFETIME,
+                ),
+            ),
+            None => Self::on_tee(tee),
+        }
+    }
+
+    /// The acceleration-structure geometry: the floor of `grid`, the tee
+    /// box of `tee` and the trail.
+    fn geometry(&self, grid: &GridConfig, tee: &TeeBox) -> Vec<RtGeometry> {
+        build_scene_geometry(grid, tee, &self.trail.points)
     }
 
     /// Whether both states build the same acceleration structures: the same
@@ -86,7 +115,7 @@ impl Reflections {
         tee: &TeeBox,
         scene: RtSceneState,
     ) -> Result<Self, RenderError> {
-        let geometries = build_scene_geometry(grid, tee, &scene.trail.points);
+        let geometries = scene.geometry(grid, tee);
         let pipeline = RtPipeline::new(gpu, extent.width, extent.height, &geometries)?;
         let composite = match CompositePass::new(&gpu.device, color_format, pipeline.storage.view())
         {
@@ -104,11 +133,6 @@ impl Reflections {
         })
     }
 
-    /// The state the reflections show.
-    pub(crate) fn scene(&self) -> &RtSceneState {
-        &self.scene
-    }
-
     /// Show `scene`. Rebuilds the acceleration structures (with the floor of
     /// `grid` and the tee box of `tee`) only when the geometry changes;
     /// `update_scene` waits for the device to go idle first. The trail fade
@@ -122,7 +146,7 @@ impl Reflections {
         tee: &TeeBox,
     ) {
         if !scene.same_geometry(&self.scene) {
-            let geometries = build_scene_geometry(grid, tee, &scene.trail.points);
+            let geometries = scene.geometry(grid, tee);
             if let Err(e) = self.pipeline.update_scene(gpu, &geometries) {
                 eprintln!("RT scene update failed: {e}");
             }
@@ -266,8 +290,75 @@ mod tests {
     fn fade_values_are_not_geometry() {
         let a = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 1.0, 0.2));
         let b = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 1.0, 0.7));
+        let c = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 5.0, 0.2));
         assert!(a.same_geometry(&b));
+        assert!(a.same_geometry(&c));
         assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
+
+    fn flight(z: f32, current_time: f64) -> FlightRenderData {
+        FlightRenderData {
+            ball_pos: Vec3::new(1.0, 5.0, z),
+            trail_points: (0..40)
+                .map(|i| cf_scene::trail::TrailPoint {
+                    position: Vec3::new(0.0, i as f32 * 0.1, i as f32 * z / 40.0),
+                    time: f64::from(i) * 0.1,
+                })
+                .collect(),
+            current_time,
+        }
+    }
+
+    #[test]
+    fn no_flight_is_the_ball_on_the_tee() {
+        let tee = TeeBox::default();
+        let state = RtSceneState::from_flights(&[], &tee);
+        assert_eq!(state, RtSceneState::on_tee(&tee));
+        assert_eq!(
+            state.ball_centre,
+            Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0)
+        );
+        assert_eq!(state.trail, RtTrail::default());
+    }
+
+    #[test]
+    fn the_newest_flight_is_reflected_one_radius_up() {
+        let tee = TeeBox::default();
+        let older = flight(30.0, 3.9);
+        let newest = flight(60.0, 3.5);
+        let state = RtSceneState::from_flights(&[older, newest], &tee);
+        let newest = flight(60.0, 3.5);
+        assert_eq!(
+            state.ball_centre,
+            newest.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0)
+        );
+        let expected = RtTrail::new(
+            &newest.trail_points,
+            newest.current_time,
+            DEFAULT_TRAIL_LIFETIME,
+        );
+        assert!(expected.points.len() < newest.trail_points.len());
+        assert_eq!(state.trail, expected);
+    }
+
+    #[test]
+    fn geometry_uses_the_given_grid() {
+        let tee = TeeBox::default();
+        let state = RtSceneState::from_flights(&[flight(60.0, 3.5)], &tee);
+        let grid = GridConfig {
+            downrange: 200.0,
+            ..GridConfig::default()
+        };
+        let built = state.geometry(&grid, &tee);
+        let expected = build_scene_geometry(&grid, &tee, &state.trail.points);
+        let default_floor = &build_scene_geometry(&GridConfig::default(), &tee, &[])[0];
+        assert_eq!(built.len(), expected.len());
+        for (b, e) in built.iter().zip(&expected) {
+            assert_eq!(b.positions, e.positions);
+            assert_eq!(b.geom_type, e.geom_type);
+        }
+        assert_ne!(built[0].positions, default_floor.positions);
     }
 
     #[test]
