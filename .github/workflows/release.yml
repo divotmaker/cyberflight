@@ -17,15 +17,23 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Format check
+        run: cargo fmt --check --all
+
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --lib
+        run: cargo test --workspace --locked
+
+      - name: Docs
+        run: cargo doc --no-deps --workspace --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   version-bump:
     name: Version bump
@@ -47,13 +55,14 @@ jobs:
           for toml in app/Cargo.toml crates/cf-scene/Cargo.toml crates/cf-render/Cargo.toml crates/cf-test/Cargo.toml; do
             sed -i "s/^version = \".*\"/version = \"${NEXT_VERSION}\"/" "$toml"
           done
+          cargo update --workspace
           echo "NEXT_VERSION=${NEXT_VERSION}" >> "$GITHUB_ENV"
 
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add app/Cargo.toml crates/cf-scene/Cargo.toml crates/cf-render/Cargo.toml crates/cf-test/Cargo.toml
+          git add app/Cargo.toml crates/cf-scene/Cargo.toml crates/cf-render/Cargo.toml crates/cf-test/Cargo.toml Cargo.lock
           git commit -m "chore: prepare for next release (${NEXT_VERSION})"
           git push
 
@@ -88,7 +97,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p cyberflight
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cyberflight
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
