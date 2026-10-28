@@ -19,14 +19,14 @@ pub struct GridPushConstants {
 /// Clip bounds that effectively disable clipping (huge region).
 pub(crate) const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
-/// Rasterization pipelines for the neon scene.
-///
-/// Contains both a LINE_LIST pipeline (grid) and a TRIANGLE_LIST pipeline
-/// (filled geometry like tee box, ball). Both share the same render pass,
-/// layout, shaders, and vertex format.
 /// Depth/stencil format for floor reflection masking.
 pub const DEPTH_STENCIL_FORMAT: vk::Format = vk::Format::D24_UNORM_S8_UINT;
 
+/// Rasterization pipelines for the neon scene.
+///
+/// Contains a LINE_LIST pipeline (grid) and two TRIANGLE_LIST pipelines
+/// (alpha-blended fills like the tee box and ball, and additive glow). All
+/// share the same render pass, layout, shaders, and vertex format.
 pub struct GridPipeline {
     pub render_pass: vk::RenderPass,
     pub pipeline_layout: vk::PipelineLayout,

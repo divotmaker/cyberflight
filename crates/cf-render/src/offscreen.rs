@@ -101,8 +101,6 @@ impl OffscreenRenderer {
     /// Enables raytracing if hardware supports it.
     pub fn new(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
         let config = GpuConfig {
-            width,
-            height,
             validation: cfg!(debug_assertions),
             enable_raytracing: true,
         };
@@ -292,8 +290,6 @@ impl OffscreenRenderer {
         camera: &Camera,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
-            width,
-            height,
             validation: cfg!(debug_assertions),
             enable_raytracing: false,
         };
@@ -482,7 +478,7 @@ impl OffscreenRenderer {
             &tee,
             ball_center,
             &geometries,
-            Some((ball_pos, trail_points, current_time, max_lifetime, camera)),
+            Some((trail_points, current_time, max_lifetime, camera)),
             trim_len,
         )
     }
@@ -496,12 +492,10 @@ impl OffscreenRenderer {
         tee: &TeeBox,
         ball_center: glam::Vec3,
         geometries: &[crate::rt_pipeline::RtGeometry],
-        flight: Option<(glam::Vec3, &[TrailPoint], f64, f64, &Camera)>,
+        flight: Option<(&[TrailPoint], f64, f64, &Camera)>,
         trail_fade_dist: f32,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
-            width,
-            height,
             validation: cfg!(debug_assertions),
             enable_raytracing: true,
         };
@@ -548,7 +542,7 @@ impl OffscreenRenderer {
             trail_line_buffer,
             trail_line_allocation,
             trail_line_count,
-        ) = if let Some((ball_pos, trail_points, current_time, max_lifetime, camera)) = flight {
+        ) = if let Some((trail_points, current_time, max_lifetime, camera)) = flight {
             let tee_fill_verts = generate_tee_fill(tee);
             let tee_border_verts = generate_tee_border(tee);
             let ball_verts = generate_ball_at(ball_center, tee.ball_radius, 12, 24);
@@ -580,9 +574,6 @@ impl OffscreenRenderer {
                 let (b, a) = Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &tlv)?;
                 (Some(b), Some(a), c)
             };
-
-            // Suppress unused variable warning for ball_pos (used via ball_center).
-            let _ = ball_pos;
 
             (tfc, tbc, bc, fb, fa, gc, gb, ga, tlb, tla, tlc)
         } else {
@@ -725,8 +716,8 @@ impl OffscreenRenderer {
         })
     }
 
-    /// Whether this renderer has RT reflection compositing enabled.
-    #[must_use]
+    /// Vulkan view-projection matrix for `camera` at `aspect` (Y flipped for
+    /// Vulkan NDC), as column arrays for push constants.
     fn compute_view_proj(camera: &Camera, aspect: f32) -> [[f32; 4]; 4] {
         let view = camera.view_matrix();
         let mut proj = camera.projection_matrix(aspect);
@@ -937,6 +928,8 @@ impl OffscreenRenderer {
         } // unsafe
     }
 
+    /// Whether this renderer has RT reflection compositing enabled.
+    #[must_use]
     pub fn has_rt(&self) -> bool {
         self.rt_pipeline.is_some()
     }
@@ -1414,7 +1407,7 @@ impl OffscreenRenderer {
 
             // ── RT reflection compositing ──
             if rt_active {
-                self.record_rt_composite(camera, width, height, extent, target);
+                self.record_rt_composite(camera, width, height, extent);
             }
 
             // Barrier: render pass output -> transfer read
@@ -1532,7 +1525,6 @@ impl OffscreenRenderer {
         width: u32,
         height: u32,
         extent: vk::Extent2D,
-        _target: &OffscreenTarget,
     ) {
         // SAFETY: The command buffer is in the recording state, outside any render pass.
         // All Vulkan handles are valid (created in the constructor, not yet destroyed).

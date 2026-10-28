@@ -10,10 +10,6 @@ use crate::error::RenderError;
 /// GPU configuration.
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
-    /// Render width in pixels.
-    pub width: u32,
-    /// Render height in pixels.
-    pub height: u32,
     /// Enable Vulkan validation layers.
     pub validation: bool,
     /// Request ray tracing support (enabled if hardware supports it).
@@ -23,8 +19,6 @@ pub struct GpuConfig {
 impl Default for GpuConfig {
     fn default() -> Self {
         Self {
-            width: 1920,
-            height: 1080,
             validation: cfg!(debug_assertions),
             enable_raytracing: false,
         }
@@ -42,7 +36,6 @@ const RT_DEVICE_EXTENSIONS: &[&CStr] = &[
 ///
 /// Owns the Vulkan instance, device, queues, and allocator.
 pub struct GpuContext {
-    pub config: GpuConfig,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub physical_device: vk::PhysicalDevice,
@@ -92,7 +85,7 @@ impl GpuContext {
             eprintln!("Ray tracing requested but not supported by this device");
         }
 
-        let device = Self::create_device(
+        let (device, wide_lines) = Self::create_device(
             &instance,
             physical_device,
             queue_family_index,
@@ -101,13 +94,13 @@ impl GpuContext {
         )?;
 
         let ctx = Self::finish(
-            config,
             entry,
             instance,
             physical_device,
             device,
             queue_family_index,
             has_rt,
+            wide_lines,
         )?;
         Ok((ctx, surface, surface_loader))
     }
@@ -130,7 +123,7 @@ impl GpuContext {
             eprintln!("Ray tracing requested but not supported by this device");
         }
 
-        let device = Self::create_device(
+        let (device, wide_lines) = Self::create_device(
             &instance,
             physical_device,
             queue_family_index,
@@ -139,24 +132,24 @@ impl GpuContext {
         )?;
 
         Self::finish(
-            config,
             entry,
             instance,
             physical_device,
             device,
             queue_family_index,
             has_rt,
+            wide_lines,
         )
     }
 
     fn finish(
-        config: GpuConfig,
         entry: ash::Entry,
         instance: ash::Instance,
         physical_device: vk::PhysicalDevice,
         device: ash::Device,
         queue_family_index: u32,
         rt_supported: bool,
+        wide_lines: bool,
     ) -> Result<Self, RenderError> {
         // SAFETY: Queue was created with the device.
         let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -176,12 +169,7 @@ impl GpuContext {
             eprintln!("Ray tracing: enabled");
         }
 
-        // SAFETY: Querying physical device features.
-        let supported = unsafe { instance.get_physical_device_features(physical_device) };
-        let wide_lines = supported.wide_lines == vk::TRUE;
-
         Ok(Self {
-            config,
             entry,
             instance,
             physical_device,
@@ -336,13 +324,14 @@ impl GpuContext {
         })
     }
 
+    /// Create the logical device. Also returns whether `wide_lines` was enabled.
     fn create_device(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         queue_family_index: u32,
         enable_swapchain: bool,
         enable_rt: bool,
-    ) -> Result<ash::Device, RenderError> {
+    ) -> Result<(ash::Device, bool), RenderError> {
         let queue_priorities = [1.0_f32];
         let queue_create_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -393,7 +382,7 @@ impl GpuContext {
                 .map_err(RenderError::Vulkan)?
         };
 
-        Ok(device)
+        Ok((device, wide_lines))
     }
 
     fn create_command_pool(

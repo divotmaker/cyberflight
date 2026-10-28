@@ -8,7 +8,6 @@ pub struct Swapchain {
     pub swapchain_loader: ash::khr::swapchain::Device,
     pub surface: vk::SurfaceKHR,
     pub swapchain: vk::SwapchainKHR,
-    pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
     pub extent: vk::Extent2D,
     pub format: vk::Format,
@@ -151,7 +150,6 @@ impl Swapchain {
             swapchain_loader,
             surface,
             swapchain,
-            images,
             image_views,
             extent,
             format: surface_format.format,
@@ -235,14 +233,13 @@ impl Swapchain {
         self.extent = extent;
 
         // SAFETY: Getting new swapchain images.
-        self.images = unsafe {
+        let images = unsafe {
             self.swapchain_loader
                 .get_swapchain_images(self.swapchain)
                 .map_err(RenderError::Vulkan)?
         };
 
-        self.image_views = self
-            .images
+        self.image_views = images
             .iter()
             .map(|&image| {
                 let view_info = vk::ImageViewCreateInfo::default()

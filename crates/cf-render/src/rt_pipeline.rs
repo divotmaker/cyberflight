@@ -66,7 +66,7 @@ impl RtPushConstants {
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
 pub const GEOM_FLOOR: u32 = 0;
-// GEOM_BALL (1) removed — ball reflections are analytical in the floor shader.
+// The ball has no RT geometry: the floor shader reflects it analytically.
 pub const GEOM_TEE_BOX: u32 = 2;
 pub const GEOM_TRAIL: u32 = 3;
 pub const GEOM_TEE_BOX_BORDER: u32 = 4;
@@ -112,15 +112,16 @@ pub struct RtPipeline {
     instance_buffer: Option<vk::Buffer>,
     instance_allocation: Option<Allocation>,
 
-    // Scratch buffers (kept alive until build completes, then could be freed)
+    // Scratch buffers of the current BLAS/TLAS build, freed with the AS on the
+    // next `update_scene` or on drop.
     scratch_buffers: Vec<(vk::Buffer, Option<Allocation>)>,
 
     // Storage image for RT output
     pub storage_image: vk::Image,
     pub storage_view: vk::ImageView,
     storage_allocation: Option<Allocation>,
-    pub width: u32,
-    pub height: u32,
+    width: u32,
+    height: u32,
 }
 
 /// Triangle geometry for BLAS building.
@@ -129,7 +130,8 @@ pub struct RtGeometry {
     pub positions: Vec<f32>,
     /// Geometry type ID (GEOM_FLOOR, GEOM_TEE_BOX, etc.).
     pub geom_type: u32,
-    /// 3×4 row-major transform (identity if not set).
+    /// Instance transform (identity if not set); converted to the 3×4
+    /// row-major `VkTransformMatrixKHR` when the TLAS is built.
     pub transform: glam::Mat4,
 }
 
@@ -721,7 +723,7 @@ impl RtPipeline {
     > {
         let mut instances: Vec<vk::AccelerationStructureInstanceKHR> = Vec::new();
 
-        for (i, (geom, blas)) in geometries.iter().zip(blas_list.iter()).enumerate() {
+        for (geom, blas) in geometries.iter().zip(blas_list.iter()) {
             if geom.positions.is_empty() {
                 continue;
             }
@@ -745,10 +747,11 @@ impl RtPipeline {
             };
 
             // Instance mask bits:
-            //   Bit 0 (0x01): visible to primary rays (floor only)
-            //   Bit 1 (0x02): visible to reflection rays (ball, tee box border)
-            //   Bit 2 (0x04): visible to reflections, skipped by trail continuation
-            //   Bit 7 (0x80): RT-invisible (tee box fill — raster-only occlusion)
+            //   Bit 0 (0x01): floor. Primary rays and trail continuation rays use
+            //                 cull mask 0x01.
+            //   Bit 1 (0x02): tee box border. No ray uses this bit.
+            //   Bit 2 (0x04): trail. Floor reflection rays use cull mask 0x04.
+            //   Bit 7 (0x80): tee box fill. No ray uses this bit.
             //
             // Tee box fill is excluded from all RT rays. At Y=0.001 it sits above
             // the floor and would occlude the ball in reflections and steal primary
@@ -770,7 +773,6 @@ impl RtPipeline {
                     device_handle: blas_addr,
                 },
             });
-            let _ = i; // suppress unused warning
         }
 
         let instance_count = instances.len() as u32;

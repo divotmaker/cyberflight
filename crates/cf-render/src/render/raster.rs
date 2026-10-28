@@ -34,7 +34,7 @@ impl Renderer {
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: self.config.clear_color,
+                        float32: color::BACKGROUND.to_array(),
                     },
                 },
                 vk::ClearValue {
@@ -89,7 +89,7 @@ impl Renderer {
                         color_attachment: 0,
                         clear_value: vk::ClearValue {
                             color: vk::ClearColorValue {
-                                float32: self.config.clear_color,
+                                float32: color::BACKGROUND.to_array(),
                             },
                         },
                     },

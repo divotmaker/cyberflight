@@ -21,6 +21,9 @@ hitAttributeEXT vec2 attribs;
 //   3 = trail ribbon (emissive magenta)
 //   4 = tee box border (cyan)
 //
+// The tee box instances (2, 4) are in the TLAS, but no ray's cull mask
+// includes theirs, so their branches below are never reached.
+//
 // Ball reflections are computed analytically in the floor shader
 // (no ball geometry in the TLAS).
 

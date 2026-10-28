@@ -10,7 +10,7 @@ void main() {
 
     // Slightly diffuse glass: 5x5 Gaussian blur on reflections.
     // Simulates subtle surface roughness — reflections are soft, not mirror-sharp.
-    // Blur radius scaled by 1.5 texels for a gentle ~4px diameter softening.
+    // Samples are 0.6 texels apart, so the kernel spans about 2.4 px.
     vec2 step = texel * 0.6;
 
     // 5x5 Gaussian kernel (sigma ~1.2), weights sum to 273

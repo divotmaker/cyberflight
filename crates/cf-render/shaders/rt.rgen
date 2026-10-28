@@ -38,7 +38,7 @@ void main() {
     payload = vec4(0.0, 0.0, 0.0, 0.0);
 
     // Cull mask 0x01: only hits floor (instance mask bit 0).
-    // Non-floor geometry (ball, tee box, trail) has mask 0x02/0x04,
+    // Every other instance (trail, tee box) has a different mask bit,
     // so primary rays pass through them — raster draws those instead.
     traceRayEXT(
         tlas,

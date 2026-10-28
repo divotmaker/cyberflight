@@ -79,8 +79,6 @@ impl App {
     fn init_renderer(&mut self, window: &Window) -> Result<()> {
         let size = window.inner_size();
         let config = GpuConfig {
-            width: size.width,
-            height: size.height,
             enable_raytracing: true,
             ..GpuConfig::default()
         };

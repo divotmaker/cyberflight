@@ -7,7 +7,6 @@ use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use cf_scene::camera::Camera;
-use cf_scene::color;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
 use cf_scene::target::Target;
 use cf_scene::tee::{
@@ -48,32 +47,11 @@ pub(super) struct CompositePass {
     frag_module: vk::ShaderModule,
 }
 
-/// Render configuration.
-#[derive(Debug, Clone)]
-pub struct RenderConfig {
-    /// Clear color (RGBA, linear).
-    pub clear_color: [f32; 4],
-}
-
-impl Default for RenderConfig {
-    fn default() -> Self {
-        Self {
-            clear_color: [
-                color::BACKGROUND.x,
-                color::BACKGROUND.y,
-                color::BACKGROUND.z,
-                color::BACKGROUND.w,
-            ],
-        }
-    }
-}
-
 /// Complete renderer: owns GPU resources and draws frames.
 pub struct Renderer {
     pub gpu: GpuContext,
     pub swapchain: Swapchain,
     pub pipeline: GridPipeline,
-    pub(super) config: RenderConfig,
     pub(super) framebuffers: Vec<vk::Framebuffer>,
     pub(super) vertex_buffer: vk::Buffer,
     vertex_allocation: Option<Allocation>,
@@ -303,7 +281,6 @@ impl Renderer {
             gpu,
             swapchain,
             pipeline,
-            config: RenderConfig::default(),
             framebuffers,
             vertex_buffer,
             vertex_allocation: Some(vertex_allocation),
@@ -787,7 +764,6 @@ impl Renderer {
                 let trail_positions: Vec<glam::Vec3> = flight
                     .trail_points
                     .iter()
-                    // COMMENT OUT THIS LINE TO IMPRINT TRACER REFLECTIONS
                     .filter(|p| (flight.current_time - p.time) < DEFAULT_TRAIL_LIFETIME)
                     .map(|p| p.position)
                     .collect();
