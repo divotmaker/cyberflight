@@ -38,11 +38,11 @@ const float BALL_RADIUS = 0.021335; // golf ball radius in meters
 // for a more dramatic Tron floor look).
 const float F0_GLASS = 0.10;
 
-// Emissive gain of the tracer and ball as seen in the floor: they are light
-// sources several times brighter than display white, so their Fresnel
-// reflection (~0.10 at a 45° view) stays visible. Glass tint and specular
-// use the plain Fresnel term.
-const float EMISSIVE_GAIN = 4.0;
+// Reflectance of the floor for the tracer and ball: one constant at every
+// distance and view angle, so their reflection is equally strong near and
+// far. They are light sources brighter than display white, hence > 1.
+// Glass tint and specular use the Fresnel term.
+const float EMISSIVE_REFLECTANCE = 1.1;
 
 // Colour filter of the tinted glass on emissive reflections: they lose
 // REFL_DESATURATE of their saturation and are multiplied by the cool
@@ -85,11 +85,7 @@ void main() {
             );
         }
 
-        // Trail reflection with distance fade
-        float cam_dist = length(hit_pos.xz - pc.camera_pos.xz);
-        float dist_fade = 1.0 - smoothstep(100.0, 350.0, cam_dist);
-        float emissive_refl = fresnel * EMISSIVE_GAIN;
-        vec3 trail_reflection = reflPayload.rgb * emissive_refl * dist_fade;
+        vec3 trail_reflection = reflPayload.rgb * EMISSIVE_REFLECTANCE;
 
         // Analytical ball reflection: glow intensity from the closest approach
         // of the reflected ray to the ball center (none if the ball is behind it).
@@ -110,10 +106,13 @@ void main() {
         float proj = dot(to_ball, V);
         float perp = length(to_ball - V * proj);
         float occlude = smoothstep(BALL_RADIUS * 1.5, BALL_RADIUS * 3.0, perp);
-        vec3 ball_reflection = (MAGENTA * ball_glow * 3.0 + vec3(1.0) * core_glow * 3.0) * emissive_refl * dist_fade * occlude;
+        vec3 ball_reflection = (MAGENTA * ball_glow * 3.0 + vec3(1.0) * core_glow * 3.0) * EMISSIVE_REFLECTANCE * occlude;
 
-        // Glass base tint: dark navy, stronger at grazing angles.
-        vec3 glass_base = GLASS_TINT * fresnel;
+        // Glass base tint: dark navy, stronger at grazing angles. Far floor
+        // fades into dark blue instead of pure black.
+        float cam_dist = length(hit_pos.xz - pc.camera_pos.xz);
+        float haze = smoothstep(150.0, 400.0, cam_dist);
+        vec3 glass_base = GLASS_TINT * fresnel + GLASS_TINT * 1.5 * (haze * 0.6);
 
         // Specular highlight: faint cyan gleam from an overhead light source.
         vec3 L = normalize(vec3(0.15, 1.0, 0.4));
@@ -121,18 +120,12 @@ void main() {
         float spec = pow(max(dot(N, H), 0.0), SPEC_POWER);
         vec3 specular = CYAN * SPEC_INTENSITY * spec * fresnel;
 
-        // Subtle ground haze at distance: reflections fade into dark blue
-        // instead of pure black, adding atmospheric depth.
-        float haze = smoothstep(150.0, 400.0, cam_dist);
-        vec3 haze_color = GLASS_TINT * 1.5;
         vec3 reflection = trail_reflection + ball_reflection;
 
         // Tinted glass: the reflection loses saturation and takes the glass hue.
         float lum = dot(reflection, vec3(0.2126, 0.7152, 0.0722));
         reflection = mix(reflection, vec3(lum), REFL_DESATURATE);
         reflection *= REFL_TINT;
-
-        reflection = mix(reflection, haze_color, haze * 0.6);
 
         payload = vec4(glass_base + reflection + specular, 1.0);
 
