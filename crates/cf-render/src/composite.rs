@@ -1,5 +1,6 @@
-//! The reflection composite pass: a fullscreen triangle that samples the
-//! ray-traced storage image and adds the reflections onto the raster scene.
+//! The reflection composite pass: a fullscreen triangle that reads the
+//! ray-traced storage image one texel per pixel and adds the reflections
+//! onto the raster scene.
 
 use ash::vk;
 
@@ -88,11 +89,11 @@ impl CompositePass {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         )?;
 
-        // Sampler for the RT storage image (linear: the blur taps fall
-        // between texels).
+        // Sampler for the RT storage image (`texelFetch` reads whole texels,
+        // so no filtering).
         let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);

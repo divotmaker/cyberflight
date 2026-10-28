@@ -58,9 +58,9 @@ void main() {
     );
 
     // Colour in [0, MAX_RADIANCE] (emissive reflections are brighter than
-    // display white until the composite blur spreads them) and zero where no
-    // floor was hit; alpha 1 on the floor, 0 elsewhere. NaN is stored as 0, so
-    // the blur never spreads unbounded or NaN values.
+    // display white; the composite's target clips them) and zero where no
+    // floor was hit; alpha 1 on the floor, 0 elsewhere. NaN is stored as 0,
+    // so the composite never adds unbounded or NaN values.
     vec4 color = clamp(mix(payload, vec4(0.0), isnan(payload)), vec4(0.0),
                        vec4(vec3(MAX_RADIANCE), 1.0));
     imageStore(outputImage, pixel, color);

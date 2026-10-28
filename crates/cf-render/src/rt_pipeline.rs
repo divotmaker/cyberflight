@@ -64,11 +64,11 @@ impl RtPushConstants {
 
 /// Format of the RT reflection storage image (`rgba16f` in `rt.rgen`).
 ///
-/// It holds linear colour in [0, 64] that the composite pass samples with
-/// linear filtering and blends into an sRGB target, so it needs more range
-/// than [0, 1] for emissive reflections and more precision than 8 bits for
-/// dark tones. Vulkan requires storage, sampled and linear-filter support for
-/// this format.
+/// It holds linear colour up to `MAX_RADIANCE` in `rt.rgen`, which the
+/// composite pass reads one texel per pixel and blends into an sRGB target,
+/// so it needs more range than [0, 1] for emissive reflections and more
+/// precision than 8 bits for dark tones. Vulkan requires storage and sampled
+/// support for this format.
 const STORAGE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
