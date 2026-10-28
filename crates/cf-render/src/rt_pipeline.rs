@@ -78,86 +78,34 @@ struct AccelStruct {
     buffer: DeviceBuffer,
 }
 
-/// Ray tracing pipeline: shaders, SBT, descriptors, and acceleration structures.
-pub struct RtPipeline {
-    accel_loader: ash::khr::acceleration_structure::Device,
-    rt_loader: ash::khr::ray_tracing_pipeline::Device,
-
-    // Pipeline
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_set_layout: vk::DescriptorSetLayout,
-    descriptor_set: vk::DescriptorSet,
-
-    // Shader binding table
-    sbt: HostBuffer,
-    raygen_region: vk::StridedDeviceAddressRegionKHR,
-    miss_region: vk::StridedDeviceAddressRegionKHR,
-    hit_region: vk::StridedDeviceAddressRegionKHR,
-
-    // Shader modules
+/// The pipeline's shader modules, layouts, pipeline and descriptor set.
+/// Null handles stand for the objects not created yet; destroying a null
+/// handle does nothing.
+#[derive(Default)]
+struct PipelineObjects {
     rgen_module: vk::ShaderModule,
     rmiss_module: vk::ShaderModule,
     rchit_module: vk::ShaderModule,
-
-    // Acceleration structures
-    blas_list: Vec<AccelStruct>,
-    tlas: Option<AccelStruct>,
-
-    // Geometry buffers (kept alive for AS references)
-    geometry_buffers: Vec<HostBuffer>,
-    // Instance buffer
-    instance_buffer: Option<HostBuffer>,
-
-    // Scratch buffers of the current BLAS/TLAS build, freed with the AS on the
-    // next `update_scene` or on drop.
-    scratch_buffers: Vec<DeviceBuffer>,
-
-    // Storage image for RT output
-    pub(crate) storage: Image2d,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set: vk::DescriptorSet,
 }
 
-/// Triangle geometry for BLAS building.
-pub struct RtGeometry {
-    /// Packed f32x3 positions (3 floats per vertex, 3 vertices per triangle).
-    pub positions: Vec<f32>,
-    /// Geometry type ID (GEOM_FLOOR, GEOM_TEE_BOX, etc.).
-    pub geom_type: u32,
-    /// Instance transform (identity if not set); converted to the 3×4
-    /// row-major `VkTransformMatrixKHR` when the TLAS is built.
-    pub transform: glam::Mat4,
-}
-
-impl RtPipeline {
-    /// Create the RT pipeline and build acceleration structures from the given geometry.
-    #[allow(clippy::too_many_lines)]
-    pub fn new(
-        gpu: &mut GpuContext,
-        width: u32,
-        height: u32,
-        geometries: &[RtGeometry],
-    ) -> Result<Self, RenderError> {
-        let accel_loader =
-            ash::khr::acceleration_structure::Device::new(&gpu.instance, &gpu.device);
-        let rt_loader = ash::khr::ray_tracing_pipeline::Device::new(&gpu.instance, &gpu.device);
-
-        // Query RT pipeline properties for SBT alignment
-        let mut rt_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_props);
-        // SAFETY: Querying physical device properties.
-        unsafe {
-            gpu.instance
-                .get_physical_device_properties2(gpu.physical_device, &mut props2);
-        }
-        let handle_size = rt_props.shader_group_handle_size;
-        let handle_alignment = rt_props.shader_group_handle_alignment;
-        let base_alignment = rt_props.shader_group_base_alignment;
-
+impl PipelineObjects {
+    /// Create the shader modules, the descriptor set layout (TLAS + storage
+    /// image), the pipeline layout (push constants + set) and the pipeline,
+    /// stopping at the first error.
+    fn create_pipeline(
+        &mut self,
+        device: &ash::Device,
+        rt_loader: &ash::khr::ray_tracing_pipeline::Device,
+    ) -> Result<(), RenderError> {
         // ── Shaders ──
-        let rgen_module = load_shader(&gpu.device, include_bytes!("../shaders/rt.rgen.spv"))?;
-        let rmiss_module = load_shader(&gpu.device, include_bytes!("../shaders/rt.rmiss.spv"))?;
-        let rchit_module = load_shader(&gpu.device, include_bytes!("../shaders/rt.rchit.spv"))?;
+        self.rgen_module = load_shader(device, include_bytes!("../shaders/rt.rgen.spv"))?;
+        self.rmiss_module = load_shader(device, include_bytes!("../shaders/rt.rmiss.spv"))?;
+        self.rchit_module = load_shader(device, include_bytes!("../shaders/rt.rchit.spv"))?;
 
         // ── Descriptor set layout: TLAS + storage image ──
         let bindings = [
@@ -176,8 +124,8 @@ impl RtPipeline {
         ];
         let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
-        let descriptor_set_layout = unsafe {
-            gpu.device
+        self.descriptor_set_layout = unsafe {
+            device
                 .create_descriptor_set_layout(&ds_layout_info, None)
                 .map_err(RenderError::Vulkan)?
         };
@@ -188,13 +136,13 @@ impl RtPipeline {
             .offset(0)
             .size(std::mem::size_of::<RtPushConstants>() as u32);
         let push_ranges = [push_range];
-        let set_layouts = [descriptor_set_layout];
+        let set_layouts = [self.descriptor_set_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&push_ranges);
         // SAFETY: Creating pipeline layout.
-        let pipeline_layout = unsafe {
-            gpu.device
+        self.pipeline_layout = unsafe {
+            device
                 .create_pipeline_layout(&layout_info, None)
                 .map_err(RenderError::Vulkan)?
         };
@@ -204,15 +152,15 @@ impl RtPipeline {
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::RAYGEN_KHR)
-                .module(rgen_module)
+                .module(self.rgen_module)
                 .name(entry_point),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::MISS_KHR)
-                .module(rmiss_module)
+                .module(self.rmiss_module)
                 .name(entry_point),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::CLOSEST_HIT_KHR)
-                .module(rchit_module)
+                .module(self.rchit_module)
                 .name(entry_point),
         ];
 
@@ -244,10 +192,10 @@ impl RtPipeline {
             .stages(&stages)
             .groups(&groups)
             .max_pipeline_ray_recursion_depth(2) // primary + 1 reflection
-            .layout(pipeline_layout);
+            .layout(self.pipeline_layout);
 
         // SAFETY: Creating ray tracing pipeline.
-        let pipeline = unsafe {
+        self.pipeline = unsafe {
             rt_loader
                 .create_ray_tracing_pipelines(
                     vk::DeferredOperationKHR::null(),
@@ -257,8 +205,195 @@ impl RtPipeline {
                 )
                 .map_err(|(_pipelines, err)| RenderError::Vulkan(err))?[0]
         };
+        Ok(())
+    }
 
-        // ── Shader binding table ──
+    /// Create the descriptor pool and allocate the one descriptor set.
+    fn create_descriptor_set(&mut self, device: &ash::Device) -> Result<(), RenderError> {
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1),
+        ];
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(1)
+            .pool_sizes(&pool_sizes);
+        // SAFETY: Creating descriptor pool.
+        self.descriptor_pool = unsafe {
+            device
+                .create_descriptor_pool(&pool_info, None)
+                .map_err(RenderError::Vulkan)?
+        };
+
+        let set_layouts = [self.descriptor_set_layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.descriptor_pool)
+            .set_layouts(&set_layouts);
+        // SAFETY: Allocating descriptor set.
+        self.descriptor_set = unsafe {
+            device
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(RenderError::Vulkan)?[0]
+        };
+        Ok(())
+    }
+
+    /// Destroy every object; the descriptor set goes with its pool.
+    ///
+    /// # Safety
+    /// No pending GPU work uses them.
+    unsafe fn destroy(&self, device: &ash::Device) {
+        // SAFETY: The caller guarantees nothing is in use.
+        unsafe {
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.pipeline_layout, None);
+            device.destroy_descriptor_pool(self.descriptor_pool, None);
+            device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            device.destroy_shader_module(self.rgen_module, None);
+            device.destroy_shader_module(self.rmiss_module, None);
+            device.destroy_shader_module(self.rchit_module, None);
+        }
+    }
+}
+
+/// Ray tracing pipeline: shaders, SBT, descriptors, and acceleration structures.
+pub struct RtPipeline {
+    accel_loader: ash::khr::acceleration_structure::Device,
+    rt_loader: ash::khr::ray_tracing_pipeline::Device,
+
+    // Shader modules, pipeline and descriptors
+    objects: PipelineObjects,
+
+    // Shader binding table
+    sbt: HostBuffer,
+    raygen_region: vk::StridedDeviceAddressRegionKHR,
+    miss_region: vk::StridedDeviceAddressRegionKHR,
+    hit_region: vk::StridedDeviceAddressRegionKHR,
+
+    // Acceleration structures
+    blas_list: Vec<AccelStruct>,
+    tlas: Option<AccelStruct>,
+
+    // Geometry buffers (kept alive for AS references)
+    geometry_buffers: Vec<HostBuffer>,
+    // Instance buffer
+    instance_buffer: Option<HostBuffer>,
+
+    // Scratch buffers of the current BLAS/TLAS build, freed with the AS on the
+    // next `update_scene` or on drop.
+    scratch_buffers: Vec<DeviceBuffer>,
+
+    // Storage image for RT output
+    pub(crate) storage: Image2d,
+}
+
+/// Triangle geometry for BLAS building.
+pub struct RtGeometry {
+    /// Packed f32x3 positions (3 floats per vertex, 3 vertices per triangle).
+    pub positions: Vec<f32>,
+    /// Geometry type ID (GEOM_FLOOR, GEOM_TEE_BOX, etc.).
+    pub geom_type: u32,
+    /// Instance transform (identity if not set); converted to the 3×4
+    /// row-major `VkTransformMatrixKHR` when the TLAS is built.
+    pub transform: glam::Mat4,
+}
+
+impl RtPipeline {
+    /// Create the RT pipeline and build acceleration structures from the given geometry.
+    ///
+    /// # Errors
+    /// A part fails to create or build; what was created is destroyed first.
+    pub fn new(
+        gpu: &mut GpuContext,
+        width: u32,
+        height: u32,
+        geometries: &[RtGeometry],
+    ) -> Result<Self, RenderError> {
+        let accel_loader =
+            ash::khr::acceleration_structure::Device::new(&gpu.instance, &gpu.device);
+        let rt_loader = ash::khr::ray_tracing_pipeline::Device::new(&gpu.instance, &gpu.device);
+
+        // Query RT pipeline properties for SBT alignment
+        let mut rt_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_props);
+        // SAFETY: Querying physical device properties.
+        unsafe {
+            gpu.instance
+                .get_physical_device_properties2(gpu.physical_device, &mut props2);
+        }
+
+        let mut objects = PipelineObjects::default();
+        let sbt = objects
+            .create_pipeline(&gpu.device, &rt_loader)
+            .and_then(|()| Self::create_sbt(gpu, &rt_loader, objects.pipeline, &rt_props));
+        let (sbt, [raygen_region, miss_region, hit_region]) = match sbt {
+            Ok(sbt) => sbt,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used them.
+                unsafe { objects.destroy(&gpu.device) };
+                return Err(e);
+            }
+        };
+
+        let storage = objects.create_descriptor_set(&gpu.device).and_then(|()| {
+            Self::create_storage_image(&gpu.device, &mut gpu.allocator, width, height)
+        });
+        let storage = match storage {
+            Ok(storage) => storage,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used them.
+                unsafe {
+                    sbt.destroy(&gpu.device, &mut gpu.allocator);
+                    objects.destroy(&gpu.device);
+                }
+                return Err(e);
+            }
+        };
+
+        let mut pipeline = Self {
+            accel_loader,
+            rt_loader,
+            objects,
+            sbt,
+            raygen_region,
+            miss_region,
+            hit_region,
+            blas_list: Vec::new(),
+            tlas: None,
+            geometry_buffers: Vec::new(),
+            instance_buffer: None,
+            scratch_buffers: Vec::new(),
+            storage,
+        };
+        // SAFETY: The set was just allocated and no command buffer uses it.
+        unsafe { pipeline.write_storage_descriptor(&gpu.device) };
+        if let Err(e) = pipeline.build_accel_structures(gpu, geometries) {
+            // SAFETY: No command buffer has traced with the pipeline. The
+            // wait covers a failure inside a build submission.
+            unsafe {
+                gpu.device.device_wait_idle().ok();
+                pipeline.destroy(&gpu.device, &mut gpu.allocator);
+            }
+            return Err(e);
+        }
+        Ok(pipeline)
+    }
+
+    /// The shader binding table of `pipeline`'s three groups (raygen, miss,
+    /// closest hit), each handle at the start of its own region aligned as
+    /// `rt_props` requires, and the three regions.
+    fn create_sbt(
+        gpu: &mut GpuContext,
+        rt_loader: &ash::khr::ray_tracing_pipeline::Device,
+        pipeline: vk::Pipeline,
+        rt_props: &vk::PhysicalDeviceRayTracingPipelinePropertiesKHR<'_>,
+    ) -> Result<(HostBuffer, [vk::StridedDeviceAddressRegionKHR; 3]), RenderError> {
+        let handle_size = rt_props.shader_group_handle_size;
+        let handle_alignment = rt_props.shader_group_handle_alignment;
+        let base_alignment = rt_props.shader_group_base_alignment;
         let aligned_handle_size = align_up(handle_size, handle_alignment);
         // Each SBT region's start address must be aligned to shaderGroupBaseAlignment.
         let region_stride = align_up(aligned_handle_size, base_alignment);
@@ -310,100 +445,7 @@ impl RtPipeline {
             stride: u64::from(region_stride),
             size: u64::from(region_stride),
         };
-
-        // ── Descriptor pool + set ──
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                .descriptor_count(1),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(1),
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
-            .pool_sizes(&pool_sizes);
-        // SAFETY: Creating descriptor pool.
-        let descriptor_pool = unsafe {
-            gpu.device
-                .create_descriptor_pool(&pool_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&set_layouts);
-        // SAFETY: Allocating descriptor set.
-        let descriptor_set = unsafe {
-            gpu.device
-                .allocate_descriptor_sets(&alloc_info)
-                .map_err(RenderError::Vulkan)?[0]
-        };
-
-        // ── Storage image ──
-        let storage = Self::create_storage_image(&gpu.device, &mut gpu.allocator, width, height)?;
-
-        // ── Build acceleration structures ──
-        let (blas_list, geometry_buffers, scratch_buffers) =
-            Self::build_all_blas(gpu, &accel_loader, geometries)?;
-
-        let (tlas, instance_buffer, tlas_scratch) =
-            Self::build_tlas(gpu, &accel_loader, geometries, &blas_list)?;
-
-        let mut all_scratch = scratch_buffers;
-        all_scratch.push(tlas_scratch);
-
-        // ── Update descriptor set ──
-        let tlas_handle = tlas.accel;
-        let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
-            .acceleration_structures(std::slice::from_ref(&tlas_handle));
-
-        let image_info = vk::DescriptorImageInfo::default()
-            .image_view(storage.view())
-            .image_layout(vk::ImageLayout::GENERAL);
-        let image_infos = [image_info];
-
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                .descriptor_count(1)
-                .push_next(&mut as_write_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&image_infos),
-        ];
-
-        // SAFETY: Updating descriptor sets.
-        unsafe {
-            gpu.device.update_descriptor_sets(&writes, &[]);
-        }
-
-        Ok(Self {
-            accel_loader,
-            rt_loader,
-            pipeline,
-            pipeline_layout,
-            descriptor_pool,
-            descriptor_set_layout,
-            descriptor_set,
-            sbt,
-            raygen_region,
-            miss_region,
-            hit_region,
-            rgen_module,
-            rmiss_module,
-            rchit_module,
-            blas_list,
-            tlas: Some(tlas),
-            geometry_buffers,
-            instance_buffer: Some(instance_buffer),
-            scratch_buffers: all_scratch,
-            storage,
-        })
+        Ok((sbt, [raygen_region, miss_region, hit_region]))
     }
 
     /// Resize the RT storage image to new dimensions.
@@ -425,23 +467,30 @@ impl RtPipeline {
         let new = Self::create_storage_image(device, allocator, width, height)?;
         let old = std::mem::replace(&mut self.storage, new);
         // SAFETY: Device is idle (caller guarantees).
-        unsafe { old.destroy(device, allocator) };
-        let view = self.storage.view();
+        unsafe {
+            old.destroy(device, allocator);
+            self.write_storage_descriptor(device);
+        }
 
-        // Update RT descriptor set binding 1 (storage image).
+        Ok(())
+    }
+
+    /// Point the descriptor set's binding 1 at the storage image.
+    ///
+    /// # Safety
+    /// No pending GPU work uses the descriptor set.
+    unsafe fn write_storage_descriptor(&self, device: &ash::Device) {
         let image_info = vk::DescriptorImageInfo::default()
-            .image_view(view)
+            .image_view(self.storage.view())
             .image_layout(vk::ImageLayout::GENERAL);
         let image_infos = [image_info];
         let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.descriptor_set)
+            .dst_set(self.objects.descriptor_set)
             .dst_binding(1)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&image_infos);
-        // SAFETY: Updating descriptor set with valid image view.
+        // SAFETY: The image view is live; the caller guarantees the set is unused.
         unsafe { device.update_descriptor_sets(&[write], &[]) };
-
-        Ok(())
     }
 
     /// Record one ray-trace dispatch of `dispatch_w × dispatch_h` rays into
@@ -463,21 +512,25 @@ impl RtPipeline {
 
         // SAFETY: The caller guarantees the command buffer and image states.
         unsafe {
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::RAY_TRACING_KHR, self.pipeline);
+            device.cmd_bind_pipeline(
+                cb,
+                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                self.objects.pipeline,
+            );
 
             device.cmd_bind_descriptor_sets(
                 cb,
                 vk::PipelineBindPoint::RAY_TRACING_KHR,
-                self.pipeline_layout,
+                self.objects.pipeline_layout,
                 0,
-                &[self.descriptor_set],
+                &[self.objects.descriptor_set],
                 &[],
             );
 
             push_constants(
                 device,
                 cb,
-                self.pipeline_layout,
+                self.objects.pipeline_layout,
                 vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
                 pc,
             );
@@ -497,16 +550,15 @@ impl RtPipeline {
 
     // ── BLAS building ──
 
-    #[allow(clippy::type_complexity)]
+    /// Build one BLAS per non-empty geometry into `blas_list`, with its
+    /// position buffer in `geometry_buffers` and its scratch buffer in
+    /// `scratch_buffers`.
     fn build_all_blas(
+        &mut self,
         gpu: &mut GpuContext,
-        accel_loader: &ash::khr::acceleration_structure::Device,
         geometries: &[RtGeometry],
-    ) -> Result<(Vec<AccelStruct>, Vec<HostBuffer>, Vec<DeviceBuffer>), RenderError> {
-        let mut blas_list = Vec::new();
-        let mut geo_buffers = Vec::new();
-        let mut scratch_buffers = Vec::new();
-
+    ) -> Result<(), RenderError> {
+        let accel_loader = &self.accel_loader;
         for geom in geometries {
             let tri_count = geom.positions.len() as u32 / 9; // 3 verts × 3 floats
             if tri_count == 0 {
@@ -523,6 +575,7 @@ impl RtPipeline {
                 "blas positions",
             )?;
             let pos_addr = pos_buffer.device_address(&gpu.device);
+            self.geometry_buffers.push(pos_buffer);
 
             let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
                 .vertex_format(vk::Format::R32G32B32_SFLOAT)
@@ -573,11 +626,20 @@ impl RtPipeline {
                 .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
 
             // SAFETY: Creating acceleration structure.
-            let accel = unsafe {
-                accel_loader
-                    .create_acceleration_structure(&as_create_info, None)
-                    .map_err(RenderError::Vulkan)?
+            let accel = match unsafe {
+                accel_loader.create_acceleration_structure(&as_create_info, None)
+            } {
+                Ok(accel) => accel,
+                Err(e) => {
+                    // SAFETY: Just created; no GPU work has used it.
+                    unsafe { as_buffer.destroy(&gpu.device, &mut gpu.allocator) };
+                    return Err(RenderError::Vulkan(e));
+                }
             };
+            self.blas_list.push(AccelStruct {
+                accel,
+                buffer: as_buffer,
+            });
 
             // Scratch buffer
             let scratch_buffer = DeviceBuffer::new(
@@ -587,8 +649,8 @@ impl RtPipeline {
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 "blas scratch",
             )?;
-
             let scratch_addr = scratch_buffer.device_address(&gpu.device);
+            self.scratch_buffers.push(scratch_buffer);
 
             // Build BLAS on device
             let build_info_final = vk::AccelerationStructureBuildGeometryInfoKHR::default()
@@ -631,30 +693,25 @@ impl RtPipeline {
                     );
                 }
             })?;
-
-            blas_list.push(AccelStruct {
-                accel,
-                buffer: as_buffer,
-            });
-            geo_buffers.push(pos_buffer);
-            scratch_buffers.push(scratch_buffer);
         }
 
-        Ok((blas_list, geo_buffers, scratch_buffers))
+        Ok(())
     }
 
     // ── TLAS building ──
 
-    #[allow(clippy::type_complexity)]
+    /// Build the TLAS over `blas_list` into `tlas`, with its instance buffer
+    /// in `instance_buffer` and its scratch buffer in `scratch_buffers`.
+    /// Returns the TLAS handle.
     fn build_tlas(
+        &mut self,
         gpu: &mut GpuContext,
-        accel_loader: &ash::khr::acceleration_structure::Device,
         geometries: &[RtGeometry],
-        blas_list: &[AccelStruct],
-    ) -> Result<(AccelStruct, HostBuffer, DeviceBuffer), RenderError> {
+    ) -> Result<vk::AccelerationStructureKHR, RenderError> {
+        let accel_loader = &self.accel_loader;
         let mut instances: Vec<vk::AccelerationStructureInstanceKHR> = Vec::new();
 
-        for (geom, blas) in geometries.iter().zip(blas_list.iter()) {
+        for (geom, blas) in geometries.iter().zip(self.blas_list.iter()) {
             if geom.positions.is_empty() {
                 continue;
             }
@@ -715,8 +772,8 @@ impl RtPipeline {
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             "tlas instances",
         )?;
-
         let instance_addr = instance_buffer.device_address(&gpu.device);
+        self.instance_buffer = Some(instance_buffer);
 
         let instances_data = vk::AccelerationStructureGeometryInstancesDataKHR::default()
             .array_of_pointers(false)
@@ -765,11 +822,19 @@ impl RtPipeline {
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
 
         // SAFETY: Creating TLAS.
-        let tlas_accel = unsafe {
-            accel_loader
-                .create_acceleration_structure(&tlas_create_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
+        let tlas_accel =
+            match unsafe { accel_loader.create_acceleration_structure(&tlas_create_info, None) } {
+                Ok(accel) => accel,
+                Err(e) => {
+                    // SAFETY: Just created; no GPU work has used it.
+                    unsafe { tlas_buffer.destroy(&gpu.device, &mut gpu.allocator) };
+                    return Err(RenderError::Vulkan(e));
+                }
+            };
+        self.tlas = Some(AccelStruct {
+            accel: tlas_accel,
+            buffer: tlas_buffer,
+        });
 
         let scratch_buffer = DeviceBuffer::new(
             &gpu.device,
@@ -779,6 +844,7 @@ impl RtPipeline {
             "tlas scratch",
         )?;
         let scratch_addr = scratch_buffer.device_address(&gpu.device);
+        self.scratch_buffers.push(scratch_buffer);
 
         let build_info_final = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
@@ -820,12 +886,7 @@ impl RtPipeline {
             }
         })?;
 
-        let tlas = AccelStruct {
-            accel: tlas_accel,
-            buffer: tlas_buffer,
-        };
-
-        Ok((tlas, instance_buffer, scratch_buffer))
+        Ok(tlas_accel)
     }
 
     // ── Storage image ──
@@ -859,7 +920,8 @@ impl RtPipeline {
     /// # Errors
     /// The wait or a build fails. After a failed build the old structures
     /// are destroyed and the descriptor set still names the old TLAS, so the
-    /// pipeline must not trace again; destroy it.
+    /// pipeline must not trace again; destroy it, which also frees what the
+    /// failed build created.
     pub fn update_scene(
         &mut self,
         gpu: &mut GpuContext,
@@ -875,28 +937,30 @@ impl RtPipeline {
             self.destroy_accel_structures(&gpu.device, &mut gpu.allocator);
         }
 
-        let (blas_list, geometry_buffers, scratch_buffers) =
-            Self::build_all_blas(gpu, &self.accel_loader, geometries)?;
+        self.build_accel_structures(gpu, geometries)
+    }
 
-        let (tlas, instance_buffer, tlas_scratch) =
-            Self::build_tlas(gpu, &self.accel_loader, geometries, &blas_list)?;
-
-        let mut all_scratch = scratch_buffers;
-        all_scratch.push(tlas_scratch);
-
-        self.blas_list = blas_list;
-        self.geometry_buffers = geometry_buffers;
-        self.scratch_buffers = all_scratch;
-        // Update TLAS descriptor binding (handle changed on rebuild).
-        let tlas_handle = tlas.accel;
-        self.tlas = Some(tlas);
-        self.instance_buffer = Some(instance_buffer);
+    /// Build a BLAS per geometry and the TLAS over them, then point the
+    /// descriptor set's binding 0 at the TLAS. Each object is kept in `self`
+    /// as soon as it exists, so after a failure
+    /// [`destroy_accel_structures`](Self::destroy_accel_structures) frees what
+    /// was built.
+    ///
+    /// Requires no acceleration structures in `self` and the descriptor set
+    /// not in use by pending GPU work.
+    fn build_accel_structures(
+        &mut self,
+        gpu: &mut GpuContext,
+        geometries: &[RtGeometry],
+    ) -> Result<(), RenderError> {
+        self.build_all_blas(gpu, geometries)?;
+        let tlas_handle = self.build_tlas(gpu, geometries)?;
 
         let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(std::slice::from_ref(&tlas_handle));
 
         let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.descriptor_set)
+            .dst_set(self.objects.descriptor_set)
             .dst_binding(0)
             .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
             .descriptor_count(1)
@@ -959,16 +1023,8 @@ impl RtPipeline {
             // SBT
             self.sbt.destroy(device, allocator);
 
-            // Pipeline
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-
-            // Shader modules
-            device.destroy_shader_module(self.rgen_module, None);
-            device.destroy_shader_module(self.rmiss_module, None);
-            device.destroy_shader_module(self.rchit_module, None);
+            // Pipeline, descriptors and shader modules
+            self.objects.destroy(device);
         }
     }
 }

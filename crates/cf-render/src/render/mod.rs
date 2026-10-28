@@ -44,6 +44,10 @@ impl Renderer {
     /// `grid_config` with the ball on the tee. It ray-traces floor
     /// reflections when the GPU supports them and they set up (otherwise it
     /// renders raster and says so on stderr).
+    ///
+    /// # Errors
+    /// A part fails to create; what was created, and `swapchain`, are
+    /// destroyed first.
     pub fn new(
         mut gpu: GpuContext,
         swapchain: Swapchain,
@@ -51,55 +55,49 @@ impl Renderer {
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
         // Reflections when the device supports them; raster if they fail.
-        let recorder = SceneRecorder::new(
+        let recorder = match SceneRecorder::new(
             &mut gpu,
             swapchain.format,
             vk::ImageLayout::PRESENT_SRC_KHR,
             swapchain.extent,
             grid_config,
             RtMode::Auto,
-        )?;
+        ) {
+            Ok(recorder) => recorder,
+            Err(e) => {
+                // SAFETY: No GPU work has used the swapchain.
+                unsafe { swapchain.destroy(&gpu.device) };
+                return Err(e);
+            }
+        };
         if recorder.has_reflections() {
             eprintln!("RT pipeline: initialized (windowed mode)");
         }
 
-        let depth = Self::create_depth(
-            &gpu.device,
-            &mut gpu.allocator,
-            gpu.depth_format,
-            swapchain.extent,
-        )?;
-
-        let framebuffers = Self::create_framebuffers(
-            &gpu.device,
-            &swapchain,
-            recorder.scene_pass(),
-            depth.view(),
-        )?;
-        let overlay_framebuffers =
-            Self::create_overlay_framebuffers(&gpu.device, &swapchain, recorder.hud_pass())?;
-
+        // From here on an early return drops `renderer`, which destroys what
+        // it holds so far.
         let window_extent = swapchain.extent;
-        let image_count = framebuffers.len();
-        let command_buffers = Self::allocate_command_buffers(&gpu, image_count as u32)?;
-        let (image_available, render_finished, in_flight_fences) =
-            Self::create_sync_objects(&gpu.device, image_count)?;
-
-        Ok(Self {
+        let mut renderer = Self {
             recorder: ManuallyDrop::new(recorder),
             swapchain,
-            framebuffers,
-            overlay_framebuffers,
-            depth: Some(depth),
-            command_buffers,
-            image_available,
-            render_finished,
-            in_flight_fences,
+            framebuffers: Vec::new(),
+            overlay_framebuffers: Vec::new(),
+            depth: None,
+            command_buffers: Vec::new(),
+            image_available: Vec::new(),
+            render_finished: Vec::new(),
+            in_flight_fences: Vec::new(),
             current_frame: 0,
             window_extent,
             swapchain_stale: false,
             gpu,
-        })
+        };
+        renderer.create_swapchain_targets()?;
+        let image_count = renderer.framebuffers.len();
+        renderer.command_buffers =
+            Self::allocate_command_buffers(&renderer.gpu, image_count as u32)?;
+        renderer.create_sync_objects(image_count)?;
+        Ok(renderer)
     }
 
     /// Draw a frame with the current camera.
@@ -328,26 +326,7 @@ impl Renderer {
             height,
         )?;
 
-        let depth = Self::create_depth(
-            &self.gpu.device,
-            &mut self.gpu.allocator,
-            self.gpu.depth_format,
-            self.swapchain.extent,
-        )?;
-        let depth_view = depth.view();
-        self.depth = Some(depth);
-
-        self.framebuffers = Self::create_framebuffers(
-            &self.gpu.device,
-            &self.swapchain,
-            self.recorder.scene_pass(),
-            depth_view,
-        )?;
-        self.overlay_framebuffers = Self::create_overlay_framebuffers(
-            &self.gpu.device,
-            &self.swapchain,
-            self.recorder.hud_pass(),
-        )?;
+        self.create_swapchain_targets()?;
         // The swapchain's actual extent, which may differ from the requested
         // size after surface clamping.
         // SAFETY: The device is idle (waited above) and the old framebuffers
@@ -426,60 +405,66 @@ impl Renderer {
 
     // ── Private helpers ──
 
+    /// Create the depth image, the scene framebuffers and the overlay
+    /// framebuffers at the swapchain extent, keeping each in `self` as soon as
+    /// it exists. Requires none of them in `self`.
+    fn create_swapchain_targets(&mut self) -> Result<(), RenderError> {
+        let depth = Self::create_depth(
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            self.gpu.depth_format,
+            self.swapchain.extent,
+        )?;
+        let depth_view = depth.view();
+        self.depth = Some(depth);
+
+        Self::create_framebuffers(
+            &self.gpu.device,
+            &self.swapchain,
+            self.recorder.scene_pass(),
+            Some(depth_view),
+            &mut self.framebuffers,
+        )?;
+        Self::create_framebuffers(
+            &self.gpu.device,
+            &self.swapchain,
+            self.recorder.hud_pass(),
+            None,
+            &mut self.overlay_framebuffers,
+        )
+    }
+
+    /// Push a framebuffer for `render_pass` over each swapchain image (plus
+    /// `depth_view` if given) onto `framebuffers`, stopping at the first
+    /// error.
     fn create_framebuffers(
         device: &ash::Device,
         swapchain: &Swapchain,
         render_pass: vk::RenderPass,
-        depth_view: vk::ImageView,
-    ) -> Result<Vec<vk::Framebuffer>, RenderError> {
-        swapchain
-            .image_views
-            .iter()
-            .map(|&view| {
-                let attachments = [view, depth_view];
-                let fb_info = vk::FramebufferCreateInfo::default()
-                    .render_pass(render_pass)
-                    .attachments(&attachments)
-                    .width(swapchain.extent.width)
-                    .height(swapchain.extent.height)
-                    .layers(1);
+        depth_view: Option<vk::ImageView>,
+        framebuffers: &mut Vec<vk::Framebuffer>,
+    ) -> Result<(), RenderError> {
+        for &view in &swapchain.image_views {
+            let attachments: &[vk::ImageView] = match depth_view {
+                Some(depth_view) => &[view, depth_view],
+                None => &[view],
+            };
+            let fb_info = vk::FramebufferCreateInfo::default()
+                .render_pass(render_pass)
+                .attachments(attachments)
+                .width(swapchain.extent.width)
+                .height(swapchain.extent.height)
+                .layers(1);
 
-                // SAFETY: Creating framebuffer with valid attachments.
-                unsafe {
-                    device
-                        .create_framebuffer(&fb_info, None)
-                        .map_err(RenderError::Vulkan)
-                }
-            })
-            .collect()
-    }
-
-    /// Colour-only framebuffers over the swapchain images for `render_pass`.
-    fn create_overlay_framebuffers(
-        device: &ash::Device,
-        swapchain: &Swapchain,
-        render_pass: vk::RenderPass,
-    ) -> Result<Vec<vk::Framebuffer>, RenderError> {
-        swapchain
-            .image_views
-            .iter()
-            .map(|&view| {
-                let attachments = [view];
-                let fb_info = vk::FramebufferCreateInfo::default()
-                    .render_pass(render_pass)
-                    .attachments(&attachments)
-                    .width(swapchain.extent.width)
-                    .height(swapchain.extent.height)
-                    .layers(1);
-
-                // SAFETY: Creating framebuffer with valid attachment.
-                unsafe {
-                    device
-                        .create_framebuffer(&fb_info, None)
-                        .map_err(RenderError::Vulkan)
-                }
-            })
-            .collect()
+            // SAFETY: Creating framebuffer with valid attachments.
+            let framebuffer = unsafe {
+                device
+                    .create_framebuffer(&fb_info, None)
+                    .map_err(RenderError::Vulkan)?
+            };
+            framebuffers.push(framebuffer);
+        }
+        Ok(())
     }
 
     fn create_depth(
@@ -518,32 +503,27 @@ impl Renderer {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn create_sync_objects(
-        device: &ash::Device,
-        count: usize,
-    ) -> Result<(Vec<vk::Semaphore>, Vec<vk::Semaphore>, Vec<vk::Fence>), RenderError> {
+    /// Create `count` sets of frame semaphores and (signalled) fences,
+    /// keeping each in `self` as soon as it exists.
+    fn create_sync_objects(&mut self, count: usize) -> Result<(), RenderError> {
+        let device = &self.gpu.device;
         let sem_info = vk::SemaphoreCreateInfo::default();
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-
-        let mut image_available = Vec::with_capacity(count);
-        let mut render_finished = Vec::with_capacity(count);
-        let mut fences = Vec::with_capacity(count);
 
         // SAFETY: Creating sync primitives.
         unsafe {
             for _ in 0..count {
-                image_available.push(
+                self.image_available.push(
                     device
                         .create_semaphore(&sem_info, None)
                         .map_err(RenderError::Vulkan)?,
                 );
-                render_finished.push(
+                self.render_finished.push(
                     device
                         .create_semaphore(&sem_info, None)
                         .map_err(RenderError::Vulkan)?,
                 );
-                fences.push(
+                self.in_flight_fences.push(
                     device
                         .create_fence(&fence_info, None)
                         .map_err(RenderError::Vulkan)?,
@@ -551,7 +531,7 @@ impl Renderer {
             }
         }
 
-        Ok((image_available, render_finished, fences))
+        Ok(())
     }
 }
 
