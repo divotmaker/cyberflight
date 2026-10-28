@@ -251,8 +251,6 @@ dependencies = [
  "dimple",
  "flightrelay",
  "glam",
- "serde",
- "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -651,9 +649,6 @@ name = "glam"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34627c5158214743a374170fed714833fdf4e4b0cbcc1ea98417866a4c5d4441"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "gpu-allocator"

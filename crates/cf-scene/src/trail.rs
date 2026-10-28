@@ -3,150 +3,15 @@ use glam::Vec3;
 use crate::grid::GridVertex;
 use crate::tee::GLOW_SHELL_FADE;
 
-/// Default trail lifetime in seconds — points older than this are pruned/fully faded.
+/// Trail lifetime the renderers use, in seconds: a trail point is fully
+/// faded once it is this old.
 pub const DEFAULT_TRAIL_LIFETIME: f64 = 3.0;
-
-/// Safety cap: maximum trail points retained regardless of lifetime.
-const MAX_TRAIL_POINTS: usize = 2000;
 
 /// A trail sample with position and timestamp.
 #[derive(Debug, Clone, Copy)]
 pub struct TrailPoint {
     pub position: Vec3,
     pub time: f64,
-}
-
-/// Phase of a ball flight for visual treatment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlightPhase {
-    /// Ball is airborne (aerodynamic flight).
-    InFlight,
-    /// Ball is bouncing on the ground.
-    Bouncing,
-    /// Ball is rolling on the ground.
-    Rolling,
-    /// Ball has come to rest.
-    Stopped,
-}
-
-/// A ball flight being displayed on the range.
-#[derive(Debug, Clone)]
-pub struct BallFlight {
-    /// Trail points (world space, timestamped). Oldest entries at the front.
-    trail: Vec<TrailPoint>,
-    /// Current ball position (head of the trail).
-    pub position: Vec3,
-    /// Whether the ball is still in flight (vs. landed).
-    pub active: bool,
-    /// Current phase of the ball flight.
-    pub phase: FlightPhase,
-    /// Flight start time (seconds since range start).
-    pub start_time: f64,
-    /// Trail color hint (index into color palette based on shot shape).
-    pub color_index: u32,
-    /// Total distance from tee (yards), updated as the shot progresses.
-    pub total_yards: f64,
-}
-
-impl BallFlight {
-    /// Create a new ball flight starting at the tee box.
-    #[must_use]
-    pub fn new(start_time: f64) -> Self {
-        Self {
-            trail: Vec::with_capacity(512),
-            position: Vec3::ZERO,
-            active: true,
-            phase: FlightPhase::InFlight,
-            start_time,
-            color_index: 0,
-            total_yards: 0.0,
-        }
-    }
-
-    /// Update the ball position and append to trail.
-    pub fn update_position(&mut self, pos: Vec3, time: f64) {
-        self.position = pos;
-        self.trail.push(TrailPoint {
-            position: pos,
-            time,
-        });
-
-        // Safety cap
-        if self.trail.len() > MAX_TRAIL_POINTS {
-            let excess = self.trail.len() - MAX_TRAIL_POINTS;
-            self.trail.drain(..excess);
-        }
-    }
-
-    /// Remove trail points older than `max_lifetime` seconds before `current_time`.
-    pub fn prune_expired(&mut self, current_time: f64, max_lifetime: f64) {
-        let cutoff = current_time - max_lifetime;
-        self.trail.retain(|p| p.time >= cutoff);
-    }
-
-    /// Mark the ball as landed / stopped.
-    pub fn land(&mut self) {
-        self.active = false;
-        self.phase = FlightPhase::Stopped;
-    }
-
-    /// Set the current flight phase.
-    pub fn set_phase(&mut self, phase: FlightPhase) {
-        self.phase = phase;
-    }
-
-    /// Get trail points for rendering.
-    #[must_use]
-    pub fn trail_points(&self) -> &[TrailPoint] {
-        &self.trail
-    }
-
-    /// Return positions of non-expired trail points.
-    #[must_use]
-    pub fn trail_positions_alive(&self, current_time: f64, max_lifetime: f64) -> Vec<Vec3> {
-        let cutoff = current_time - max_lifetime;
-        self.trail
-            .iter()
-            .filter(|p| p.time >= cutoff)
-            .map(|p| p.position)
-            .collect()
-    }
-
-    /// Number of trail points.
-    #[must_use]
-    pub fn trail_len(&self) -> usize {
-        self.trail.len()
-    }
-}
-
-/// Vertex for trail rendering (ribbon strip).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct TrailVertex {
-    pub position: [f32; 3],
-    /// Normalized age: 0.0 = newest (bright), 1.0 = oldest (faded).
-    pub age: f32,
-}
-
-/// Generate trail vertices from a ball flight's trail points.
-///
-/// Returns vertices suitable for a line strip.
-#[must_use]
-pub fn generate_trail_vertices(flight: &BallFlight) -> Vec<TrailVertex> {
-    let points = flight.trail_points();
-    let len = points.len();
-    if len == 0 {
-        return Vec::new();
-    }
-
-    points
-        .iter()
-        .enumerate()
-        .map(|(i, tp)| TrailVertex {
-            position: tp.position.into(),
-            age: 1.0 - (i as f32 / (len - 1).max(1) as f32),
-        })
-        .collect()
 }
 
 /// Generate a trail glow ribbon matching the ball glow aesthetic.
@@ -384,91 +249,6 @@ pub fn generate_trail_line(
 mod tests {
     use super::*;
 
-    #[test]
-    fn trail_vertex_size() {
-        assert_eq!(std::mem::size_of::<TrailVertex>(), 16);
-    }
-
-    #[test]
-    fn new_flight_at_origin() {
-        let flight = BallFlight::new(0.0);
-        assert!(flight.active);
-        assert_eq!(flight.trail_len(), 0);
-    }
-
-    #[test]
-    fn update_appends_trail() {
-        let mut flight = BallFlight::new(0.0);
-        flight.update_position(Vec3::new(1.0, 1.0, 0.0), 0.1);
-        flight.update_position(Vec3::new(2.0, 2.0, 0.0), 0.2);
-        assert_eq!(flight.trail_len(), 2);
-    }
-
-    #[test]
-    fn trail_trims_at_safety_cap() {
-        let mut flight = BallFlight::new(0.0);
-        for i in 0..2100 {
-            flight.update_position(Vec3::new(i as f32, 0.0, 0.0), i as f64 * 0.001);
-        }
-        assert!(flight.trail_len() <= MAX_TRAIL_POINTS);
-    }
-
-    #[test]
-    fn prune_expired_removes_old_points() {
-        let mut flight = BallFlight::new(0.0);
-        for i in 0..10 {
-            flight.update_position(Vec3::new(i as f32, 0.0, 0.0), i as f64);
-        }
-        flight.prune_expired(9.0, 5.0); // cutoff = 4.0, keeps t=4..9
-        assert_eq!(flight.trail_len(), 6);
-    }
-
-    #[test]
-    fn trail_positions_alive_filters() {
-        let mut flight = BallFlight::new(0.0);
-        for i in 0..10 {
-            flight.update_position(Vec3::new(i as f32, 0.0, 0.0), i as f64);
-        }
-        let alive = flight.trail_positions_alive(9.0, 5.0);
-        // cutoff = 4.0, points at t=4..9 → 6 points
-        assert_eq!(alive.len(), 6);
-    }
-
-    #[test]
-    fn land_deactivates() {
-        let mut flight = BallFlight::new(0.0);
-        flight.land();
-        assert!(!flight.active);
-        assert_eq!(flight.phase, FlightPhase::Stopped);
-    }
-
-    #[test]
-    fn new_flight_phase_is_in_flight() {
-        let flight = BallFlight::new(0.0);
-        assert_eq!(flight.phase, FlightPhase::InFlight);
-    }
-
-    #[test]
-    fn phase_transitions() {
-        let mut flight = BallFlight::new(0.0);
-        assert_eq!(flight.phase, FlightPhase::InFlight);
-
-        flight.set_phase(FlightPhase::Bouncing);
-        assert_eq!(flight.phase, FlightPhase::Bouncing);
-
-        flight.set_phase(FlightPhase::Rolling);
-        assert_eq!(flight.phase, FlightPhase::Rolling);
-
-        flight.land();
-        assert_eq!(flight.phase, FlightPhase::Stopped);
-    }
-
-    #[test]
-    fn total_yards_starts_at_zero() {
-        let flight = BallFlight::new(0.0);
-        assert!((flight.total_yards - 0.0).abs() < f64::EPSILON);
-    }
-
     fn make_trail(n: usize) -> Vec<TrailPoint> {
         (0..n)
             .map(|i| TrailPoint {
@@ -516,18 +296,5 @@ mod tests {
                 v.fade
             );
         }
-    }
-
-    #[test]
-    fn trail_vertices_age_gradient() {
-        let mut flight = BallFlight::new(0.0);
-        for i in 0..10 {
-            flight.update_position(Vec3::new(i as f32, 0.0, 0.0), i as f64 * 0.1);
-        }
-        let verts = generate_trail_vertices(&flight);
-        assert_eq!(verts.len(), 10);
-        // First vertex (oldest) should have age ~1.0, last (newest) should have age ~0.0
-        assert!(verts[0].age > 0.9);
-        assert!(verts[9].age < 0.1);
     }
 }

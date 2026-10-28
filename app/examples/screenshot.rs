@@ -371,7 +371,6 @@ fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
         flight_time_s: snap.flight_time,
         elapsed_s: snap.elapsed,
-        in_flight: true,
     };
 
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
@@ -447,7 +446,6 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
         flight_time_s: snap.flight_time,
         elapsed_s: snap.elapsed,
-        in_flight: true,
     };
 
     // Render at 2x resolution for supersampled anti-aliasing, then downscale

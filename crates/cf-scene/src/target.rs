@@ -1,10 +1,9 @@
 use glam::Vec3;
-use serde::{Deserialize, Serialize};
 
 use crate::grid::{GridConfig, GridVertex};
 
 /// A target zone on the driving range.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Target {
     /// Target center in the scene frame (+X left of the target line, +Y up,
     /// +Z downrange; see [`frame`](crate::frame)), on the Y=0 ground plane.
@@ -197,14 +196,5 @@ mod tests {
         // only its lower brightness can make it the dimmer ring.
         assert!(dist(inner) < dist(outer));
         assert!(alpha(inner) < alpha(outer));
-    }
-
-    #[test]
-    fn target_serialization_roundtrip() {
-        let t = Target::at_distance(150.0, "150");
-        let json = serde_json::to_string(&t).unwrap();
-        let t2: Target = serde_json::from_str(&json).unwrap();
-        assert_eq!(t.label, t2.label);
-        assert!((t.center[2] - t2.center[2]).abs() < 1e-6);
     }
 }

@@ -11,5 +11,3 @@ dimple.workspace = true
 flightrelay.workspace = true
 glam.workspace = true
 thiserror.workspace = true
-serde.workspace = true
-serde_json.workspace = true

@@ -220,7 +220,6 @@ impl AnimatedFlight {
             lateral_yards: dimple::units::meters_to_yards(pos.z),
             flight_time_s: self.result.flight.flight_time,
             elapsed_s: t_clamped,
-            in_flight: self.is_animating(now),
         }
     }
 
@@ -1106,7 +1105,6 @@ mod tests {
             (t.elapsed_s - f.total_time).abs() < 1e-9,
             "clock runs to rest"
         );
-        assert!(!t.in_flight);
     }
 
     #[test]
