@@ -1,6 +1,8 @@
 mod flight;
+mod logfile;
 mod stream;
 
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -393,7 +395,22 @@ fn wake_on_intake(proxy: EventLoopProxy<()>) -> impl Fn() + Send + 'static {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    let log = logfile::start();
+    let result = run();
+    // Printed here, not by the runtime after `main`, so the log has it.
+    if let Err(e) = &result {
+        eprintln!("Error: {e:?}");
+    }
+    drop(log);
+    if result.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let frp_url = flight::frp_url(&args)?;
     if args.iter().any(|a| a == "--stream") {

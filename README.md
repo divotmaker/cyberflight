@@ -38,6 +38,10 @@ moment its shot arrived: when drawing pauses (window hidden or minimised, displa
 range picks up where it would have been, and shots that have finished meanwhile are not
 replayed.
 
+Everything cyberflight prints is also written to `cyberflight.log` next to the executable,
+each line stamped with the local time (`HH:MM:SS.mmm`): connects, disconnects and why, each
+shot's arrival, launch and stop. The file starts over at every launch.
+
 ## Running
 
 ```bash
