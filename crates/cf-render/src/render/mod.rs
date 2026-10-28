@@ -58,7 +58,6 @@ impl Renderer {
             vk::ImageLayout::PRESENT_SRC_KHR,
             swapchain.extent,
             grid_config,
-            None,
             Some(rt_scene),
         )?;
         if recorder.has_reflections() {

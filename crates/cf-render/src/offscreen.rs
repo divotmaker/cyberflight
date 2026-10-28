@@ -16,7 +16,6 @@ use crate::recorder::{FrameTarget, SceneRecorder};
 use crate::reflections::RtSceneState;
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::RtTrail;
-use crate::scene::Snapshot;
 
 /// Offscreen renderer for headless PNG generation.
 pub struct OffscreenRenderer {
@@ -36,14 +35,19 @@ impl OffscreenRenderer {
     /// Enables raytracing if hardware supports it and RT setup succeeds.
     pub fn new(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
         let scene = RtSceneState::on_tee(&TeeBox::default());
-        Self::create(width, height, grid_config, true, Some(scene), None)
+        Self::create(width, height, grid_config, true, Some(scene))
     }
 
-    /// Create a headless renderer with a ball in flight and a tracer trail.
+    /// Create a headless renderer with a ball in flight and a tracer trail,
+    /// without ray tracing: [`OffscreenRenderer::update_flight`] with one
+    /// flight on a raster renderer.
     ///
-    /// `ball_pos` is the current ball center (bottom of sphere touches this Y - radius).
-    /// `trail_points` go from oldest (index 0) to newest (last = near ball_pos).
-    /// `camera` is used to orient the trail glow ribbon toward the viewer.
+    /// `ball_pos` is dimple's reference point of the ball (see
+    /// [`FlightRenderData`]). `trail_points` go from oldest (index 0) to
+    /// newest (last = near ball_pos). The trail glow ribbon faces `camera`.
+    /// The tracer fades over
+    /// [`DEFAULT_TRAIL_LIFETIME`](cf_scene::trail::DEFAULT_TRAIL_LIFETIME);
+    /// `_max_lifetime` is not used.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_flight(
         width: u32,
@@ -52,17 +56,19 @@ impl OffscreenRenderer {
         ball_pos: glam::Vec3,
         trail_points: &[TrailPoint],
         current_time: f64,
-        max_lifetime: f64,
+        _max_lifetime: f64,
         camera: &Camera,
     ) -> Result<Self, RenderError> {
-        let snapshot = Snapshot {
-            ball_pos,
-            trail_points,
-            current_time,
-            max_lifetime,
-            camera_pos: camera.position,
-        };
-        Self::create(width, height, grid_config, false, None, Some(&snapshot))
+        let mut renderer = Self::create(width, height, grid_config, false, None)?;
+        renderer.update_flight(
+            &[FlightRenderData {
+                ball_pos,
+                trail_points: trail_points.to_vec(),
+                current_time,
+            }],
+            camera,
+        );
+        Ok(renderer)
     }
 
     /// Create a headless renderer with RT reflection compositing for the static range.
@@ -74,10 +80,13 @@ impl OffscreenRenderer {
             glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
             RtTrail::default(),
         );
-        Self::create(width, height, grid_config, true, Some(scene), None)
+        Self::create(width, height, grid_config, true, Some(scene))
     }
 
-    /// Create a headless renderer with RT reflection compositing and a ball in flight.
+    /// Create a headless renderer with RT reflection compositing and a ball
+    /// in flight: [`OffscreenRenderer::update_flight`] with one flight on a
+    /// ray-traced renderer. The arguments are those of
+    /// [`OffscreenRenderer::new_with_flight`].
     ///
     /// Falls back to raster-only if RT hardware is not available or RT setup fails.
     #[allow(clippy::too_many_arguments)]
@@ -88,46 +97,32 @@ impl OffscreenRenderer {
         ball_pos: glam::Vec3,
         trail_points: &[TrailPoint],
         current_time: f64,
-        max_lifetime: f64,
+        _max_lifetime: f64,
         camera: &Camera,
     ) -> Result<Self, RenderError> {
-        let tee = TeeBox::default();
-        let ball_center = ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-
-        // Reflect the part of the trail the raster tracer draws.
-        let scene = RtSceneState::new(
-            ball_center,
-            RtTrail::new(trail_points, current_time, max_lifetime),
+        let scene = RtSceneState::on_tee(&TeeBox::default());
+        let mut renderer = Self::create(width, height, grid_config, true, Some(scene))?;
+        renderer.update_flight(
+            &[FlightRenderData {
+                ball_pos,
+                trail_points: trail_points.to_vec(),
+                current_time,
+            }],
+            camera,
         );
-        let snapshot = Snapshot {
-            ball_pos,
-            trail_points,
-            current_time,
-            max_lifetime,
-            camera_pos: camera.position,
-        };
-
-        Self::create(
-            width,
-            height,
-            grid_config,
-            true,
-            Some(scene),
-            Some(&snapshot),
-        )
+        Ok(renderer)
     }
 
     /// The constructor behind every public one: a device with or without
     /// ray tracing; reflections showing `rt_scene` when it is given and the
     /// device supports them (raster when they fail to set up); the ball on
-    /// the tee or `snapshot`'s.
+    /// the tee.
     fn create(
         width: u32,
         height: u32,
         grid_config: &GridConfig,
         enable_raytracing: bool,
         rt_scene: Option<RtSceneState>,
-        snapshot: Option<&Snapshot<'_>>,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
             validation: cfg!(debug_assertions),
@@ -144,7 +139,6 @@ impl OffscreenRenderer {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             vk::Extent2D { width, height },
             grid_config,
-            snapshot,
             rt_scene,
         )?;
 

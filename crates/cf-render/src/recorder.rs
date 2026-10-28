@@ -16,7 +16,7 @@ use crate::frame::{FrameContent, FrameResources};
 use crate::mode::RenderMode;
 use crate::pipeline::ScenePipelines;
 use crate::reflections::{Reflections, RtSceneState, TraceView};
-use crate::scene::{SceneGeometry, Snapshot};
+use crate::scene::SceneGeometry;
 
 /// Fraction of the frame width the chase-camera inset takes (right side).
 const CHASE_VIEWPORT_FRAC: f32 = 0.20;
@@ -113,8 +113,7 @@ pub(crate) struct SceneRecorder {
 impl SceneRecorder {
     /// Create the passes and pipelines for an `extent` image of
     /// `color_format` that the HUD pass leaves in `output_layout`, and the
-    /// scene of `grid` with the default tee box: the ball on the tee, or
-    /// `snapshot`'s ball and trail.
+    /// scene of `grid` with the default tee box and the ball on the tee.
     ///
     /// With `rt_scene` and a device that supports ray tracing, it adds
     /// reflections showing `rt_scene` and starts in `RayTraced` mode. If they
@@ -129,27 +128,20 @@ impl SceneRecorder {
         output_layout: vk::ImageLayout,
         extent: vk::Extent2D,
         grid: &GridConfig,
-        snapshot: Option<&Snapshot<'_>>,
         rt_scene: Option<RtSceneState>,
     ) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let pipelines =
             ScenePipelines::new(&gpu.device, color_format, gpu.depth_format, output_layout)?;
-        let geometry = match SceneGeometry::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            grid,
-            &tee,
-            snapshot,
-            gpu.wide_lines,
-        ) {
-            Ok(geometry) => geometry,
-            Err(e) => {
-                // SAFETY: Just created; no GPU work has used it.
-                unsafe { pipelines.destroy(&gpu.device) };
-                return Err(e);
-            }
-        };
+        let geometry =
+            match SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid, &tee, gpu.wide_lines) {
+                Ok(geometry) => geometry,
+                Err(e) => {
+                    // SAFETY: Just created; no GPU work has used it.
+                    unsafe { pipelines.destroy(&gpu.device) };
+                    return Err(e);
+                }
+            };
         let frame = match FrameResources::new(&gpu.device, &mut gpu.allocator) {
             Ok(frame) => frame,
             Err(e) => {
