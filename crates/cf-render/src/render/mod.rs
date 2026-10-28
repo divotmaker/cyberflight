@@ -493,6 +493,10 @@ impl Renderer {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
+        // This frame's semaphores and fence are in use now, whatever the
+        // present returns; the next frame takes the next set.
+        self.current_frame = (self.current_frame + 1) % self.image_available.len();
+
         // SAFETY: Presenting with valid swapchain and semaphore.
         unsafe {
             match self
@@ -507,8 +511,6 @@ impl Renderer {
                 Err(e) => return Err(RenderError::Vulkan(e)),
             }
         }
-
-        self.current_frame = (self.current_frame + 1) % self.image_available.len();
 
         if self.swapchain_stale {
             self.recreate_swapchain()?;
