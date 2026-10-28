@@ -13,12 +13,13 @@ use cf_scene::tee::{
 };
 use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 
+use crate::composite::CompositePass;
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
-use crate::gpu::{HostBuffer, load_shader, push_constants};
+use crate::gpu::{HostBuffer, push_constants};
 use crate::green::GreenEdge;
-use crate::pipeline::{GridPushConstants, ScenePipelines, overlay_render_pass};
+use crate::pipeline::{GridPushConstants, ScenePipelines};
 use crate::readback::FrameBuffers;
 use crate::recorder::{ChaseViewport, view_proj};
 use crate::render::FlightRenderData;
@@ -52,16 +53,7 @@ pub struct OffscreenRenderer {
 
     // Optional RT pipeline + composite pass (when RT hardware available).
     rt_pipeline: Option<RtPipeline>,
-    composite_render_pass: Option<vk::RenderPass>,
-    composite_framebuffer: Option<vk::Framebuffer>,
-    composite_pipeline: Option<vk::Pipeline>,
-    composite_pipeline_layout: Option<vk::PipelineLayout>,
-    composite_descriptor_set_layout: Option<vk::DescriptorSetLayout>,
-    composite_descriptor_pool: Option<vk::DescriptorPool>,
-    composite_descriptor_set: Option<vk::DescriptorSet>,
-    composite_sampler: Option<vk::Sampler>,
-    composite_vert_module: Option<vk::ShaderModule>,
-    composite_frag_module: Option<vk::ShaderModule>,
+    composite: Option<CompositePass>,
     /// Ball center position for RT push constants (xyz).
     rt_ball_center: glam::Vec3,
     /// RT trail fade distance (arc length of the reflected trail, meters).
@@ -170,45 +162,12 @@ impl OffscreenRenderer {
         // Build RT pipeline + composite pass if hardware supports it.
         let ball_center = glam::Vec3::new(0.0, tee.ball_radius, 0.0);
         let geometries = build_scene_geometry(grid_config, &tee, &[]);
-        let (
-            rt_pipeline,
-            composite_render_pass,
-            composite_framebuffer,
-            composite_pipeline,
-            composite_pipeline_layout,
-            composite_descriptor_set_layout,
-            composite_descriptor_pool,
-            composite_descriptor_set,
-            composite_sampler,
-            composite_vert_module,
-            composite_frag_module,
-        ) = if rt_available {
+        let (rt_pipeline, composite) = if rt_available {
             let rtp = RtPipeline::new(&mut gpu, width, height, &geometries)?;
-            let composite = Self::create_composite_pass(
-                &gpu.device,
-                OFFSCREEN_FORMAT,
-                target.color.view(),
-                rtp.storage.view(),
-                width,
-                height,
-            )?;
-            (
-                Some(rtp),
-                Some(composite.0),
-                Some(composite.1),
-                Some(composite.2),
-                Some(composite.3),
-                Some(composite.4),
-                Some(composite.5),
-                Some(composite.6),
-                Some(composite.7),
-                Some(composite.8),
-                Some(composite.9),
-            )
+            let composite = CompositePass::new(&gpu.device, OFFSCREEN_FORMAT, rtp.storage.view())?;
+            (Some(rtp), Some(composite))
         } else {
-            (
-                None, None, None, None, None, None, None, None, None, None, None,
-            )
+            (None, None)
         };
 
         Ok(Self {
@@ -233,16 +192,7 @@ impl OffscreenRenderer {
             fence,
 
             rt_pipeline,
-            composite_render_pass,
-            composite_framebuffer,
-            composite_pipeline,
-            composite_pipeline_layout,
-            composite_descriptor_set_layout,
-            composite_descriptor_pool,
-            composite_descriptor_set,
-            composite_sampler,
-            composite_vert_module,
-            composite_frag_module,
+            composite,
             rt_ball_center: ball_center,
             rt_trail_fade_dist: 0.0,
             rt_trail_tail_t: 0.0,
@@ -397,16 +347,7 @@ impl OffscreenRenderer {
             fence,
 
             rt_pipeline: None,
-            composite_render_pass: None,
-            composite_framebuffer: None,
-            composite_pipeline: None,
-            composite_pipeline_layout: None,
-            composite_descriptor_set_layout: None,
-            composite_descriptor_pool: None,
-            composite_descriptor_set: None,
-            composite_sampler: None,
-            composite_vert_module: None,
-            composite_frag_module: None,
+            composite: None,
             rt_ball_center: ball_center,
             rt_trail_fade_dist: 0.0,
             rt_trail_tail_t: 0.0,
@@ -629,47 +570,12 @@ impl OffscreenRenderer {
         };
 
         // Build RT pipeline + composite pass if hardware supports it.
-        let (
-            rt_pipeline,
-            composite_render_pass,
-            composite_framebuffer,
-            composite_pipeline,
-            composite_pipeline_layout,
-            composite_descriptor_set_layout,
-            composite_descriptor_pool,
-            composite_descriptor_set,
-            composite_sampler,
-            composite_vert_module,
-            composite_frag_module,
-        ) = if rt_available {
+        let (rt_pipeline, composite) = if rt_available {
             let rtp = RtPipeline::new(&mut gpu, width, height, geometries)?;
-
-            let composite = Self::create_composite_pass(
-                &gpu.device,
-                OFFSCREEN_FORMAT,
-                target.color.view(),
-                rtp.storage.view(),
-                width,
-                height,
-            )?;
-
-            (
-                Some(rtp),
-                Some(composite.0),
-                Some(composite.1),
-                Some(composite.2),
-                Some(composite.3),
-                Some(composite.4),
-                Some(composite.5),
-                Some(composite.6),
-                Some(composite.7),
-                Some(composite.8),
-                Some(composite.9),
-            )
+            let composite = CompositePass::new(&gpu.device, OFFSCREEN_FORMAT, rtp.storage.view())?;
+            (Some(rtp), Some(composite))
         } else {
-            (
-                None, None, None, None, None, None, None, None, None, None, None,
-            )
+            (None, None)
         };
 
         Ok(Self {
@@ -694,16 +600,7 @@ impl OffscreenRenderer {
             fence,
 
             rt_pipeline,
-            composite_render_pass,
-            composite_framebuffer,
-            composite_pipeline,
-            composite_pipeline_layout,
-            composite_descriptor_set_layout,
-            composite_descriptor_pool,
-            composite_descriptor_set,
-            composite_sampler,
-            composite_vert_module,
-            composite_frag_module,
+            composite,
             rt_ball_center: ball_center,
             rt_trail_fade_dist: trail.fade_dist,
             rt_trail_tail_t: trail.tail_t,
@@ -1295,7 +1192,7 @@ impl OffscreenRenderer {
 
             // ── RT reflection compositing ──
             if rt_active {
-                self.record_rt_composite(camera, width, height, extent);
+                self.record_rt_composite(camera, width, height, extent, target.overlay);
             }
 
             // The HUD pass ends the frame and leaves the image in
@@ -1411,7 +1308,8 @@ impl OffscreenRenderer {
     /// 1. Transition RT storage image: UNDEFINED -> GENERAL
     /// 2. Trace RT reflection rays
     /// 3. Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
-    /// 4. Composite render pass (LOAD, additive blend, final_layout = COLOR_ATTACHMENT_OPTIMAL)
+    /// 4. Composite pass into `overlay` (LOAD, additive blend, stays in
+    ///    `COLOR_ATTACHMENT_OPTIMAL`)
     ///
     /// # Safety
     /// The command buffer must be in the recording state, outside any render pass.
@@ -1421,6 +1319,7 @@ impl OffscreenRenderer {
         width: u32,
         height: u32,
         extent: vk::Extent2D,
+        overlay: vk::Framebuffer,
     ) {
         // SAFETY: The command buffer is in the recording state, outside any render pass.
         // All Vulkan handles are valid (created in the constructor, not yet destroyed).
@@ -1482,280 +1381,12 @@ impl OffscreenRenderer {
                     .subresource_range(subresource_range)],
             );
 
-            // Step 4: Composite render pass (LOAD, additive blend fullscreen triangle).
-            let composite_rp = self
-                .composite_render_pass
-                .expect("composite render pass present");
-            let composite_fb = self
-                .composite_framebuffer
-                .expect("composite framebuffer present");
-            let composite_pl = self.composite_pipeline.expect("composite pipeline present");
-            let composite_layout = self
-                .composite_pipeline_layout
-                .expect("composite layout present");
-            let composite_ds = self
-                .composite_descriptor_set
-                .expect("composite descriptor set present");
-
-            let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(composite_rp)
-                .framebuffer(composite_fb)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent,
-                });
-
-            device.cmd_begin_render_pass(
-                self.command_buffer,
-                &render_pass_info,
-                vk::SubpassContents::INLINE,
-            );
-
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: width as f32,
-                height: height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
-
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            };
-            device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
-
-            device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                composite_pl,
-            );
-            device.cmd_bind_descriptor_sets(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                composite_layout,
-                0,
-                &[composite_ds],
-                &[],
-            );
-
-            // Fullscreen triangle: 3 vertices, no vertex buffer.
-            device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
-
-            device.cmd_end_render_pass(self.command_buffer);
+            // Step 4: Composite pass (LOAD, additive blend fullscreen triangle)
+            // into the overlay framebuffer.
+            if let Some(composite) = &self.composite {
+                composite.record(device, self.command_buffer, overlay, extent);
+            }
         } // unsafe
-    }
-
-    /// Create the offscreen composite pass for blending RT reflections.
-    ///
-    /// Returns a tuple of all Vulkan objects (render_pass, framebuffer, pipeline,
-    /// pipeline_layout, descriptor_set_layout, descriptor_pool, descriptor_set,
-    /// sampler, vert_module, frag_module).
-    #[allow(clippy::type_complexity)]
-    fn create_composite_pass(
-        device: &ash::Device,
-        format: vk::Format,
-        color_view: vk::ImageView,
-        rt_storage_view: vk::ImageView,
-        width: u32,
-        height: u32,
-    ) -> Result<
-        (
-            vk::RenderPass,
-            vk::Framebuffer,
-            vk::Pipeline,
-            vk::PipelineLayout,
-            vk::DescriptorSetLayout,
-            vk::DescriptorPool,
-            vk::DescriptorSet,
-            vk::Sampler,
-            vk::ShaderModule,
-            vk::ShaderModule,
-        ),
-        RenderError,
-    > {
-        // Render pass: color-only, LOAD existing content, final_layout = COLOR_ATTACHMENT_OPTIMAL.
-        let render_pass =
-            overlay_render_pass(device, format, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)?;
-
-        // Framebuffer wrapping the offscreen target's color image view.
-        let fb_attachments = [color_view];
-        let fb_info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .attachments(&fb_attachments)
-            .width(width)
-            .height(height)
-            .layers(1);
-        // SAFETY: Creating framebuffer.
-        let framebuffer = unsafe {
-            device
-                .create_framebuffer(&fb_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Sampler for the RT storage image (nearest — 1:1 pixel mapping).
-        let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST)
-            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-        // SAFETY: Creating sampler.
-        let sampler = unsafe {
-            device
-                .create_sampler(&sampler_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Descriptor set layout: binding 0 = combined image sampler.
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        let bindings = [binding];
-        let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        // SAFETY: Creating descriptor set layout.
-        let descriptor_set_layout = unsafe {
-            device
-                .create_descriptor_set_layout(&ds_layout_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Pipeline layout (descriptor set, no push constants).
-        let set_layouts = [descriptor_set_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
-        // SAFETY: Creating pipeline layout.
-        let pipeline_layout = unsafe {
-            device
-                .create_pipeline_layout(&layout_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Shaders.
-        let vert_module = load_shader(device, include_bytes!("../shaders/composite.vert.spv"))?;
-        let frag_module = load_shader(device, include_bytes!("../shaders/composite.frag.spv"))?;
-
-        // Pipeline: fullscreen triangle, additive blending, no vertex input.
-        let entry_point = c"main";
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vert_module)
-                .name(entry_point),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(frag_module)
-                .name(entry_point),
-        ];
-
-        // No vertex input (positions are hardcoded in the vertex shader).
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
-        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-        // Additive blending: src + dst.
-        let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(true)
-            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-            .dst_color_blend_factor(vk::BlendFactor::ONE)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-            .alpha_blend_op(vk::BlendOp::ADD);
-        let blend_attachments = [blend_attachment];
-        let color_blend =
-            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-        let create_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&input_assembly)
-            .viewport_state(&viewport_state)
-            .rasterization_state(&rasterization)
-            .multisample_state(&multisample)
-            .color_blend_state(&color_blend)
-            .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
-
-        // SAFETY: Creating graphics pipeline.
-        let pipeline = unsafe {
-            device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
-                .map_err(|(_pipelines, err)| RenderError::Vulkan(err))?[0]
-        };
-
-        // Descriptor pool + set.
-        let pool_size = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1);
-        let pool_sizes = [pool_size];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
-            .pool_sizes(&pool_sizes);
-        // SAFETY: Creating descriptor pool.
-        let descriptor_pool = unsafe {
-            device
-                .create_descriptor_pool(&pool_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&set_layouts);
-        // SAFETY: Allocating descriptor set.
-        let descriptor_set = unsafe {
-            device
-                .allocate_descriptor_sets(&alloc_info)
-                .map_err(RenderError::Vulkan)?[0]
-        };
-
-        // Write the RT storage image into the descriptor set.
-        let image_info = vk::DescriptorImageInfo::default()
-            .image_view(rt_storage_view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .sampler(sampler);
-        let image_infos = [image_info];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&image_infos);
-        // SAFETY: Updating descriptor set.
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
-
-        Ok((
-            render_pass,
-            framebuffer,
-            pipeline,
-            pipeline_layout,
-            descriptor_set_layout,
-            descriptor_pool,
-            descriptor_set,
-            sampler,
-            vert_module,
-            frag_module,
-        ))
     }
 
     fn allocate_command_buffer(gpu: &GpuContext) -> Result<vk::CommandBuffer, RenderError> {
@@ -1822,33 +1453,8 @@ impl Drop for OffscreenRenderer {
                 }
             }
 
-            // Clean up RT composite resources.
-            if let Some(fb) = self.composite_framebuffer {
-                self.gpu.device.destroy_framebuffer(fb, None);
-            }
-            if let Some(pl) = self.composite_pipeline {
-                self.gpu.device.destroy_pipeline(pl, None);
-            }
-            if let Some(layout) = self.composite_pipeline_layout {
-                self.gpu.device.destroy_pipeline_layout(layout, None);
-            }
-            if let Some(pool) = self.composite_descriptor_pool {
-                self.gpu.device.destroy_descriptor_pool(pool, None);
-            }
-            if let Some(dsl) = self.composite_descriptor_set_layout {
-                self.gpu.device.destroy_descriptor_set_layout(dsl, None);
-            }
-            if let Some(s) = self.composite_sampler {
-                self.gpu.device.destroy_sampler(s, None);
-            }
-            if let Some(rp) = self.composite_render_pass {
-                self.gpu.device.destroy_render_pass(rp, None);
-            }
-            if let Some(m) = self.composite_vert_module {
-                self.gpu.device.destroy_shader_module(m, None);
-            }
-            if let Some(m) = self.composite_frag_module {
-                self.gpu.device.destroy_shader_module(m, None);
+            if let Some(composite) = self.composite.take() {
+                composite.destroy(&self.gpu.device);
             }
 
             if let Some(rtp) = self.rt_pipeline.take() {

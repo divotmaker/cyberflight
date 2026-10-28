@@ -22,30 +22,16 @@ pub struct FlightRenderData {
     pub current_time: f64,
 }
 
+use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::{HostBuffer, Image2d, Image2dDesc, load_shader};
+use crate::gpu::{HostBuffer, Image2d, Image2dDesc};
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
-use crate::pipeline::{ScenePipelines, overlay_render_pass};
+use crate::pipeline::ScenePipelines;
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::window::Swapchain;
-
-/// RT reflection composite pass: fullscreen triangle that samples the RT storage
-/// image and additively blends reflections onto the rasterized scene.
-pub(super) struct CompositePass {
-    pub render_pass: vk::RenderPass,
-    pub framebuffers: Vec<vk::Framebuffer>,
-    pub pipeline: vk::Pipeline,
-    pub pipeline_layout: vk::PipelineLayout,
-    descriptor_set_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    pub descriptor_set: vk::DescriptorSet,
-    sampler: vk::Sampler,
-    vert_module: vk::ShaderModule,
-    frag_module: vk::ShaderModule,
-}
 
 /// Complete renderer: owns GPU resources and draws frames.
 pub struct Renderer {
@@ -86,7 +72,8 @@ pub struct Renderer {
     window_extent: vk::Extent2D,
     /// Swapchain must be rebuilt before the next acquire (out of date or suboptimal).
     swapchain_stale: bool,
-    // Colour-only framebuffers of the HUD pass, one per swapchain image.
+    // Colour-only framebuffers of the HUD and composite passes, one per
+    // swapchain image.
     pub(super) overlay_framebuffers: Vec<vk::Framebuffer>,
     // Ray tracing (optional, only when hardware supports it).
     pub render_mode: RenderMode,
@@ -245,9 +232,9 @@ impl Renderer {
 
         // Build composite pass if RT pipeline is available.
         let composite = if let Some(ref rtp) = rt_pipeline {
-            Some(Self::create_composite_pass(
+            Some(CompositePass::new(
                 &gpu.device,
-                &swapchain,
+                swapchain.format,
                 rtp.storage.view(),
             )?)
         } else {
@@ -575,32 +562,10 @@ impl Renderer {
                 actual_h,
             )?;
         }
-        if let Some(ref mut composite) = self.composite {
-            for fb in composite.framebuffers.drain(..) {
-                // SAFETY: Composite framebuffers no longer in use (waited idle above).
-                unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
-            }
-            composite.framebuffers = Self::create_overlay_framebuffers(
-                &self.gpu.device,
-                &self.swapchain,
-                composite.render_pass,
-            )?;
-
-            // Update composite descriptor set to point at the resized RT storage image.
-            if let Some(ref rtp) = self.rt_pipeline {
-                let image_info = vk::DescriptorImageInfo::default()
-                    .image_view(rtp.storage.view())
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .sampler(composite.sampler);
-                let image_infos = [image_info];
-                let write = vk::WriteDescriptorSet::default()
-                    .dst_set(composite.descriptor_set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&image_infos);
-                // SAFETY: Updating descriptor set with valid image view.
-                unsafe { self.gpu.device.update_descriptor_sets(&[write], &[]) };
-            }
+        // Point the composite descriptor at the resized RT storage image.
+        if let (Some(composite), Some(rtp)) = (&self.composite, &self.rt_pipeline) {
+            // SAFETY: The device is idle (waited above).
+            unsafe { composite.bind_storage(&self.gpu.device, rtp.storage.view()) };
         }
 
         // Reallocate command buffers if image count changed
@@ -788,8 +753,7 @@ impl Renderer {
             .collect()
     }
 
-    /// Colour-only framebuffers over the swapchain images for `render_pass`
-    /// (the HUD pass or the composite pass).
+    /// Colour-only framebuffers over the swapchain images for `render_pass`.
     fn create_overlay_framebuffers(
         device: &ash::Device,
         swapchain: &Swapchain,
@@ -834,184 +798,6 @@ impl Renderer {
                 name: "depth",
             },
         )
-    }
-
-    /// Create the composite pass for blending RT reflections onto the rasterized scene.
-    fn create_composite_pass(
-        device: &ash::Device,
-        swapchain: &Swapchain,
-        rt_storage_view: vk::ImageView,
-    ) -> Result<CompositePass, RenderError> {
-        // Render pass: color-only, LOAD, stays at COLOR_ATTACHMENT_OPTIMAL.
-        let render_pass = overlay_render_pass(
-            device,
-            swapchain.format,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        )?;
-
-        let framebuffers = Self::create_overlay_framebuffers(device, swapchain, render_pass)?;
-
-        // Sampler for the RT storage image (nearest — 1:1 pixel mapping).
-        let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST)
-            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-        // SAFETY: Creating sampler.
-        let sampler = unsafe {
-            device
-                .create_sampler(&sampler_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Descriptor set layout: binding 0 = combined image sampler.
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        let bindings = [binding];
-        let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        // SAFETY: Creating descriptor set layout.
-        let descriptor_set_layout = unsafe {
-            device
-                .create_descriptor_set_layout(&ds_layout_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Pipeline layout (descriptor set, no push constants).
-        let set_layouts = [descriptor_set_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
-        // SAFETY: Creating pipeline layout.
-        let pipeline_layout = unsafe {
-            device
-                .create_pipeline_layout(&layout_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Shaders
-        let vert_module = load_shader(device, include_bytes!("../../shaders/composite.vert.spv"))?;
-        let frag_module = load_shader(device, include_bytes!("../../shaders/composite.frag.spv"))?;
-
-        // Pipeline: fullscreen triangle, additive blending, no vertex input.
-        let entry_point = c"main";
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vert_module)
-                .name(entry_point),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(frag_module)
-                .name(entry_point),
-        ];
-
-        // No vertex input (positions are hardcoded in the vertex shader).
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE);
-        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-        // Additive blending: src + dst.
-        let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(true)
-            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-            .dst_color_blend_factor(vk::BlendFactor::ONE)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-            .alpha_blend_op(vk::BlendOp::ADD);
-        let blend_attachments = [blend_attachment];
-        let color_blend =
-            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-        let create_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&input_assembly)
-            .viewport_state(&viewport_state)
-            .rasterization_state(&rasterization)
-            .multisample_state(&multisample)
-            .color_blend_state(&color_blend)
-            .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
-
-        // SAFETY: Creating graphics pipeline.
-        let pipeline = unsafe {
-            device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
-                .map_err(|(_pipelines, err)| RenderError::Vulkan(err))?[0]
-        };
-
-        // Descriptor pool + set.
-        let pool_size = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1);
-        let pool_sizes = [pool_size];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
-            .pool_sizes(&pool_sizes);
-        // SAFETY: Creating descriptor pool.
-        let descriptor_pool = unsafe {
-            device
-                .create_descriptor_pool(&pool_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&set_layouts);
-        // SAFETY: Allocating descriptor set.
-        let descriptor_set = unsafe {
-            device
-                .allocate_descriptor_sets(&alloc_info)
-                .map_err(RenderError::Vulkan)?[0]
-        };
-
-        // Write the RT storage image into the descriptor set.
-        let image_info = vk::DescriptorImageInfo::default()
-            .image_view(rt_storage_view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .sampler(sampler);
-        let image_infos = [image_info];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&image_infos);
-        // SAFETY: Updating descriptor set.
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
-
-        Ok(CompositePass {
-            render_pass,
-            framebuffers,
-            pipeline,
-            pipeline_layout,
-            descriptor_set_layout,
-            descriptor_pool,
-            descriptor_set,
-            sampler,
-            vert_module,
-            frag_module,
-        })
     }
 
     fn allocate_command_buffers(
@@ -1111,30 +897,8 @@ impl Drop for Renderer {
                 depth.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
-            if let Some(ref mut composite) = self.composite {
-                for fb in &composite.framebuffers {
-                    self.gpu.device.destroy_framebuffer(*fb, None);
-                }
-                self.gpu.device.destroy_pipeline(composite.pipeline, None);
-                self.gpu
-                    .device
-                    .destroy_pipeline_layout(composite.pipeline_layout, None);
-                self.gpu
-                    .device
-                    .destroy_descriptor_pool(composite.descriptor_pool, None);
-                self.gpu
-                    .device
-                    .destroy_descriptor_set_layout(composite.descriptor_set_layout, None);
-                self.gpu.device.destroy_sampler(composite.sampler, None);
-                self.gpu
-                    .device
-                    .destroy_render_pass(composite.render_pass, None);
-                self.gpu
-                    .device
-                    .destroy_shader_module(composite.vert_module, None);
-                self.gpu
-                    .device
-                    .destroy_shader_module(composite.frag_module, None);
+            if let Some(composite) = self.composite.take() {
+                composite.destroy(&self.gpu.device);
             }
 
             if let Some(rtp) = self.rt_pipeline.take() {

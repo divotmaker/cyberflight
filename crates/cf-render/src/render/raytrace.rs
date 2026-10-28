@@ -114,11 +114,9 @@ impl Renderer {
         }
     }
 
-    /// Composite RT reflections onto the rasterized scene with additive blending.
-    ///
-    /// Draws a fullscreen triangle sampling the RT storage image.
-    /// The render pass preserves scene content (load_op = LOAD) and leaves
-    /// the image at `COLOR_ATTACHMENT_OPTIMAL` for the HUD pass.
+    /// Composite RT reflections onto the rasterized scene with additive
+    /// blending, in the overlay framebuffer of `image_index`. The image stays
+    /// in `COLOR_ATTACHMENT_OPTIMAL` for the HUD pass.
     ///
     /// # Safety
     /// The command buffer must be in the recording state. The swapchain image
@@ -129,52 +127,16 @@ impl Renderer {
         cb: vk::CommandBuffer,
         image_index: u32,
     ) {
-        let device = &self.gpu.device;
-        let composite = self.composite.as_ref().expect("composite pass present");
-        let extent = self.swapchain.extent;
-
-        // SAFETY: Recording composite render pass commands.
-        unsafe {
-            let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(composite.render_pass)
-                .framebuffer(composite.framebuffers[image_index as usize])
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent,
-                });
-
-            device.cmd_begin_render_pass(cb, &render_pass_info, vk::SubpassContents::INLINE);
-
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: extent.width as f32,
-                height: extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            device.cmd_set_viewport(cb, 0, &[viewport]);
-
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            };
-            device.cmd_set_scissor(cb, 0, &[scissor]);
-
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, composite.pipeline);
-            device.cmd_bind_descriptor_sets(
-                cb,
-                vk::PipelineBindPoint::GRAPHICS,
-                composite.pipeline_layout,
-                0,
-                &[composite.descriptor_set],
-                &[],
-            );
-
-            // Fullscreen triangle: 3 vertices, no vertex buffer
-            device.cmd_draw(cb, 3, 1, 0, 0);
-
-            device.cmd_end_render_pass(cb);
+        if let Some(composite) = &self.composite {
+            // SAFETY: The caller guarantees the command buffer and image states.
+            unsafe {
+                composite.record(
+                    &self.gpu.device,
+                    cb,
+                    self.overlay_framebuffers[image_index as usize],
+                    self.swapchain.extent,
+                );
+            }
         }
     }
 }
