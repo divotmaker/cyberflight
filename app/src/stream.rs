@@ -1,4 +1,5 @@
-//! Headless streaming mode: renders to HLS video via ffmpeg.
+//! Headless streaming mode: renders frames offscreen and streams them as
+//! H.264 over UDP or HLS via ffmpeg.
 
 use std::path::PathBuf;
 use std::thread;
@@ -237,6 +238,15 @@ fn start_http_server(port: u16, dir: PathBuf) -> Result<()> {
         dir.display()
     );
 
+    let header = |field: &str, value: &str| {
+        tiny_http::Header::from_bytes(field, value)
+            .map_err(|()| anyhow::anyhow!("invalid HTTP header {field}: {value}"))
+    };
+    let m3u8_type = header("Content-Type", "application/vnd.apple.mpegurl")?;
+    let ts_type = header("Content-Type", "video/mp2t")?;
+    let other_type = header("Content-Type", "application/octet-stream")?;
+    let allow_any_origin = header("Access-Control-Allow-Origin", "*")?;
+
     thread::spawn(move || {
         for request in server.incoming_requests() {
             let url_path = request.url().trim_start_matches('/');
@@ -254,26 +264,25 @@ fn start_http_server(port: u16, dir: PathBuf) -> Result<()> {
             });
 
             let content_type = match file_path.extension().and_then(|e| e.to_str()) {
-                Some("m3u8") => "application/vnd.apple.mpegurl",
-                Some("ts") => "video/mp2t",
-                _ => "application/octet-stream",
+                Some("m3u8") => &m3u8_type,
+                Some("ts") => &ts_type,
+                _ => &other_type,
             };
 
             match std::fs::File::open(&file_path) {
                 Ok(file) => {
                     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-                    let response = tiny_http::Response::from_file(file)
-                        .with_header(
-                            tiny_http::Header::from_bytes("Content-Type", content_type).unwrap(),
-                        )
-                        .with_header(
-                            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*")
-                                .unwrap(),
-                        )
+                    let mut response = tiny_http::Response::from_file(file)
+                        .with_header(content_type.clone())
+                        .with_header(allow_any_origin.clone())
                         .with_status_code(200);
-                    let _ = request.respond(response.with_header(
-                        tiny_http::Header::from_bytes("Content-Length", len.to_string()).unwrap(),
-                    ));
+                    // A decimal length is always a valid header value.
+                    if let Ok(length) =
+                        tiny_http::Header::from_bytes("Content-Length", len.to_string())
+                    {
+                        response.add_header(length);
+                    }
+                    let _ = request.respond(response);
                 }
                 Err(_) => {
                     let _ = request.respond(
