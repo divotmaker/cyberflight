@@ -5,19 +5,17 @@ use ash::vk;
 use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex};
-use cf_scene::tee::TeeBox;
-use cf_scene::trail::TrailPoint;
 
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
+use crate::flight::FlightRenderData;
 use crate::framebuffer::OffscreenTarget;
-use crate::readback::FrameBuffers;
+use crate::mode::{RenderMode, RtMode};
+use crate::readback::Frame;
 use crate::recorder::{FrameTarget, SceneRecorder};
-use crate::reflections::RtSceneState;
-use crate::render::FlightRenderData;
-use crate::rt_offscreen::RtTrail;
 
-/// Offscreen renderer for headless PNG generation.
+/// Headless renderer: draws frames into an image and reads them back, for
+/// screenshots and streaming.
 pub struct OffscreenRenderer {
     /// Passes, scene, per-frame content, reflections and chase camera.
     recorder: ManuallyDrop<SceneRecorder>,
@@ -31,118 +29,35 @@ pub struct OffscreenRenderer {
 const OFFSCREEN_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
 impl OffscreenRenderer {
-    /// Create a headless renderer for the given grid configuration.
-    /// Enables raytracing if hardware supports it and RT setup succeeds.
-    pub fn new(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
-        let scene = RtSceneState::on_tee(&TeeBox::default());
-        Self::create(width, height, grid_config, true, Some(scene))
-    }
-
-    /// Create a headless renderer with a ball in flight and a tracer trail,
-    /// without ray tracing: [`OffscreenRenderer::update_flight`] with one
-    /// flight on a raster renderer.
+    /// Create a `width` × `height` renderer of the range `grid_config`, with
+    /// the ball on the tee and no HUD.
     ///
-    /// `ball_pos` is dimple's reference point of the ball (see
-    /// [`FlightRenderData`]). `trail_points` go from oldest (index 0) to
-    /// newest (last = near ball_pos). The trail glow ribbon faces `camera`.
-    /// The tracer fades over
-    /// [`DEFAULT_TRAIL_LIFETIME`](cf_scene::trail::DEFAULT_TRAIL_LIFETIME);
-    /// `_max_lifetime` is not used.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_flight(
+    /// `RtMode::Off` creates the device without ray tracing; `Auto` requests
+    /// it and ray-traces floor reflections when the GPU supports them and
+    /// they set up (otherwise it renders raster and says so on stderr).
+    pub fn new(
         width: u32,
         height: u32,
         grid_config: &GridConfig,
-        ball_pos: glam::Vec3,
-        trail_points: &[TrailPoint],
-        current_time: f64,
-        _max_lifetime: f64,
-        camera: &Camera,
-    ) -> Result<Self, RenderError> {
-        let mut renderer = Self::create(width, height, grid_config, false, None)?;
-        renderer.update_flight(
-            &[FlightRenderData {
-                ball_pos,
-                trail_points: trail_points.to_vec(),
-                current_time,
-            }],
-            camera,
-        );
-        Ok(renderer)
-    }
-
-    /// Create a headless renderer with RT reflection compositing for the static range.
-    ///
-    /// Falls back to raster-only if RT hardware is not available or RT setup fails.
-    pub fn new_rt(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
-        let tee = TeeBox::default();
-        let scene = RtSceneState::new(
-            glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
-            RtTrail::default(),
-        );
-        Self::create(width, height, grid_config, true, Some(scene))
-    }
-
-    /// Create a headless renderer with RT reflection compositing and a ball
-    /// in flight: [`OffscreenRenderer::update_flight`] with one flight on a
-    /// ray-traced renderer. The arguments are those of
-    /// [`OffscreenRenderer::new_with_flight`].
-    ///
-    /// Falls back to raster-only if RT hardware is not available or RT setup fails.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_flight_rt(
-        width: u32,
-        height: u32,
-        grid_config: &GridConfig,
-        ball_pos: glam::Vec3,
-        trail_points: &[TrailPoint],
-        current_time: f64,
-        _max_lifetime: f64,
-        camera: &Camera,
-    ) -> Result<Self, RenderError> {
-        let scene = RtSceneState::on_tee(&TeeBox::default());
-        let mut renderer = Self::create(width, height, grid_config, true, Some(scene))?;
-        renderer.update_flight(
-            &[FlightRenderData {
-                ball_pos,
-                trail_points: trail_points.to_vec(),
-                current_time,
-            }],
-            camera,
-        );
-        Ok(renderer)
-    }
-
-    /// The constructor behind every public one: a device with or without
-    /// ray tracing; reflections showing `rt_scene` when it is given and the
-    /// device supports them (raster when they fail to set up); the ball on
-    /// the tee.
-    fn create(
-        width: u32,
-        height: u32,
-        grid_config: &GridConfig,
-        enable_raytracing: bool,
-        rt_scene: Option<RtSceneState>,
+        rt: RtMode,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
             validation: cfg!(debug_assertions),
-            enable_raytracing,
+            enable_raytracing: rt == RtMode::Auto,
         };
 
         let mut gpu = GpuContext::new_headless(config)?;
 
-        // Reflections when `rt_scene` is given and the device supports them;
-        // raster if they fail to set up.
         let recorder = SceneRecorder::new(
             &mut gpu,
             OFFSCREEN_FORMAT,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             vk::Extent2D { width, height },
             grid_config,
-            rt_scene,
+            rt,
         )?;
 
-        let target = OffscreenTarget::new(
+        let target = match OffscreenTarget::new(
             &gpu.device,
             &mut gpu.allocator,
             width,
@@ -151,16 +66,36 @@ impl OffscreenRenderer {
             gpu.depth_format,
             recorder.scene_pass(),
             recorder.hud_pass(),
-        )?;
+        ) {
+            Ok(target) => target,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used it.
+                unsafe { recorder.destroy(&gpu.device, &mut gpu.allocator) };
+                return Err(e);
+            }
+        };
 
-        let command_buffer = Self::allocate_command_buffer(&gpu)?;
-
-        let fence_info = vk::FenceCreateInfo::default();
-        // SAFETY: Creating a fence.
-        let fence = unsafe {
-            gpu.device
-                .create_fence(&fence_info, None)
-                .map_err(RenderError::Vulkan)?
+        let sync = Self::allocate_command_buffer(&gpu).and_then(|command_buffer| {
+            let fence_info = vk::FenceCreateInfo::default();
+            // SAFETY: Creating a fence.
+            let fence = unsafe {
+                gpu.device
+                    .create_fence(&fence_info, None)
+                    .map_err(RenderError::Vulkan)?
+            };
+            Ok((command_buffer, fence))
+        });
+        let (command_buffer, fence) = match sync {
+            Ok(sync) => sync,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used them. A command
+                // buffer is freed with the pool.
+                unsafe {
+                    target.destroy(&gpu.device, &mut gpu.allocator);
+                    recorder.destroy(&gpu.device, &mut gpu.allocator);
+                }
+                return Err(e);
+            }
         };
 
         Ok(Self {
@@ -172,20 +107,16 @@ impl OffscreenRenderer {
         })
     }
 
-    /// Whether this renderer has RT reflection compositing enabled.
+    /// `RayTraced` when the renderer draws floor reflections, else `Rasterized`.
     #[must_use]
-    pub fn has_rt(&self) -> bool {
-        self.recorder.has_reflections()
+    pub fn render_mode(&self) -> RenderMode {
+        self.recorder.mode()
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
     /// the renderer's grid; `None` draws nothing. Replaces any green set
-    /// before. `_grid` must be the grid the renderer was created with.
-    pub fn set_green(
-        &mut self,
-        green: Option<&GreenConfig>,
-        _grid: &GridConfig,
-    ) -> Result<(), RenderError> {
+    /// before.
+    pub fn set_green(&mut self, green: Option<&GreenConfig>) -> Result<(), RenderError> {
         self.recorder.set_green(&mut self.gpu, green)
     }
 
@@ -194,28 +125,6 @@ impl OffscreenRenderer {
     /// Pass `Some(camera)` while a ball is being followed, `None` otherwise.
     pub fn set_chase_camera(&mut self, camera: Option<Camera>) {
         self.recorder.set_chase_camera(camera);
-    }
-
-    /// Set the HUD overlay geometry (pixel coordinates) for the next
-    /// `render`; the same as [`OffscreenRenderer::update_hud`].
-    ///
-    /// # Errors
-    /// None; the HUD buffers always exist.
-    pub fn set_hud(
-        &mut self,
-        lines: &[GridVertex],
-        fills: &[GridVertex],
-    ) -> Result<(), RenderError> {
-        self.update_hud(lines, fills);
-        Ok(())
-    }
-
-    /// Does nothing: the per-frame flight and HUD buffers always exist.
-    ///
-    /// # Errors
-    /// None.
-    pub fn init_streaming(&mut self) -> Result<(), RenderError> {
-        Ok(())
     }
 
     /// Update dynamic flight geometry for the next `render`. Reflections
@@ -230,18 +139,12 @@ impl OffscreenRenderer {
         self.recorder.update_hud(lines, fills);
     }
 
-    /// Update HUD overlay geometry for the next `render`; the same as
-    /// [`OffscreenRenderer::update_hud`].
-    pub fn update_hud_streaming(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
-        self.update_hud(lines, fills);
-    }
-
-    /// Render the grid and read back the result as RGBA8 pixels.
+    /// Render a frame seen from `camera` and read it back.
     ///
-    /// When RT is enabled, renders the raster scene, traces RT reflection
-    /// rays, and composites them onto the rasterized output. The HUD is
-    /// drawn last, over the scene and its reflections.
-    pub fn render(&mut self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
+    /// In `RayTraced` mode, traces the floor reflections and composites them
+    /// onto the raster scene. The HUD is drawn last, over the scene and its
+    /// reflections.
+    pub fn render(&mut self, camera: &Camera) -> Result<Frame<'_>, RenderError> {
         let target = &self.target;
         let device = &self.gpu.device;
         let width = target.width;
@@ -346,17 +249,14 @@ impl OffscreenRenderer {
                 .map_err(RenderError::Vulkan)?;
         }
 
-        // Read back pixels from staging buffer
+        // The staging buffer holds the frame until the next render.
         let pixel_count = (width * height * 4) as usize;
-        let pixels = target
-            .staging
-            .bytes()
-            .get(..pixel_count)
-            .ok_or_else(|| RenderError::Allocator("staging buffer smaller than the frame".into()))?
-            .to_vec();
+        let pixels = target.staging.bytes().get(..pixel_count).ok_or_else(|| {
+            RenderError::Allocator("staging buffer smaller than the frame".into())
+        })?;
 
-        Ok(FrameBuffers {
-            color: pixels,
+        Ok(Frame {
+            pixels,
             width,
             height,
         })

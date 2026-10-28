@@ -15,8 +15,8 @@
 //!     `flight_wide_rt.png`, `flight_wide_45_rt.png` — ray-traced versions,
 //!     when the GPU supports ray tracing
 //!   - `stream_flight.png` — the hero shot rendered through the streaming
-//!     calls (`init_streaming`, `update_flight`, `update_hud_streaming`) on one
-//!     renderer configured like `--stream` (ray-traced when supported)
+//!     calls (`update_flight`, `update_hud`) on one renderer configured like
+//!     `--stream` (ray-traced when supported)
 //!   - `stream_idle.png` — the same renderer after the flight clears: no
 //!     flight, no chase camera, idle HUD
 //!
@@ -30,15 +30,16 @@ use anyhow::{Context, Result, bail};
 use glam::Vec3;
 use image::{ImageBuffer, Rgba};
 
+use cf_render::flight::FlightRenderData;
+use cf_render::mode::{RenderMode, RtMode};
 use cf_render::offscreen::OffscreenRenderer;
-use cf_render::readback::FrameBuffers;
-use cf_render::render::FlightRenderData;
+use cf_render::readback::Frame;
 use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
 use cf_scene::grid::GridConfig;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::range::Range;
-use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, TrailPoint};
+use cf_scene::trail::TrailPoint;
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
 use dimple::trajectory::{ShotInput, simulate_flight};
@@ -80,9 +81,9 @@ fn parse_out_dir(mut args: impl Iterator<Item = String>) -> Result<Option<PathBu
     Ok(Some(out))
 }
 
-fn save_png(frame: &FrameBuffers, path: &str) -> Result<()> {
+fn save_png(frame: &Frame<'_>, path: &str) -> Result<()> {
     let img: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(frame.width, frame.height, frame.color.clone())
+        ImageBuffer::from_raw(frame.width, frame.height, frame.pixels.to_vec())
             .context("failed to create image buffer")?;
     img.save(path).context("failed to save PNG")?;
 
@@ -102,10 +103,10 @@ fn traj_to_scene(p: glam::DVec3) -> Vec3 {
 
 fn render_driving_range(range: &Range, camera: &Camera) -> Result<()> {
     eprintln!("Rendering driving range...");
-    let mut renderer =
-        OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid).context("failed to create renderer")?;
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
+        .context("failed to create renderer")?;
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
     let frame = renderer.render(camera).context("render failed")?;
     save_png(&frame, &out_path("driving_range.png"))
@@ -263,19 +264,18 @@ fn render_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         far: 600.0,
     };
 
-    let mut renderer = OffscreenRenderer::new_with_flight(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
+        .context("failed to create flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &flight_camera,
-    )
-    .context("failed to create flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     let frame = renderer.render(&flight_camera).context("render failed")?;
@@ -306,19 +306,18 @@ fn render_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         far: 600.0,
     };
 
-    let mut renderer = OffscreenRenderer::new_with_flight(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
+        .context("failed to create flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &wide_camera,
-    )
-    .context("failed to create flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     let frame = renderer.render(&wide_camera).context("render failed")?;
@@ -348,19 +347,18 @@ fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         far: 600.0,
     };
 
-    let mut renderer = OffscreenRenderer::new_with_flight(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
+        .context("failed to create flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &wide45_camera,
-    )
-    .context("failed to create flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     let frame = renderer.render(&wide45_camera).context("render failed")?;
@@ -370,19 +368,18 @@ fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
 fn render_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (tee box view)...");
 
-    let mut renderer = OffscreenRenderer::new_with_flight(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
+        .context("failed to create flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &Camera::driving_range(),
-    )
-    .context("failed to create flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     let frame = renderer
@@ -427,24 +424,21 @@ fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         HEIGHT as f32,
     );
 
-    let mut renderer = OffscreenRenderer::new_with_flight(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
+        .context("failed to create flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &Camera::driving_range(),
-    )
-    .context("failed to create flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
-    renderer
-        .set_hud(&hud.lines, &hud.fills)
-        .context("failed to set HUD")?;
+    renderer.update_hud(&hud.lines, &hud.fills);
 
     let frame = renderer
         .render(&Camera::driving_range())
@@ -515,31 +509,28 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     );
 
     // Use RT variant for reflections, main camera at tee box, chase camera on right 20%
-    let mut renderer = OffscreenRenderer::new_with_flight_rt(
-        render_w,
-        render_h,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.grid, RtMode::Auto)
+        .context("failed to create hero renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &main_camera,
-    )
-    .context("failed to create hero renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     renderer.set_chase_camera(Some(chase));
-    renderer
-        .set_hud(&hud.lines, &hud.fills)
-        .context("failed to set HUD")?;
+    renderer.update_hud(&hud.lines, &hud.fills);
 
     let frame = renderer.render(&main_camera).context("render failed")?;
 
     // Downscale from render resolution to output resolution
     let hi_res: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(render_w, render_h, frame.color.clone())
+        ImageBuffer::from_raw(render_w, render_h, frame.pixels.to_vec())
             .context("failed to create hi-res buffer")?;
     let downscaled = image::imageops::resize(
         &hi_res,
@@ -559,21 +550,21 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
 
 /// Check if RT rendering is available by attempting to create an RT context.
 fn rt_available() -> bool {
-    OffscreenRenderer::new_rt(64, 64, &GridConfig::default())
-        .map(|r| r.has_rt())
+    OffscreenRenderer::new(64, 64, &GridConfig::default(), RtMode::Auto)
+        .map(|r| r.render_mode() == RenderMode::RayTraced)
         .unwrap_or(false)
 }
 
 fn render_rt_driving_range(range: &Range, camera: &Camera) -> Result<()> {
     eprintln!("Rendering driving range (RT)...");
-    let mut renderer = OffscreenRenderer::new_rt(WIDTH, HEIGHT, &range.grid)
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
         .context("failed to create RT renderer")?;
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
     eprintln!(
         "  RT compositing: {}",
-        if renderer.has_rt() {
+        if renderer.render_mode() == RenderMode::RayTraced {
             "enabled"
         } else {
             "fallback to raster"
@@ -593,19 +584,18 @@ fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         near: 0.01,
         far: 600.0,
     };
-    let mut renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
+        .context("failed to create RT flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &flight_camera,
-    )
-    .context("failed to create RT flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
     let frame = renderer.render(&flight_camera).context("render failed")?;
     save_png(&frame, &out_path("flight_rt.png"))
@@ -614,19 +604,18 @@ fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
 fn render_rt_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, tee box view)...");
     let camera = Camera::driving_range();
-    let mut renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
+        .context("failed to create RT flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &camera,
-    )
-    .context("failed to create RT flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("flight_tee_rt.png"))
@@ -650,19 +639,18 @@ fn render_rt_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         near: 0.01,
         far: 600.0,
     };
-    let mut renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
+        .context("failed to create RT flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &wide_camera,
-    )
-    .context("failed to create RT flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
     let frame = renderer.render(&wide_camera).context("render failed")?;
     save_png(&frame, &out_path("flight_wide_rt.png"))
@@ -686,19 +674,18 @@ fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> 
         near: 0.01,
         far: 600.0,
     };
-    let mut renderer = OffscreenRenderer::new_with_flight_rt(
-        WIDTH,
-        HEIGHT,
-        &range.grid,
-        snap.ball_pos,
-        &snap.trail_points,
-        snap.elapsed,
-        DEFAULT_TRAIL_LIFETIME,
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
+        .context("failed to create RT flight renderer")?;
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
         &wide45_camera,
-    )
-    .context("failed to create RT flight renderer")?;
+    );
     renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
     let frame = renderer.render(&wide45_camera).context("render failed")?;
     save_png(&frame, &out_path("flight_wide_45_rt.png"))
@@ -711,13 +698,10 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     let camera = Camera::driving_range();
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
 
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid)
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
         .context("failed to create stream renderer")?;
     renderer
-        .init_streaming()
-        .context("failed to initialize streaming buffers")?;
-    renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     renderer.update_flight(
@@ -738,7 +722,7 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         WIDTH as f32,
         HEIGHT as f32,
     );
-    renderer.update_hud_streaming(&hud.lines, &hud.fills);
+    renderer.update_hud(&hud.lines, &hud.fills);
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("stream_flight.png"))?;
 
@@ -753,7 +737,7 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         WIDTH as f32,
         HEIGHT as f32,
     );
-    renderer.update_hud_streaming(&hud.lines, &hud.fills);
+    renderer.update_hud(&hud.lines, &hud.fills);
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("stream_idle.png"))
 }

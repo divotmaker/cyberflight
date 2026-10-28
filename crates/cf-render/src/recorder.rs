@@ -13,7 +13,7 @@ use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::flight::{FlightRenderData, flight_vertices};
 use crate::frame::{FrameContent, FrameResources};
-use crate::mode::RenderMode;
+use crate::mode::{RenderMode, RtMode};
 use crate::pipeline::ScenePipelines;
 use crate::reflections::{Reflections, RtSceneState, TraceView};
 use crate::scene::SceneGeometry;
@@ -115,10 +115,11 @@ impl SceneRecorder {
     /// `color_format` that the HUD pass leaves in `output_layout`, and the
     /// scene of `grid` with the default tee box and the ball on the tee.
     ///
-    /// With `rt_scene` and a device that supports ray tracing, it adds
-    /// reflections showing `rt_scene` and starts in `RayTraced` mode. If they
-    /// fail to set up, it says so on stderr and renders without them, in
-    /// `Rasterized` mode, as it does without `rt_scene` or device support.
+    /// With `RtMode::Auto` and a device that supports ray tracing, it adds
+    /// reflections of the ball on the tee and starts in `RayTraced` mode. If
+    /// they fail to set up, it says so on stderr and renders without them,
+    /// in `Rasterized` mode, as it does with `RtMode::Off` or without device
+    /// support.
     ///
     /// # Errors
     /// Any other part fails to create; what was created is destroyed first.
@@ -128,7 +129,7 @@ impl SceneRecorder {
         output_layout: vk::ImageLayout,
         extent: vk::Extent2D,
         grid: &GridConfig,
-        rt_scene: Option<RtSceneState>,
+        rt: RtMode,
     ) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let pipelines =
@@ -153,8 +154,9 @@ impl SceneRecorder {
                 return Err(e);
             }
         };
-        let reflections = match rt_scene {
-            Some(scene) if gpu.rt_supported => {
+        let reflections = match rt {
+            RtMode::Auto if gpu.rt_supported => {
+                let scene = RtSceneState::on_tee(&tee);
                 match Reflections::new(gpu, color_format, extent, grid, &tee, scene) {
                     Ok(reflections) => Some(reflections),
                     Err(e) => {

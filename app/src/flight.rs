@@ -6,7 +6,7 @@ use std::thread;
 
 use glam::{DVec3, Vec3};
 
-use cf_render::render::FlightRenderData;
+use cf_render::flight::FlightRenderData;
 use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
 use cf_scene::green::GreenConfig;

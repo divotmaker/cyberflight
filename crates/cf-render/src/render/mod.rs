@@ -6,23 +6,20 @@ use gpu_allocator::vulkan::Allocator;
 use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex};
-use cf_scene::tee::TeeBox;
-
-pub use crate::flight::FlightRenderData;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
+use crate::flight::FlightRenderData;
 use crate::gpu::{Image2d, Image2dDesc};
-use crate::mode::RenderMode;
+use crate::mode::{RenderMode, RtMode};
 use crate::recorder::{FrameTarget, SceneRecorder};
-use crate::reflections::RtSceneState;
 use crate::window::Swapchain;
 
 /// Complete renderer: owns GPU resources and draws frames.
 pub struct Renderer {
     /// Passes, scene, per-frame content, reflections, mode and chase camera.
     recorder: ManuallyDrop<SceneRecorder>,
-    pub swapchain: Swapchain,
+    swapchain: Swapchain,
     /// Colour + depth framebuffers of the scene pass, one per swapchain image.
     framebuffers: Vec<vk::Framebuffer>,
     /// Colour-only framebuffers of the HUD and composite passes, one per
@@ -43,7 +40,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Create a new renderer.
+    /// Create a renderer for `swapchain` on `gpu`, drawing the range
+    /// `grid_config` with the ball on the tee. It ray-traces floor
+    /// reflections when the GPU supports them and they set up (otherwise it
+    /// renders raster and says so on stderr).
     pub fn new(
         mut gpu: GpuContext,
         swapchain: Swapchain,
@@ -51,14 +51,13 @@ impl Renderer {
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
         // Reflections when the device supports them; raster if they fail.
-        let rt_scene = RtSceneState::on_tee(&TeeBox::default());
         let recorder = SceneRecorder::new(
             &mut gpu,
             swapchain.format,
             vk::ImageLayout::PRESENT_SRC_KHR,
             swapchain.extent,
             grid_config,
-            Some(rt_scene),
+            RtMode::Auto,
         )?;
         if recorder.has_reflections() {
             eprintln!("RT pipeline: initialized (windowed mode)");
@@ -376,6 +375,11 @@ impl Renderer {
         Ok(())
     }
 
+    /// The swapchain's current size in pixels.
+    pub fn extent(&self) -> vk::Extent2D {
+        self.swapchain.extent
+    }
+
     /// The current rendering mode.
     #[must_use]
     pub fn render_mode(&self) -> RenderMode {
@@ -391,12 +395,8 @@ impl Renderer {
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
     /// the renderer's grid; `None` draws nothing. Replaces any green set
-    /// before. `_grid` must be the grid the renderer was created with.
-    pub fn set_green(
-        &mut self,
-        green: Option<&GreenConfig>,
-        _grid: &GridConfig,
-    ) -> Result<(), RenderError> {
+    /// before.
+    pub fn set_green(&mut self, green: Option<&GreenConfig>) -> Result<(), RenderError> {
         self.recorder.set_green(&mut self.gpu, green)
     }
 
@@ -414,7 +414,7 @@ impl Renderer {
     /// ball and the part of its trail the tracer still draws, or the ball on
     /// the tee; the RT scene is rebuilt only when the reflected ball or trail
     /// changed.
-    pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
+    pub fn update_flight(&mut self, flights: &[FlightRenderData], camera: &Camera) {
         self.recorder.update_flight(&mut self.gpu, flights, camera);
     }
 

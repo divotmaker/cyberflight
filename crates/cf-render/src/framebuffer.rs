@@ -6,10 +6,9 @@ use crate::error::RenderError;
 use crate::gpu::{HostBuffer, Image2d, Image2dDesc};
 
 /// Offscreen render target for headless rendering.
-pub struct OffscreenTarget {
-    pub width: u32,
-    pub height: u32,
-    pub format: vk::Format,
+pub(crate) struct OffscreenTarget {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     pub(crate) color: Image2d,
     pub(crate) depth: Image2d,
     /// Colour + depth, for the scene pass.
@@ -23,8 +22,11 @@ pub struct OffscreenTarget {
 impl OffscreenTarget {
     /// Create an offscreen render target with staging buffer for readback,
     /// and its framebuffers for `scene_pass` and `hud_pass`.
+    ///
+    /// # Errors
+    /// A part fails to create; what was created is destroyed first.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
         width: u32,
@@ -48,7 +50,7 @@ impl OffscreenTarget {
         )?;
 
         // Depth image for depth testing
-        let depth = Image2d::new(
+        let depth = match Image2d::new(
             device,
             allocator,
             &Image2dDesc {
@@ -58,31 +60,54 @@ impl OffscreenTarget {
                 aspect: vk::ImageAspectFlags::DEPTH,
                 name: "offscreen depth",
             },
-        )?;
+        ) {
+            Ok(depth) => depth,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used it.
+                unsafe { color.destroy(device, allocator) };
+                return Err(e);
+            }
+        };
 
-        let scene = create_framebuffer(device, scene_pass, &[color.view(), depth.view()], extent)?;
-        let overlay = create_framebuffer(device, hud_pass, &[color.view()], extent)?;
-
-        // Staging buffer for readback (4 bytes per pixel)
-        let staging = HostBuffer::new(
-            device,
-            allocator,
-            u64::from(width) * u64::from(height) * 4,
-            vk::BufferUsageFlags::TRANSFER_DST,
-            MemoryLocation::GpuToCpu,
-            "offscreen staging",
-        )?;
-
-        Ok(Self {
-            width,
-            height,
-            format,
-            color,
-            depth,
-            scene,
-            overlay,
-            staging,
-        })
+        // The framebuffers and the readback buffer (4 bytes per pixel). Null
+        // handles stand for the parts not created yet; destroying a null
+        // framebuffer does nothing.
+        let mut scene = vk::Framebuffer::null();
+        let mut overlay = vk::Framebuffer::null();
+        let rest = create_framebuffer(device, scene_pass, &[color.view(), depth.view()], extent)
+            .and_then(|fb| {
+                scene = fb;
+                overlay = create_framebuffer(device, hud_pass, &[color.view()], extent)?;
+                HostBuffer::new(
+                    device,
+                    allocator,
+                    u64::from(width) * u64::from(height) * 4,
+                    vk::BufferUsageFlags::TRANSFER_DST,
+                    MemoryLocation::GpuToCpu,
+                    "offscreen staging",
+                )
+            });
+        match rest {
+            Ok(staging) => Ok(Self {
+                width,
+                height,
+                color,
+                depth,
+                scene,
+                overlay,
+                staging,
+            }),
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used them.
+                unsafe {
+                    device.destroy_framebuffer(overlay, None);
+                    device.destroy_framebuffer(scene, None);
+                    color.destroy(device, allocator);
+                    depth.destroy(device, allocator);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Clean up Vulkan resources.
@@ -90,7 +115,7 @@ impl OffscreenTarget {
     /// # Safety
     /// Must be called before destroying the device, with the device idle and the
     /// allocator the target was created with.
-    pub unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: Resources are not in use (caller guarantees device idle).
         unsafe {
             device.destroy_framebuffer(self.overlay, None);

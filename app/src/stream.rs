@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use cf_render::mode::RtMode;
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::stream::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_scene::range::Range;
@@ -91,15 +92,13 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
     let range = Range::new();
     let environment = Environment::SEA_LEVEL;
 
-    // Create headless renderer with streaming buffers.
+    // Create headless renderer, ray-traced when the GPU supports it.
     eprintln!("Initializing headless Vulkan renderer...");
-    let mut renderer = OffscreenRenderer::new(config.width, config.height, &range.grid)
-        .context("failed to create offscreen renderer")?;
+    let mut renderer =
+        OffscreenRenderer::new(config.width, config.height, &range.grid, RtMode::Auto)
+            .context("failed to create offscreen renderer")?;
     renderer
-        .init_streaming()
-        .context("failed to initialize streaming buffers")?;
-    renderer
-        .set_green(range.green.as_ref(), &range.grid)
+        .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
     // Start ffmpeg encoder.
@@ -179,7 +178,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
             config.width as f32,
             config.height as f32,
         );
-        renderer.update_hud_streaming(&hud.lines, &hud.fills);
+        renderer.update_hud(&hud.lines, &hud.fills);
 
         // Render frame.
         let render_t = Instant::now();
@@ -187,7 +186,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         let render_us = render_t.elapsed().as_micros() as u64;
 
         // Pipe to ffmpeg.
-        match encoder.write_frame(&frame.color) {
+        match encoder.write_frame(frame.pixels) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Encode error (dropping frame): {e}");

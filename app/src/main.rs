@@ -116,11 +116,12 @@ impl App {
         let mut renderer =
             Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
         renderer
-            .set_green(self.range.green.as_ref(), &self.range.grid)
+            .set_green(self.range.green.as_ref())
             .context("failed to upload the green")?;
         eprintln!(
             "Renderer initialized: {}x{}",
-            renderer.swapchain.extent.width, renderer.swapchain.extent.height
+            renderer.extent().width,
+            renderer.extent().height
         );
         self.renderer = Some(renderer);
         Ok(())
@@ -143,7 +144,7 @@ impl App {
 
     /// Take in shots and advance the flights to `now` (seconds since
     /// start), without touching the renderer.
-    fn advance(&mut self, now: f64) -> Vec<cf_render::render::FlightRenderData> {
+    fn advance(&mut self, now: f64) -> Vec<cf_render::flight::FlightRenderData> {
         for shot in self.frp.poll(now) {
             self.flights
                 .launch(&shot, now, &self.environment, self.range.green);
@@ -158,11 +159,11 @@ impl App {
         let chase_camera = self.flights.chase_camera(now);
 
         if let Some(renderer) = &mut self.renderer {
-            renderer.update_flight_geometry(&render_data, &self.range.camera);
+            renderer.update_flight(&render_data, &self.range.camera);
             renderer.set_chase_camera(chase_camera);
 
-            let screen_w = renderer.swapchain.extent.width as f32;
-            let screen_h = renderer.swapchain.extent.height as f32;
+            let screen_w = renderer.extent().width as f32;
+            let screen_h = renderer.extent().height as f32;
             let hud = self.flights.build_hud(
                 now,
                 chase_camera.is_some(),
