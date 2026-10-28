@@ -25,7 +25,8 @@ pub struct Renderer {
     /// Colour-only framebuffers of the HUD and composite passes, one per
     /// swapchain image.
     overlay_framebuffers: Vec<vk::Framebuffer>,
-    /// Depth image for depth testing (`None` only after a failed rebuild).
+    /// Depth image for depth testing (`None` after a failed rebuild, until
+    /// the next one succeeds).
     depth: Option<Image2d>,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available: Vec<vk::Semaphore>,
@@ -34,7 +35,8 @@ pub struct Renderer {
     current_frame: usize,
     /// Last window size passed to `resize` (0×0 while minimised).
     window_extent: vk::Extent2D,
-    /// Swapchain must be rebuilt before the next acquire (out of date or suboptimal).
+    /// Swapchain must be rebuilt before the next acquire (out of date,
+    /// suboptimal, or the last rebuild failed).
     swapchain_stale: bool,
     gpu: GpuContext,
 }
@@ -106,6 +108,8 @@ impl Renderer {
     /// then submits and presents. Does nothing while the window is minimised
     /// (zero extent). An out-of-date swapchain is rebuilt and the frame
     /// skipped; a suboptimal one is rendered and presented, then rebuilt.
+    /// After a failed rebuild every frame retries it first, and a frame
+    /// without a complete set of swapchain resources is skipped.
     ///
     /// The in-flight fence is reset only immediately before the submit that
     /// signals it, so every early return leaves it signalled.
@@ -115,6 +119,10 @@ impl Renderer {
         }
         if self.swapchain_stale && !self.recreate_swapchain()? {
             // Surface still has a zero extent (minimised).
+            return Ok(());
+        }
+        if !self.swapchain_resources_complete() {
+            self.swapchain_stale = true;
             return Ok(());
         }
 
@@ -294,8 +302,32 @@ impl Renderer {
         Ok(())
     }
 
+    /// Whether every swapchain image has its two framebuffers and a command
+    /// buffer, as after a successful rebuild.
+    fn swapchain_resources_complete(&self) -> bool {
+        let images = self.swapchain.image_views.len();
+        self.depth.is_some()
+            && self.framebuffers.len() == images
+            && self.overlay_framebuffers.len() == images
+            && self.command_buffers.len() == images
+    }
+
     /// Destroy and recreate the swapchain and every resource sized to it.
+    /// On failure the swapchain is marked stale, so the next `draw_frame`
+    /// retries before it records anything.
     fn rebuild_swapchain_resources(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+        let rebuilt = self.try_rebuild_swapchain_resources(width, height);
+        if rebuilt.is_err() {
+            self.swapchain_stale = true;
+        }
+        rebuilt
+    }
+
+    fn try_rebuild_swapchain_resources(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
         // SAFETY: Wait idle before rebuilding swapchain resources.
         unsafe {
             self.gpu
@@ -341,11 +373,15 @@ impl Renderer {
 
         // Reallocate command buffers if image count changed
         if self.command_buffers.len() != self.framebuffers.len() {
-            // SAFETY: Old command buffers freed by pool reset.
-            unsafe {
-                self.gpu
-                    .device
-                    .free_command_buffers(self.gpu.command_pool, &self.command_buffers);
+            let old = std::mem::take(&mut self.command_buffers);
+            if !old.is_empty() {
+                // SAFETY: The device is idle (waited above); no pending
+                // work uses the old command buffers.
+                unsafe {
+                    self.gpu
+                        .device
+                        .free_command_buffers(self.gpu.command_pool, &old);
+                }
             }
             self.command_buffers =
                 Self::allocate_command_buffers(&self.gpu, self.framebuffers.len() as u32)?;
