@@ -62,7 +62,7 @@ clean:
 	cargo clean
 
 RT_SHADERS := $(SHADER_DIR)/rt.rgen.spv $(SHADER_DIR)/rt.rmiss.spv $(SHADER_DIR)/rt.rchit.spv \
-	$(SHADER_DIR)/rt.rint.spv $(SHADER_DIR)/rt_trail.rchit.spv
+	$(SHADER_DIR)/rt_trail.rahit.spv
 COMPOSITE_SHADERS := $(SHADER_DIR)/composite.vert.spv $(SHADER_DIR)/composite.frag.spv
 shaders: $(SHADER_DIR)/grid.vert.spv $(SHADER_DIR)/grid.frag.spv $(RT_SHADERS) $(COMPOSITE_SHADERS)
 
@@ -81,7 +81,7 @@ $(SHADER_DIR)/%.rmiss.spv: $(SHADER_DIR)/%.rmiss
 $(SHADER_DIR)/%.rchit.spv: $(SHADER_DIR)/%.rchit
 	glslc --target-env=vulkan1.3 $< -o $@
 
-$(SHADER_DIR)/%.rint.spv: $(SHADER_DIR)/%.rint
+$(SHADER_DIR)/%.rahit.spv: $(SHADER_DIR)/%.rahit
 	glslc --target-env=vulkan1.3 $< -o $@
 
 buildtools:

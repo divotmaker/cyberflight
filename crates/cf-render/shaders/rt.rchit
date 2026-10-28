@@ -6,8 +6,7 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(push_constant) uniform PushConstants {
     vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;
-    vec4 params;      // x = trail tail fade value, y = pixel size per metre of ray path, z = unused, w = viewport Y offset (pixels)
-    vec4 ball_pos;    // xyz = ball center, w = trail fade distance (meters)
+    vec4 ball_pos;    // xyz = ball center, w = viewport Y offset (pixels)
 } pc;
 
 layout(location = 0) rayPayloadInEXT vec4 payload;
@@ -20,8 +19,8 @@ hitAttributeEXT vec2 attribs;
 //   2 = tee box fill (dark surface)
 //   4 = tee box border (cyan)
 //
-// The trail (3) is a procedural tube with its own hit group (rt.rint +
-// rt_trail.rchit).
+// The tracer tube (3) is translucent triangles with its own hit group
+// (rt_trail.rahit).
 //
 // The tee box instances (2, 4) are in the TLAS, but no ray's cull mask
 // includes theirs, so their branches below are never reached.
@@ -86,21 +85,24 @@ void main() {
         float NdotV = max(dot(N, V), 0.0);
         float fresnel = F0_GLASS + (1.0 - F0_GLASS) * pow(1.0 - NdotV, 5.0);
 
-        // Trace reflection ray for trail geometry only (mask 0x04). The trail
-        // returns its colour in rgb and the world height of the hit in alpha.
+        // Trace reflection ray for the tracer tube only (mask 0x04), without
+        // the opaque flag so its any-hit runs. The tube adds its light to
+        // rgb and the light-weighted sum of the heights it crossed to alpha.
         vec3 refl_dir = reflect(gl_WorldRayDirectionEXT, N);
         reflPayload = vec4(0.0);
         if (gl_HitTEXT > 0.0) {
             traceRayEXT(
                 tlas,
-                gl_RayFlagsOpaqueEXT,
+                gl_RayFlagsNoneEXT,
                 0x04, 0, 0, 0,
                 hit_pos + N * 0.001, 0.01, refl_dir, 1000.0, 1
             );
         }
 
         vec3 trail_reflection = reflPayload.rgb * EMISSIVE_REFLECTANCE;
-        float trail_fade = height_fade(reflPayload.a - hit_pos.y);
+        // Height of the reflected light above the floor, averaged by light.
+        float trail_height = reflPayload.r > 0.0 ? reflPayload.a / reflPayload.r : 0.0;
+        float trail_fade = height_fade(trail_height - hit_pos.y);
 
         // Analytical ball reflection: glow intensity from the closest approach
         // of the reflected ray, which starts at the floor, to the ball center

@@ -224,19 +224,13 @@ impl SceneRecorder {
         self.mode
     }
 
-    /// Build the next frame's flight geometry from `flights`, with trail
-    /// glows facing `camera`, and point the reflections at the newest
-    /// flight ([`RtSceneState::from_flights`]).
+    /// Build the next frame's flight geometry from `flights` and point the
+    /// reflections at the newest flight ([`RtSceneState::from_flights`]).
     ///
     /// If the reflections fail to rebuild, it says so on stderr, destroys
     /// them and renders in `Rasterized` mode from then on.
-    pub(crate) fn update_flight(
-        &mut self,
-        gpu: &mut GpuContext,
-        flights: &[FlightRenderData],
-        camera: &Camera,
-    ) {
-        flight_vertices(flights, camera.position, &self.tee, &mut self.content);
+    pub(crate) fn update_flight(&mut self, gpu: &mut GpuContext, flights: &[FlightRenderData]) {
+        flight_vertices(flights, &self.tee, &mut self.content);
         if let Some(reflections) = &mut self.reflections {
             let scene = RtSceneState::from_flights(flights, &self.tee);
             if let Err(e) = reflections.set_scene(gpu, scene, &self.grid, &self.tee) {

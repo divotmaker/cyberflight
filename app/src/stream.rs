@@ -163,7 +163,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         let render_data = fm.update(now);
 
         // Update renderer geometry.
-        renderer.update_flight(&render_data, &range.camera);
+        renderer.update_flight(&render_data);
 
         // Chase camera: follow the most recent active ball.
         let chase_camera = fm.chase_camera(now);

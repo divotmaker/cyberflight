@@ -6,67 +6,61 @@ use glam::Vec3;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
-use cf_scene::grid::GridConfig;
+use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::{TEE_ELEVATION, TeeBox};
-use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
 use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::flight::FlightRenderData;
-use crate::rt_offscreen::{RtTrail, build_scene_geometry};
+use crate::flight::{FlightRenderData, flight_trail_tube};
+use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::{RtGeometry, RtPipeline, RtPushConstants};
 
-/// What the reflections show: the analytic ball and the reflected trail.
+/// What the reflections show: the analytic ball and the reflected tracer.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RtSceneState {
     /// Centre of the reflected ball.
     ball_centre: Vec3,
-    /// The reflected trail and its fade.
-    trail: RtTrail,
+    /// The tracer tube's triangles: those the raster pass draws.
+    trail: Vec<GridVertex>,
 }
 
 impl RtSceneState {
-    pub(crate) fn new(ball_centre: Vec3, trail: RtTrail) -> Self {
-        Self { ball_centre, trail }
+    pub(crate) fn new(ball_centre: Vec3, trail: &[GridVertex]) -> Self {
+        Self {
+            ball_centre,
+            trail: trail.to_vec(),
+        }
     }
 
     /// The ball resting on `tee`'s tee box, no trail.
     pub(crate) fn on_tee(tee: &TeeBox) -> Self {
-        Self::new(
-            Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0),
-            RtTrail::default(),
-        )
+        Self::new(Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0), &[])
     }
 
     /// The newest of `flights` (the one the HUD and chase camera follow):
-    /// its ball, one radius above `ball_pos`, and the part of its trail the
-    /// raster tracer still draws. With no flight, the ball on the tee.
+    /// its ball, one radius above `ball_pos`, and its tracer tube. With no
+    /// flight, the ball on the tee.
     pub(crate) fn from_flights(flights: &[FlightRenderData], tee: &TeeBox) -> Self {
         match flights.last() {
             Some(flight) => Self::new(
                 flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0),
-                RtTrail::new(
-                    &flight.trail_points,
-                    flight.current_time,
-                    DEFAULT_TRAIL_LIFETIME,
-                ),
+                &flight_trail_tube(flight, tee),
             ),
             None => Self::on_tee(tee),
         }
     }
 
     /// The acceleration-structure geometry: the floor of `grid`, the tee
-    /// box of `tee` and the trail.
+    /// box of `tee` and the tracer tube.
     fn geometry(&self, grid: &GridConfig, tee: &TeeBox) -> Vec<RtGeometry> {
-        build_scene_geometry(grid, tee, &self.trail.points)
+        build_scene_geometry(grid, tee, &self.trail)
     }
 
     /// Whether both states build the same acceleration structures: the same
-    /// ball centre and trail points. The trail's fade distance and tail fade
-    /// value are push constants, not geometry.
+    /// tracer tube. The ball is a push constant, not geometry.
     fn same_geometry(&self, other: &Self) -> bool {
-        self.ball_centre == other.ball_centre && self.trail.points == other.trail.points
+        self.trail == other.trail
     }
 
     /// Push constants for tracing `view`.
@@ -76,8 +70,6 @@ impl RtSceneState {
             [view.extent.width as f32, view.extent.height as f32],
             [view.offset[0] as f32, view.offset[1] as f32],
             self.ball_centre,
-            self.trail.fade_dist,
-            self.trail.tail_t,
         )
     }
 }
@@ -135,8 +127,8 @@ impl Reflections {
 
     /// Show `scene`. Rebuilds the acceleration structures (with the floor of
     /// `grid` and the tee box of `tee`) only when the geometry changes;
-    /// `update_scene` waits for the device to go idle first. The trail fade
-    /// values follow `scene` on every successful call.
+    /// `update_scene` waits for the device to go idle first. The ball follows
+    /// `scene` on every successful call.
     ///
     /// # Errors
     /// The rebuild fails. The old structures are destroyed by then, so the
@@ -279,31 +271,21 @@ impl Reflections {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, TrailPoint, generate_trail_tube};
 
-    fn trail(points: &[f32], fade_dist: f32, tail_t: f32) -> RtTrail {
-        RtTrail {
-            points: points.iter().map(|&z| Vec3::new(0.0, 1.0, z)).collect(),
-            fade_dist,
-            tail_t,
-        }
-    }
-
-    #[test]
-    fn fade_values_are_not_geometry() {
-        let a = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 1.0, 0.2));
-        let b = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 1.0, 0.7));
-        let c = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 5.0, 0.2));
-        assert!(a.same_geometry(&b));
-        assert!(a.same_geometry(&c));
-        assert_ne!(a, b);
-        assert_ne!(a, c);
+    fn tube(z: f32) -> Vec<GridVertex> {
+        let v = |z: f32| GridVertex {
+            position: [0.0, 1.0, z],
+            fade: 0.5,
+        };
+        vec![v(z), v(z + 1.0), v(z + 2.0)]
     }
 
     fn flight(z: f32, current_time: f64) -> FlightRenderData {
         FlightRenderData {
             ball_pos: Vec3::new(1.0, 5.0, z),
             trail_points: (0..40)
-                .map(|i| cf_scene::trail::TrailPoint {
+                .map(|i| TrailPoint {
                     position: Vec3::new(0.0, i as f32 * 0.1, i as f32 * z / 40.0),
                     time: f64::from(i) * 0.1,
                 })
@@ -321,7 +303,7 @@ mod tests {
             state.ball_centre,
             Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0)
         );
-        assert_eq!(state.trail, RtTrail::default());
+        assert!(state.trail.is_empty());
     }
 
     #[test]
@@ -335,13 +317,22 @@ mod tests {
             state.ball_centre,
             newest.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0)
         );
-        let expected = RtTrail::new(
-            &newest.trail_points,
-            newest.current_time,
+        assert!(!state.trail.is_empty());
+        assert_eq!(state.trail, flight_trail_tube(&newest, &tee));
+    }
+
+    #[test]
+    fn the_reflected_tracer_is_the_raster_tracer() {
+        let tee = TeeBox::default();
+        let flight = flight(60.0, 3.5);
+        let state = RtSceneState::from_flights(std::slice::from_ref(&flight), &tee);
+        let raster = generate_trail_tube(
+            &flight.trail_points,
+            flight.current_time,
             DEFAULT_TRAIL_LIFETIME,
+            tee.ball_radius,
         );
-        assert!(expected.points.len() < newest.trail_points.len());
-        assert_eq!(state.trail, expected);
+        assert_eq!(state.trail, raster);
     }
 
     #[test]
@@ -353,7 +344,7 @@ mod tests {
             ..GridConfig::default()
         };
         let built = state.geometry(&grid, &tee);
-        let expected = build_scene_geometry(&grid, &tee, &state.trail.points);
+        let expected = build_scene_geometry(&grid, &tee, &state.trail);
         let default_floor = &build_scene_geometry(&GridConfig::default(), &tee, &[])[0];
         assert_eq!(built.len(), expected.len());
         for (b, e) in built.iter().zip(&expected) {
@@ -364,17 +355,18 @@ mod tests {
     }
 
     #[test]
-    fn ball_or_points_are_geometry() {
-        let a = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0], 1.0, 0.2));
-        let moved = RtSceneState::new(Vec3::X, trail(&[1.0, 2.0], 1.0, 0.2));
-        let longer = RtSceneState::new(Vec3::Y, trail(&[1.0, 2.0, 3.0], 2.0, 0.2));
-        assert!(!a.same_geometry(&moved));
-        assert!(!a.same_geometry(&longer));
+    fn only_the_tube_is_geometry() {
+        let a = RtSceneState::new(Vec3::Y, &tube(1.0));
+        let moved = RtSceneState::new(Vec3::X, &tube(1.0));
+        let other = RtSceneState::new(Vec3::Y, &tube(2.0));
+        assert!(a.same_geometry(&moved));
+        assert_ne!(a, moved);
+        assert!(!a.same_geometry(&other));
     }
 
     #[test]
     fn push_constants_follow_the_view() {
-        let state = RtSceneState::new(Vec3::new(1.0, 2.0, 3.0), trail(&[1.0, 2.0], 4.0, 0.25));
+        let state = RtSceneState::new(Vec3::new(1.0, 2.0, 3.0), &tube(1.0));
         let camera = Camera::driving_range();
         let view = TraceView {
             camera,
@@ -390,12 +382,9 @@ mod tests {
             [384.0, 1080.0],
             [1536.0, 0.0],
             Vec3::new(1.0, 2.0, 3.0),
-            4.0,
-            0.25,
         );
         assert_eq!(pc.camera_pos, expected.camera_pos);
         assert_eq!(pc.inv_view_proj, expected.inv_view_proj);
-        assert_eq!(pc.params, expected.params);
         assert_eq!(pc.ball_pos, expected.ball_pos);
     }
 }

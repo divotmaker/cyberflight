@@ -277,7 +277,7 @@ fn render_shot(range: &Range, snap: &FlightSnapshot, shot: &Shot) -> Result<bool
         return Ok(false);
     }
     if shot.flight {
-        renderer.update_flight(&[snap.render_data()], &shot.camera);
+        renderer.update_flight(&[snap.render_data()]);
     }
     renderer
         .set_green(range.green.as_ref())
@@ -370,7 +370,7 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     // Reflections, main camera at the tee box, chase camera on the right 20%
     let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.grid, RtMode::Auto)
         .context("failed to create hero renderer")?;
-    renderer.update_flight(&[snap.render_data()], &main_camera);
+    renderer.update_flight(&[snap.render_data()]);
     renderer
         .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
@@ -413,7 +413,7 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
-    renderer.update_flight(&[snap.render_data()], &camera);
+    renderer.update_flight(&[snap.render_data()]);
     renderer.set_chase_camera(Some(hero_chase_camera(snap)));
     let hud = build_hud(
         Some(&telemetry(snap, true)),
@@ -428,7 +428,7 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("stream_flight.png"))?;
 
-    renderer.update_flight(&[], &camera);
+    renderer.update_flight(&[]);
     renderer.set_chase_camera(None);
     let hud = build_hud(
         None,

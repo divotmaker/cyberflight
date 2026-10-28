@@ -3,9 +3,10 @@
 
 use glam::Vec3;
 
+use cf_scene::grid::GridVertex;
 use cf_scene::tee::{TeeBox, generate_ball_at, generate_ball_glow_at};
 use cf_scene::trail::{
-    DEFAULT_TRAIL_LIFETIME, TrailPoint, generate_trail_glow, generate_trail_line,
+    DEFAULT_TRAIL_LIFETIME, TrailPoint, generate_trail_line, generate_trail_tube,
 };
 
 use crate::frame::FrameContent;
@@ -23,16 +24,22 @@ pub struct FlightRenderData {
 /// fill and its glow.
 pub(crate) const FLIGHT_BALL_MESH: (u32, u32) = (8, 16);
 
+/// The tracer tube of `flight`: the triangles both the raster pass and the
+/// ray-traced reflections draw. Empty without at least two trail points.
+pub(crate) fn flight_trail_tube(flight: &FlightRenderData, tee: &TeeBox) -> Vec<GridVertex> {
+    generate_trail_tube(
+        &flight.trail_points,
+        flight.current_time,
+        DEFAULT_TRAIL_LIFETIME,
+        tee.ball_radius,
+    )
+}
+
 /// Build the raster geometry of `flights` into `out`'s flight vertices: per
 /// flight the ball and its glow, centred one ball radius above `ball_pos`,
-/// and the trail's glow ribbon (facing `camera_pos`) and core line. With no
+/// and the trail's tube ([`flight_trail_tube`]) and core line. With no
 /// flight, the ball is on the tee.
-pub(crate) fn flight_vertices(
-    flights: &[FlightRenderData],
-    camera_pos: Vec3,
-    tee: &TeeBox,
-    out: &mut FrameContent,
-) {
+pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &mut FrameContent) {
     let (rings, segments) = FLIGHT_BALL_MESH;
     out.flight_lines.clear();
     out.flight_fills.clear();
@@ -49,22 +56,12 @@ pub(crate) fn flight_vertices(
             rings,
             segments,
         ));
-
-        // Trail glow ribbon (with endcap) + centre line.
-        if flight.trail_points.len() >= 2 {
-            out.flight_glows.extend(generate_trail_glow(
-                &flight.trail_points,
-                flight.current_time,
-                DEFAULT_TRAIL_LIFETIME,
-                camera_pos,
-                tee.ball_radius,
-            ));
-            out.flight_lines.extend(generate_trail_line(
-                &flight.trail_points,
-                flight.current_time,
-                DEFAULT_TRAIL_LIFETIME,
-            ));
-        }
+        out.flight_glows.extend(flight_trail_tube(flight, tee));
+        out.flight_lines.extend(generate_trail_line(
+            &flight.trail_points,
+            flight.current_time,
+            DEFAULT_TRAIL_LIFETIME,
+        ));
     }
 }
 
@@ -85,24 +82,22 @@ mod tests {
     #[test]
     fn one_flight_draws_ball_glow_and_trail() {
         let tee = TeeBox::default();
-        let camera_pos = Vec3::new(0.0, 2.0, -5.0);
         let flight = FlightRenderData {
             ball_pos: Vec3::new(0.0, 19.0, 38.0),
             trail_points: trail(),
             current_time: 1.9,
         };
         let mut out = FrameContent::default();
-        flight_vertices(std::slice::from_ref(&flight), camera_pos, &tee, &mut out);
+        flight_vertices(std::slice::from_ref(&flight), &tee, &mut out);
 
         let r = tee.ball_radius;
         let centre = Vec3::new(0.0, 19.0 + r, 38.0);
         let fills = generate_ball_at(centre, r, 8, 16);
         let mut glows = generate_ball_glow_at(centre, r, 8, 16);
-        glows.extend(generate_trail_glow(
+        glows.extend(generate_trail_tube(
             &flight.trail_points,
             1.9,
             DEFAULT_TRAIL_LIFETIME,
-            camera_pos,
             r,
         ));
         let lines = generate_trail_line(&flight.trail_points, 1.9, DEFAULT_TRAIL_LIFETIME);
@@ -123,7 +118,7 @@ mod tests {
             current_time: 0.0,
         };
         let mut out = FrameContent::default();
-        flight_vertices(&[flight], Vec3::ZERO, &tee, &mut out);
+        flight_vertices(&[flight], &tee, &mut out);
 
         let ball_glow = generate_ball_glow_at(
             Vec3::new(0.0, 1.0 + tee.ball_radius, 2.0),
@@ -145,8 +140,8 @@ mod tests {
             trail_points: trail(),
             current_time: 1.0,
         };
-        flight_vertices(&[flight], Vec3::ZERO, &tee, &mut out);
-        flight_vertices(&[], Vec3::ZERO, &tee, &mut out);
+        flight_vertices(&[flight], &tee, &mut out);
+        flight_vertices(&[], &tee, &mut out);
         assert!(out.ball_on_tee);
         assert!(out.flight_lines.is_empty());
         assert!(out.flight_fills.is_empty());

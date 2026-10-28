@@ -6,7 +6,7 @@ use glam::Vec3;
 /// The renderer uploads it byte-for-byte: keep it `repr(C)`, all `f32`,
 /// with no padding.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridVertex {
     pub position: [f32; 3],
     /// Normalized distance from origin (0.0 = near, 1.0 = far edge).

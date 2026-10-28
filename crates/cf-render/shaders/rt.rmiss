@@ -4,6 +4,7 @@
 layout(location = 0) rayPayloadInEXT vec4 payload;
 
 void main() {
-    // Black background (cyberflight aesthetic)
-    payload = vec4(0.0, 0.0, 0.0, 0.0);
+    // Nothing to add: every trace starts from a zeroed payload (black
+    // background, cyberflight aesthetic), and the tracer's any-hit has
+    // accumulated into it by the time a ray misses.
 }

@@ -159,7 +159,7 @@ impl App {
         let chase_camera = self.flights.chase_camera(now);
 
         if let Some(renderer) = &mut self.renderer {
-            renderer.update_flight(&render_data, &self.range.camera);
+            renderer.update_flight(&render_data);
             renderer.set_chase_camera(chase_camera);
 
             let screen_w = renderer.extent().width as f32;

@@ -1,0 +1,39 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Any-hit of the tracer tube's triangles (cf-scene `generate_trail_tube`).
+// Rays pass through the tube: every triangle a ray crosses adds its light to
+// the payload and the hit is ignored, so the light of all the tube's layers
+// and faces sums as the additive raster pass sums them. The geometry is
+// built with NO_DUPLICATE_ANY_HIT_INVOCATION, so a triangle counts once.
+//
+// Only floor reflection rays reach the tube (mask 0x04), without the opaque
+// ray flag.
+
+// The tube's vertices as the raster pass draws them (GridVertex):
+// xyz = position, w = fade. Triangle i is vertices 3i .. 3i + 2.
+layout(set = 0, binding = 2, std430) readonly buffer TracerVertices {
+    vec4 vertices[];
+} tracer;
+
+// rgb = summed light; a = summed light × world height of its crossing, from
+// which the floor shader recovers the light-weighted height.
+layout(location = 0) rayPayloadInEXT vec4 payload;
+
+hitAttributeEXT vec2 attribs;
+
+const vec3 MAGENTA = vec3(1.0, 0.0, 1.0);
+
+void main() {
+    int i = 3 * gl_PrimitiveID;
+    vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+    float fade = bary.x * tracer.vertices[i].w
+               + bary.y * tracer.vertices[i + 1].w
+               + bary.z * tracer.vertices[i + 2].w;
+
+    // The raster fragment shader's alpha, (1 - fade)².
+    float alpha = (1.0 - fade) * (1.0 - fade);
+    float height = gl_WorldRayOriginEXT.y + gl_HitTEXT * gl_WorldRayDirectionEXT.y;
+    payload += vec4(MAGENTA * alpha, alpha * height);
+    ignoreIntersectionEXT;
+}
