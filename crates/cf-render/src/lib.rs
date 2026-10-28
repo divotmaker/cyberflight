@@ -11,6 +11,7 @@ pub mod offscreen;
 pub mod pipeline;
 pub mod readback;
 mod recorder;
+mod reflections;
 pub mod render;
 pub mod rt_offscreen;
 pub mod rt_pipeline;

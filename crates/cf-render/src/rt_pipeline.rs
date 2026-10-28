@@ -444,12 +444,14 @@ impl RtPipeline {
         Ok(())
     }
 
-    /// Record RT dispatch commands into the given command buffer.
+    /// Record one ray-trace dispatch of `dispatch_w × dispatch_h` rays into
+    /// the storage image (smaller than the image for a sub-viewport trace).
     ///
-    /// The storage image must be in `GENERAL` layout before calling this.
-    /// `dispatch_w` and `dispatch_h` control the trace dimensions (may be
-    /// smaller than the storage image for sub-viewport traces).
-    pub fn record_trace(
+    /// # Safety
+    /// `cb` is recording, outside a render pass; the storage image is in
+    /// `GENERAL` layout; the dispatch, offset by the push constants' viewport
+    /// offset, lies within the storage image.
+    pub(crate) unsafe fn record_trace(
         &self,
         device: &ash::Device,
         cb: vk::CommandBuffer,
@@ -459,7 +461,7 @@ impl RtPipeline {
     ) {
         let callable_region = vk::StridedDeviceAddressRegionKHR::default();
 
-        // SAFETY: Recording RT commands into a valid command buffer.
+        // SAFETY: The caller guarantees the command buffer and image states.
         unsafe {
             device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::RAY_TRACING_KHR, self.pipeline);
 
@@ -880,11 +882,11 @@ impl RtPipeline {
         self.blas_list = blas_list;
         self.geometry_buffers = geometry_buffers;
         self.scratch_buffers = all_scratch;
+        // Update TLAS descriptor binding (handle changed on rebuild).
+        let tlas_handle = tlas.accel;
         self.tlas = Some(tlas);
         self.instance_buffer = Some(instance_buffer);
 
-        // Update TLAS descriptor binding (handle changed on rebuild).
-        let tlas_handle = self.tlas.as_ref().expect("just built").accel;
         let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(std::slice::from_ref(&tlas_handle));
 

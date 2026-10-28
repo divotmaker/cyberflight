@@ -1,6 +1,5 @@
 mod hud;
 mod raster;
-mod raytrace;
 
 use std::mem::ManuallyDrop;
 
@@ -11,10 +10,10 @@ use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::TeeBox;
+use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
 pub use crate::flight::FlightRenderData;
 
-use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::flight::flight_vertices;
@@ -22,8 +21,9 @@ use crate::frame::{FrameContent, FrameResources};
 use crate::gpu::{Image2d, Image2dDesc};
 use crate::mode::RenderMode;
 use crate::pipeline::ScenePipelines;
-use crate::rt_offscreen::build_scene_geometry;
-use crate::rt_pipeline::RtPipeline;
+use crate::recorder::ChaseViewport;
+use crate::reflections::{Reflections, RtSceneState, TraceView};
+use crate::rt_offscreen::RtTrail;
 use crate::scene::SceneGeometry;
 use crate::window::Swapchain;
 
@@ -55,15 +55,7 @@ pub struct Renderer {
     pub(super) overlay_framebuffers: Vec<vk::Framebuffer>,
     // Ray tracing (optional, only when hardware supports it).
     pub render_mode: RenderMode,
-    pub(super) rt_pipeline: Option<RtPipeline>,
-    // RT reflection composite pass (present only when RT pipeline exists).
-    pub(super) composite: Option<CompositePass>,
-    // Cached RT scene data for per-frame TLAS rebuilds.
-    pub(super) rt_ball_center: glam::Vec3,
-    rt_trail_points: Vec<glam::Vec3>,
-    pub(super) rt_trail_fade_dist: f32,
-    pub(super) rt_trail_tail_t: f32,
-    rt_needs_update: bool,
+    pub(super) reflections: Option<Reflections>,
     /// Optional chase camera for the right 20% viewport (set per-frame).
     pub(super) chase_camera: Option<Camera>,
 }
@@ -101,19 +93,23 @@ impl Renderer {
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
-        // Build RT pipeline if hardware supports it.
-        let (render_mode, rt_pipeline) = if gpu.rt_supported {
-            let tee = TeeBox::default();
-            let geometries = build_scene_geometry(grid_config, &tee, &[]);
-            match RtPipeline::new(
+        // Build RT reflections if hardware supports it.
+        let (render_mode, reflections) = if gpu.rt_supported {
+            let scene = RtSceneState::new(
+                glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
+                RtTrail::default(),
+            );
+            match Reflections::new(
                 &mut gpu,
-                swapchain.extent.width,
-                swapchain.extent.height,
-                &geometries,
+                swapchain.format,
+                swapchain.extent,
+                grid_config,
+                &tee,
+                scene,
             ) {
-                Ok(rtp) => {
+                Ok(reflections) => {
                     eprintln!("RT pipeline: initialized (windowed mode)");
-                    (RenderMode::RayTraced, Some(rtp))
+                    (RenderMode::RayTraced, Some(reflections))
                 }
                 Err(e) => {
                     eprintln!("RT pipeline init failed, falling back to raster: {e}");
@@ -122,17 +118,6 @@ impl Renderer {
             }
         } else {
             (RenderMode::Rasterized, None)
-        };
-
-        // Build composite pass if RT pipeline is available.
-        let composite = if let Some(ref rtp) = rt_pipeline {
-            Some(CompositePass::new(
-                &gpu.device,
-                swapchain.format,
-                rtp.storage.view(),
-            )?)
-        } else {
-            None
         };
 
         let window_extent = swapchain.extent;
@@ -159,17 +144,7 @@ impl Renderer {
             window_extent,
             swapchain_stale: false,
             render_mode,
-            rt_pipeline,
-            composite,
-            rt_ball_center: glam::Vec3::new(
-                0.0,
-                cf_scene::tee::TEE_ELEVATION + tee.ball_radius,
-                0.0,
-            ),
-            rt_trail_points: Vec::new(),
-            rt_trail_fade_dist: 0.0,
-            rt_trail_tail_t: 0.0,
-            rt_needs_update: false,
+            reflections,
             chase_camera: None,
         })
     }
@@ -248,14 +223,34 @@ impl Renderer {
             // Dispatch scene recording — leaves image at COLOR_ATTACHMENT_OPTIMAL.
             self.record_raster_scene(cb, camera, image_index);
 
-            // If RT is active, rebuild TLAS with current geometry and composite reflections.
-            let rt_active = self.render_mode == RenderMode::RayTraced
-                && self.rt_pipeline.is_some()
-                && self.composite.is_some();
-
-            if rt_active {
-                self.record_rt_reflections(cb, camera);
-                self.record_composite_reflections(cb, image_index);
+            // Ray-traced reflections: main view, plus the chase inset when set.
+            if self.render_mode == RenderMode::RayTraced {
+                if let Some(reflections) = &self.reflections {
+                    let extent = self.swapchain.extent;
+                    let mut views = vec![TraceView {
+                        camera: *camera,
+                        offset: [0, 0],
+                        extent,
+                    }];
+                    if let Some(chase) = self.chase_camera {
+                        let chase_vp = ChaseViewport::new(extent.width);
+                        views.push(TraceView {
+                            camera: chase,
+                            offset: [chase_vp.x, 0],
+                            extent: vk::Extent2D {
+                                width: chase_vp.width,
+                                height: extent.height,
+                            },
+                        });
+                    }
+                    reflections.record(
+                        device,
+                        cb,
+                        &views,
+                        self.overlay_framebuffers[image_index as usize],
+                        extent,
+                    );
+                }
             }
 
             // HUD overlay (final_layout = PRESENT_SRC_KHR)
@@ -406,11 +401,6 @@ impl Renderer {
             height,
         )?;
 
-        // Use the swapchain's actual extent — it may differ from the requested
-        // width/height after surface capabilities clamping.
-        let actual_w = self.swapchain.extent.width;
-        let actual_h = self.swapchain.extent.height;
-
         let depth = Self::create_depth(
             &self.gpu.device,
             &mut self.gpu.allocator,
@@ -431,19 +421,18 @@ impl Renderer {
             &self.swapchain,
             self.pipeline.hud_pass,
         )?;
-        // Resize RT storage image and update composite descriptor to match.
-        if let Some(ref mut rtp) = self.rt_pipeline {
-            rtp.resize_storage(
-                &self.gpu.device,
-                &mut self.gpu.allocator,
-                actual_w,
-                actual_h,
-            )?;
-        }
-        // Point the composite descriptor at the resized RT storage image.
-        if let (Some(composite), Some(rtp)) = (&self.composite, &self.rt_pipeline) {
-            // SAFETY: The device is idle (waited above).
-            unsafe { composite.bind_storage(&self.gpu.device, rtp.storage.view()) };
+        // The swapchain's actual extent, which may differ from the requested
+        // size after surface clamping.
+        if let Some(reflections) = &mut self.reflections {
+            // SAFETY: The device is idle (waited above) and the old
+            // framebuffers are destroyed.
+            unsafe {
+                reflections.resize(
+                    &self.gpu.device,
+                    &mut self.gpu.allocator,
+                    self.swapchain.extent,
+                )?;
+            }
         }
 
         // Reallocate command buffers if image count changed
@@ -465,7 +454,7 @@ impl Renderer {
     ///
     /// Falls back to `Rasterized` if RT is requested but not available.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
-        if mode == RenderMode::RayTraced && self.rt_pipeline.is_none() {
+        if mode == RenderMode::RayTraced && self.reflections.is_none() {
             self.render_mode = RenderMode::Rasterized;
         } else {
             self.render_mode = mode;
@@ -496,9 +485,6 @@ impl Renderer {
     /// next `draw_frame` uploads them. Rebuilds the RT scene when the
     /// reflected ball or trail changed.
     pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
-        use crate::rt_offscreen::RtTrail;
-        use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
-
         let tee = TeeBox::default();
         flight_vertices(flights, camera.position, &tee, &mut self.content);
 
@@ -518,30 +504,15 @@ impl Renderer {
             );
         }
 
-        // The tail fade value changes as the trail ages, even between TLAS
-        // rebuilds.
-        self.rt_trail_tail_t = new_rt_trail.tail_t;
-
-        // Check if RT scene changed and needs TLAS rebuild.
-        if self.rt_pipeline.is_some()
-            && (new_rt_ball != self.rt_ball_center || new_rt_trail.points != self.rt_trail_points)
-        {
-            self.rt_ball_center = new_rt_ball;
-            self.rt_trail_fade_dist = new_rt_trail.fade_dist;
-            self.rt_trail_points = new_rt_trail.points;
-            self.rt_needs_update = true;
-        }
-
-        // Rebuild RT TLAS if scene changed.
-        if self.rt_needs_update {
-            if let Some(ref mut rt_pipeline) = self.rt_pipeline {
-                let grid_config = cf_scene::grid::GridConfig::default();
-                let geometries = build_scene_geometry(&grid_config, &tee, &self.rt_trail_points);
-                if let Err(e) = rt_pipeline.update_scene(&mut self.gpu, &geometries) {
-                    eprintln!("RT scene update failed: {e}");
-                }
-            }
-            self.rt_needs_update = false;
+        // The tail fade value changes as the trail ages, even between
+        // acceleration-structure rebuilds.
+        if let Some(reflections) = &mut self.reflections {
+            reflections.set_scene(
+                &mut self.gpu,
+                RtSceneState::new(new_rt_ball, new_rt_trail),
+                &GridConfig::default(),
+                &tee,
+            );
         }
     }
 
@@ -714,12 +685,8 @@ impl Drop for Renderer {
                 depth.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
-            if let Some(composite) = self.composite.take() {
-                composite.destroy(&self.gpu.device);
-            }
-
-            if let Some(rtp) = self.rt_pipeline.take() {
-                rtp.destroy(&self.gpu.device, &mut self.gpu.allocator);
+            if let Some(reflections) = self.reflections.take() {
+                reflections.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
             // SAFETY: Taken once, here in `Drop`, and never used after.

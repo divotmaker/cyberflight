@@ -9,7 +9,6 @@ use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::TeeBox;
 use cf_scene::trail::TrailPoint;
 
-use crate::composite::CompositePass;
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::flight::flight_vertices;
@@ -18,16 +17,16 @@ use crate::framebuffer::OffscreenTarget;
 use crate::pipeline::ScenePipelines;
 use crate::readback::FrameBuffers;
 use crate::recorder::{ChaseViewport, view_proj};
+use crate::reflections::{Reflections, RtSceneState, TraceView};
 use crate::render::FlightRenderData;
-use crate::rt_offscreen::{RtTrail, build_scene_geometry};
-use crate::rt_pipeline::{RtPipeline, RtPushConstants};
+use crate::rt_offscreen::RtTrail;
 use crate::scene::{SceneGeometry, Snapshot};
 
 /// Offscreen renderer for headless PNG generation.
 pub struct OffscreenRenderer {
     gpu: GpuContext,
     pipeline: ManuallyDrop<ScenePipelines>,
-    target: Option<OffscreenTarget>,
+    target: ManuallyDrop<OffscreenTarget>,
     /// Grid, green edge, tee box and the ball on the tee (or a snapshot's
     /// ball in flight).
     geometry: ManuallyDrop<SceneGeometry>,
@@ -38,15 +37,8 @@ pub struct OffscreenRenderer {
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
 
-    // Optional RT pipeline + composite pass (when RT hardware available).
-    rt_pipeline: Option<RtPipeline>,
-    composite: Option<CompositePass>,
-    /// Ball center position for RT push constants (xyz).
-    rt_ball_center: glam::Vec3,
-    /// RT trail fade distance (arc length of the reflected trail, meters).
-    rt_trail_fade_dist: f32,
-    /// Tracer fade value at the reflected trail's oldest point.
-    rt_trail_tail_t: f32,
+    /// Ray-traced floor reflections, when the device supports them.
+    reflections: Option<Reflections>,
     /// Optional chase camera for split viewport (right 20%).
     chase_camera: Option<Camera>,
 }
@@ -100,32 +92,35 @@ impl OffscreenRenderer {
                 .map_err(RenderError::Vulkan)?
         };
 
-        // Build RT pipeline + composite pass if hardware supports it.
-        let ball_center = glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-        let geometries = build_scene_geometry(grid_config, &tee, &[]);
-        let (rt_pipeline, composite) = if rt_available {
-            let rtp = RtPipeline::new(&mut gpu, width, height, &geometries)?;
-            let composite = CompositePass::new(&gpu.device, OFFSCREEN_FORMAT, rtp.storage.view())?;
-            (Some(rtp), Some(composite))
+        // Build RT reflections if hardware supports it.
+        let reflections = if rt_available {
+            let scene = RtSceneState::new(
+                glam::Vec3::new(0.0, tee.ball_radius, 0.0),
+                RtTrail::default(),
+            );
+            Some(Reflections::new(
+                &mut gpu,
+                OFFSCREEN_FORMAT,
+                vk::Extent2D { width, height },
+                grid_config,
+                &tee,
+                scene,
+            )?)
         } else {
-            (None, None)
+            None
         };
 
         Ok(Self {
             gpu,
             pipeline: ManuallyDrop::new(pipeline),
-            target: Some(target),
+            target: ManuallyDrop::new(target),
             geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
 
-            rt_pipeline,
-            composite,
-            rt_ball_center: ball_center,
-            rt_trail_fade_dist: 0.0,
-            rt_trail_tail_t: 0.0,
+            reflections,
             chase_camera: None,
         })
     }
@@ -173,7 +168,6 @@ impl OffscreenRenderer {
 
         // Tee box + ball at flight position, trail glow and core.
         let tee = TeeBox::default();
-        let ball_center = ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
         let snapshot = Snapshot {
             ball_pos,
             trail_points,
@@ -204,18 +198,14 @@ impl OffscreenRenderer {
         Ok(Self {
             gpu,
             pipeline: ManuallyDrop::new(pipeline),
-            target: Some(target),
+            target: ManuallyDrop::new(target),
             geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
 
-            rt_pipeline: None,
-            composite: None,
-            rt_ball_center: ball_center,
-            rt_trail_fade_dist: 0.0,
-            rt_trail_tail_t: 0.0,
+            reflections: None,
             chase_camera: None,
         })
     }
@@ -225,18 +215,11 @@ impl OffscreenRenderer {
     /// Falls back to raster-only if RT hardware is not available.
     pub fn new_rt(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
-        let ball_center = glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
-        let geometries = build_scene_geometry(grid_config, &tee, &[]);
-        Self::create_rt(
-            width,
-            height,
-            grid_config,
-            &tee,
-            ball_center,
-            &geometries,
-            None,
-            &RtTrail::default(),
-        )
+        let scene = RtSceneState::new(
+            glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
+            RtTrail::default(),
+        );
+        Self::create_rt(width, height, grid_config, &tee, scene, None)
     }
 
     /// Create a headless renderer with RT reflection compositing and a ball in flight.
@@ -257,8 +240,10 @@ impl OffscreenRenderer {
         let ball_center = ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
 
         // Reflect the part of the trail the raster tracer draws.
-        let trail = RtTrail::new(trail_points, current_time, max_lifetime);
-        let geometries = build_scene_geometry(grid_config, &tee, &trail.points);
+        let scene = RtSceneState::new(
+            ball_center,
+            RtTrail::new(trail_points, current_time, max_lifetime),
+        );
         let snapshot = Snapshot {
             ball_pos,
             trail_points,
@@ -267,16 +252,7 @@ impl OffscreenRenderer {
             camera_pos: camera.position,
         };
 
-        Self::create_rt(
-            width,
-            height,
-            grid_config,
-            &tee,
-            ball_center,
-            &geometries,
-            Some(&snapshot),
-            &trail,
-        )
+        Self::create_rt(width, height, grid_config, &tee, scene, Some(&snapshot))
     }
 
     /// Internal RT constructor shared by `new_rt` and `new_with_flight_rt`.
@@ -286,10 +262,8 @@ impl OffscreenRenderer {
         height: u32,
         grid_config: &GridConfig,
         tee: &TeeBox,
-        ball_center: glam::Vec3,
-        geometries: &[crate::rt_pipeline::RtGeometry],
+        scene: RtSceneState,
         snapshot: Option<&Snapshot<'_>>,
-        trail: &RtTrail,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
             validation: cfg!(debug_assertions),
@@ -335,30 +309,31 @@ impl OffscreenRenderer {
                 .map_err(RenderError::Vulkan)?
         };
 
-        // Build RT pipeline + composite pass if hardware supports it.
-        let (rt_pipeline, composite) = if rt_available {
-            let rtp = RtPipeline::new(&mut gpu, width, height, geometries)?;
-            let composite = CompositePass::new(&gpu.device, OFFSCREEN_FORMAT, rtp.storage.view())?;
-            (Some(rtp), Some(composite))
+        // Build RT reflections if hardware supports it.
+        let reflections = if rt_available {
+            Some(Reflections::new(
+                &mut gpu,
+                OFFSCREEN_FORMAT,
+                vk::Extent2D { width, height },
+                grid_config,
+                tee,
+                scene,
+            )?)
         } else {
-            (None, None)
+            None
         };
 
         Ok(Self {
             gpu,
             pipeline: ManuallyDrop::new(pipeline),
-            target: Some(target),
+            target: ManuallyDrop::new(target),
             geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
 
-            rt_pipeline,
-            composite,
-            rt_ball_center: ball_center,
-            rt_trail_fade_dist: trail.fade_dist,
-            rt_trail_tail_t: trail.tail_t,
+            reflections,
             chase_camera: None,
         })
     }
@@ -387,7 +362,7 @@ impl OffscreenRenderer {
     /// Whether this renderer has RT reflection compositing enabled.
     #[must_use]
     pub fn has_rt(&self) -> bool {
-        self.rt_pipeline.is_some()
+        self.reflections.is_some()
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
@@ -438,26 +413,23 @@ impl OffscreenRenderer {
         let tee = TeeBox::default();
         flight_vertices(flights, camera.position, &tee, &mut self.content);
 
-        // Rebuild RT TLAS with updated ball/trail positions. Reflections
-        // follow the newest flight, the one the HUD and chase camera show,
-        // and reflect the part of its trail the raster tracer still draws.
-        if let Some(ref mut rt_pipeline) = self.rt_pipeline {
+        // Reflections follow the newest flight, the one the HUD and chase
+        // camera show, and reflect the part of its trail the raster tracer
+        // still draws. With no flight the reflected ball stays where the
+        // last flight left it. The acceleration structures are rebuilt only
+        // when the reflected ball or trail moves.
+        if let Some(reflections) = &mut self.reflections {
             let newest = flights.last();
             let trail = newest.map_or_else(RtTrail::default, |f| {
                 RtTrail::new(&f.trail_points, f.current_time, DEFAULT_TRAIL_LIFETIME)
             });
-
-            if let Some(newest) = newest {
-                self.rt_ball_center = newest.ball_pos;
-                self.rt_trail_tail_t = trail.tail_t;
-            }
-            self.rt_trail_fade_dist = trail.fade_dist;
-
-            let grid_config = cf_scene::grid::GridConfig::default();
-            let geometries = build_scene_geometry(&grid_config, &tee, &trail.points);
-            if let Err(e) = rt_pipeline.update_scene(&mut self.gpu, &geometries) {
-                eprintln!("RT scene update failed: {e}");
-            }
+            let ball_centre = newest.map_or(reflections.scene().ball_centre(), |f| f.ball_pos);
+            reflections.set_scene(
+                &mut self.gpu,
+                RtSceneState::new(ball_centre, trail),
+                &GridConfig::default(),
+                &tee,
+            );
         }
     }
 
@@ -481,12 +453,11 @@ impl OffscreenRenderer {
     /// rays, and composites them onto the rasterized output.
     pub fn render(&mut self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
         self.frame.upload(&self.content);
-        let target = self.target.as_ref().expect("target exists");
+        let target = &self.target;
         let device = &self.gpu.device;
         let width = target.width;
         let height = target.height;
         let extent = vk::Extent2D { width, height };
-        let rt_active = self.rt_pipeline.is_some();
 
         // Record command buffer
         // SAFETY: Recording commands into a valid command buffer.
@@ -628,8 +599,13 @@ impl OffscreenRenderer {
             device.cmd_end_render_pass(self.command_buffer);
 
             // ── RT reflection compositing ──
-            if rt_active {
-                self.record_rt_composite(camera, width, height, extent, target.overlay);
+            if let Some(reflections) = &self.reflections {
+                let main = TraceView {
+                    camera: *camera,
+                    offset: [0, 0],
+                    extent,
+                };
+                reflections.record(device, self.command_buffer, &[main], target.overlay, extent);
             }
 
             // The HUD pass ends the frame and leaves the image in
@@ -739,93 +715,6 @@ impl OffscreenRenderer {
         })
     }
 
-    /// Record RT trace + composite pass commands.
-    ///
-    /// After the main raster render pass ends at `COLOR_ATTACHMENT_OPTIMAL`:
-    /// 1. Transition RT storage image: UNDEFINED -> GENERAL
-    /// 2. Trace RT reflection rays
-    /// 3. Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
-    /// 4. Composite pass into `overlay` (LOAD, additive blend, stays in
-    ///    `COLOR_ATTACHMENT_OPTIMAL`)
-    ///
-    /// # Safety
-    /// The command buffer must be in the recording state, outside any render pass.
-    unsafe fn record_rt_composite(
-        &self,
-        camera: &Camera,
-        width: u32,
-        height: u32,
-        extent: vk::Extent2D,
-        overlay: vk::Framebuffer,
-    ) {
-        // SAFETY: The command buffer is in the recording state, outside any render pass.
-        // All Vulkan handles are valid (created in the constructor, not yet destroyed).
-        unsafe {
-            let device = &self.gpu.device;
-            let rt = self.rt_pipeline.as_ref().expect("RT pipeline present");
-
-            let subresource_range = vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1);
-
-            // Build RT push constants (full-frame dispatch, no viewport offset).
-            let pc = RtPushConstants::new(
-                camera,
-                width as f32 / height as f32,
-                [0.0, 0.0],
-                self.rt_ball_center,
-                self.rt_trail_fade_dist,
-                self.rt_trail_tail_t,
-            );
-
-            // Step 1: Transition RT storage image: UNDEFINED -> GENERAL
-            device.cmd_pipeline_barrier(
-                self.command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .image(rt.storage.image())
-                    .subresource_range(subresource_range)],
-            );
-
-            // Step 2: Trace RT reflection rays.
-            rt.record_trace(device, self.command_buffer, &pc, width, height);
-
-            // Step 3: Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
-            device.cmd_pipeline_barrier(
-                self.command_buffer,
-                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .old_layout(vk::ImageLayout::GENERAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(rt.storage.image())
-                    .subresource_range(subresource_range)],
-            );
-
-            // Step 4: Composite pass (LOAD, additive blend fullscreen triangle)
-            // into the overlay framebuffer.
-            if let Some(composite) = &self.composite {
-                composite.record(device, self.command_buffer, overlay, extent);
-            }
-        } // unsafe
-    }
-
     fn allocate_command_buffer(gpu: &GpuContext) -> Result<vk::CommandBuffer, RenderError> {
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(gpu.command_pool)
@@ -857,17 +746,12 @@ impl Drop for OffscreenRenderer {
             ManuallyDrop::take(&mut self.geometry).destroy(device, allocator);
             ManuallyDrop::take(&mut self.frame).destroy(device, allocator);
 
-            if let Some(composite) = self.composite.take() {
-                composite.destroy(&self.gpu.device);
+            if let Some(reflections) = self.reflections.take() {
+                reflections.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
-            if let Some(rtp) = self.rt_pipeline.take() {
-                rtp.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-
-            if let Some(target) = self.target.take() {
-                target.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
+            // SAFETY: Taken once, here in `Drop`, and never used after.
+            ManuallyDrop::take(&mut self.target).destroy(&self.gpu.device, &mut self.gpu.allocator);
 
             // SAFETY: Taken once, here in `Drop`, and never used after.
             ManuallyDrop::take(&mut self.pipeline).destroy(&self.gpu.device);
