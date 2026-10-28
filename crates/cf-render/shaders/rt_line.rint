@@ -56,8 +56,8 @@ float segment_distance(int i, vec3 o, vec3 dir) {
 
 void main() {
     int i = gl_PrimitiveID;
-    vec3 o = gl_ObjectRayOriginEXT;
-    vec3 dir = gl_ObjectRayDirectionEXT;
+    vec3 o = gl_WorldRayOriginEXT;
+    vec3 dir = gl_WorldRayDirectionEXT;
 
     vec3 a = line.vertices[2 * i].xyz;
     vec3 b = line.vertices[2 * i + 1].xyz;

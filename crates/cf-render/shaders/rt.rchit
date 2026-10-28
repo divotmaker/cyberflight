@@ -15,8 +15,6 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) rayPayloadInEXT vec4 payload;
 layout(location = 1) rayPayloadEXT vec4 reflPayload;
 
-hitAttributeEXT vec2 attribs;
-
 // Geometry types (gl_InstanceCustomIndexEXT):
 //   0 = floor (reflective glass surface)
 //   2 = tee box fill (dark surface)
@@ -47,14 +45,12 @@ void main() {
         // rgb and the light-weighted sum of the heights it crossed to alpha.
         vec3 refl_dir = reflect(view_dir, N);
         reflPayload = vec4(0.0);
-        if (gl_HitTEXT > 0.0) {
-            traceRayEXT(
-                tlas,
-                gl_RayFlagsNoneEXT,
-                0x04, 0, 0, 0,
-                hit_pos + N * 0.001, 0.01, refl_dir, 1000.0, 1
-            );
-        }
+        traceRayEXT(
+            tlas,
+            gl_RayFlagsNoneEXT,
+            0x04, 0, 0, 0,
+            hit_pos + N * 0.001, 0.01, refl_dir, 1000.0, 1
+        );
 
         payload = shade_floor(pc.camera_pos.xyz, hit_pos, view_dir, reflPayload, pc.ball_pos.xyz);
 
