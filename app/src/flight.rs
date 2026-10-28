@@ -15,6 +15,7 @@ use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::trail::TrailPoint;
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
+use dimple::ground::Termination;
 use dimple::trajectory::{ShotInput, ShotResult};
 
 use flightrelay::{
@@ -32,6 +33,9 @@ pub const CHASE_CAM_SMOOTHING_TAU: f64 = 0.3;
 pub const DEFAULT_TRAIL_SUBSAMPLE: usize = 1;
 /// Trail tail as a fraction of elapsed flight time.
 pub const TRAIL_TAIL_FRACTION: f64 = 1.2;
+/// Longest a ball that dimple did not bring to rest keeps moving on the
+/// ground after landing (seconds). Shots that come to rest animate to the end.
+pub const MAX_UNSETTLED_GROUND_TIME_S: f64 = 8.0;
 /// Default smash factor for estimating club speed.
 pub const DEFAULT_SMASH_FACTOR: f64 = 1.40;
 
@@ -92,6 +96,9 @@ pub struct AnimatedFlight {
     pub result: ShotResult,
     pub timeline: Vec<TimelinePoint>,
     pub total_time: f64,
+    /// Where the animation ends: dimple's rest position, or the last shown
+    /// position when the ball did not settle.
+    pub rest_pos: DVec3,
     pub launch_time: f64,
     pub club: ClubDelivery,
     pub lm_carry_yards: Option<f64>,
@@ -107,10 +114,37 @@ impl AnimatedFlight {
         env: &Environment,
         targets: &[cf_scene::target::Target],
     ) -> Self {
-        let input = &shot.input;
-        let result = ground::simulate_shot(input, ball, env, targets);
-        let timeline = build_timeline(&result);
+        let result = ground::simulate_shot(&shot.input, ball, env, targets);
+        Self::from_result(shot, result, launch_time)
+    }
+
+    /// Animate a simulated shot. A ball that did not come to rest stops
+    /// [`MAX_UNSETTLED_GROUND_TIME_S`] after landing at the latest.
+    fn from_result(shot: &ReceivedShot, result: ShotResult, launch_time: f64) -> Self {
+        let mut timeline = build_timeline(&result);
+        if result.ground.termination != Termination::Rest {
+            let end = result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
+            if let Some(cut) = timeline
+                .last()
+                .filter(|last| last.time > end)
+                .and_then(|_| interpolate_timeline(&timeline, end))
+            {
+                timeline.retain(|p| p.time < end);
+                timeline.push(TimelinePoint {
+                    time: end,
+                    pos: cut,
+                });
+            }
+            eprintln!(
+                "WARN: shot #{} from {}: ball did not come to rest ({:?}), animation ends at {:.1}s",
+                shot.shot_number,
+                shot.device,
+                result.ground.termination,
+                timeline.last().map_or(0.0, |p| p.time),
+            );
+        }
         let total_time = timeline.last().map_or(0.0, |p| p.time);
+        let rest_pos = timeline.last().map_or(result.final_pos, |p| p.pos);
 
         let rollout_yards = result.total_yards - result.flight.carry_yards;
         eprintln!(
@@ -124,10 +158,11 @@ impl AnimatedFlight {
         );
 
         Self {
-            input: *input,
+            input: shot.input,
             result,
             timeline,
             total_time,
+            rest_pos,
             launch_time,
             club: shot.club.clone(),
             lm_carry_yards: shot.lm_carry_yards,
@@ -143,7 +178,7 @@ impl AnimatedFlight {
         // Live position while the ball moves; dimple's rest position once it
         // has stopped.
         let pos = if shot_t >= self.total_time {
-            self.result.final_pos
+            self.rest_pos
         } else {
             interpolate_timeline(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO)
         };
@@ -237,7 +272,7 @@ impl AnimatedFlight {
             return None;
         }
 
-        let final_pos = to_scene(self.result.final_pos);
+        let final_pos = to_scene(self.rest_pos);
 
         let shot_dir = if final_pos.length_squared() > 0.01 {
             final_pos.normalize()
@@ -385,14 +420,24 @@ impl ShotIntake {
             }
         }
         let completed = self.shots.feed(msg)?;
-        let received = ReceivedShot::from_frp(&completed);
-        if received.is_none() {
-            eprintln!(
-                "WARN: shot #{} from {} not shown: no ball flight data",
-                completed.key.shot_number, completed.device
-            );
+        match ReceivedShot::from_frp(&completed) {
+            Ok(shot) => {
+                for clamp in &shot.clamped {
+                    eprintln!(
+                        "WARN: shot #{} from {}: {clamp}",
+                        shot.shot_number, shot.device
+                    );
+                }
+                Some(shot)
+            }
+            Err(reason) => {
+                eprintln!(
+                    "WARN: shot #{} from {} not shown: {reason}",
+                    completed.key.shot_number, completed.device
+                );
+                None
+            }
         }
-        received
     }
 }
 
@@ -620,16 +665,22 @@ mod tests {
     use cf_scene::shot::ClubDelivery;
     use cf_scene::target::{Target, default_targets};
 
-    fn animate(input: ShotInput, targets: &[Target]) -> AnimatedFlight {
-        let shot = ReceivedShot {
+    fn received(input: ShotInput) -> ReceivedShot {
+        ReceivedShot {
             device: "test.0".to_owned(),
             shot_number: 1,
             input,
             club: ClubDelivery::default(),
             lm_carry_yards: None,
-        };
+            backspin_measured: true,
+            sidespin_measured: true,
+            clamped: Vec::new(),
+        }
+    }
+
+    fn animate(input: ShotInput, targets: &[Target]) -> AnimatedFlight {
         AnimatedFlight::from_received(
-            &shot,
+            &received(input),
             0.0,
             &BallModel::TOUR,
             &Environment::SEA_LEVEL,
@@ -762,7 +813,7 @@ mod tests {
         assert!((shown.ball_speed_mph - 100.0).abs() < 1e-9);
         let chase = fm.chase_camera(t).expect("newest ball is followed");
         let newest = &fm.flights[1];
-        assert_eq!(chase.target, to_scene(newest.result.final_pos));
+        assert_eq!(chase.target, to_scene(newest.rest_pos));
         let ball = newest.render_data(t, 1).expect("in flight").ball_pos;
         assert!(((chase.position - ball).length() - 125f32.sqrt()).abs() < 1e-3);
     }
@@ -803,6 +854,66 @@ mod tests {
         assert_eq!(last.pos, r.final_pos);
         assert_eq!(f.total_time, last.time);
         assert!(f.total_time > r.flight.flight_time + 1.0, "ball runs out");
+    }
+
+    #[test]
+    fn unsettled_ball_stops_animating() {
+        let input = ShotInput::driver();
+        let mut result =
+            ground::simulate_shot(&input, &BallModel::TOUR, &Environment::SEA_LEVEL, &[]);
+        assert_eq!(result.ground.termination, Termination::Rest);
+        // A ground phase that runs into dimple's time limit.
+        let mut late = *result.ground.points.last().expect("ground points");
+        late.time += 100.0;
+        late.pos.x += 50.0;
+        result.ground.points.push(late);
+        result.ground.termination = Termination::MaxTime;
+
+        let f = AnimatedFlight::from_result(&received(input), result, 0.0);
+        let end = f.result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
+        assert!(
+            (f.total_time - end).abs() < 1e-9,
+            "total {:.1}",
+            f.total_time
+        );
+        let last = f.timeline.last().expect("timeline");
+        assert_eq!(last.time, f.total_time);
+        assert_eq!(last.pos, f.rest_pos);
+        assert!(f.timeline.windows(2).all(|w| w[1].time > w[0].time));
+        assert!(!f.is_animating(end + 0.01));
+        assert!(f.is_expired(end + CHASE_LINGER_TIME + 0.01));
+    }
+
+    #[test]
+    fn settled_ball_animates_to_rest() {
+        let f = animate(ShotInput::driver(), &[]);
+        assert_eq!(f.result.ground.termination, Termination::Rest);
+        assert_eq!(f.rest_pos, f.result.final_pos);
+        assert!(f.total_time > f.result.flight.flight_time + 1.0);
+    }
+
+    #[test]
+    fn chase_camera_follows_a_hook_then_lets_go() {
+        let input = ShotInput {
+            launch_azimuth_deg: -2.0,
+            sidespin_rpm: -900.0,
+            ..ShotInput::driver()
+        };
+        let mut f = animate(input, &default_targets());
+        assert!(f.rest_pos.z < -10.0, "hook finishes left");
+        let end = f.total_time + CHASE_LINGER_TIME;
+        let mut t = 0.0;
+        while t < end {
+            let cam = f.chase_camera(t).expect("followed until the linger ends");
+            assert!(
+                cam.position.is_finite() && cam.target.is_finite(),
+                "t = {t:.2}: {cam:?}"
+            );
+            assert!((cam.position - cam.target).length() > 1.0);
+            t += 0.05;
+        }
+        assert!(f.chase_camera(end + 0.01).is_none());
+        assert!(f.prev_chase.is_none());
     }
 
     #[test]

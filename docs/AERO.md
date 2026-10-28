@@ -14,6 +14,15 @@ not yet validated against measured data and may change between releases.
 
 ## How cyberflight uses it
 
+- **Shot input.** `cf_scene::shot::ReceivedShot::from_frp` turns a
+  flightrelay shot into dimple's `ShotInput`. It needs a ball speed and a
+  launch elevation; a missing azimuth is a straight shot. Spin comes from
+  the backspin/sidespin pair or from total spin and spin axis; a total
+  spin without an axis counts as backspin. A shot without any spin flies
+  with an assumed 2500 rpm of backspin.
+  NaN or infinite launch values drop the shot. Values outside a physical
+  envelope are clamped to it and logged: ball speed 0–250 mph, launch
+  elevation −20° to 70°, azimuth ±60°, backspin and sidespin ±20 000 rpm.
 - **Ball and air.** Shots fly with `BallModel::TOUR` in
   `Environment::SEA_LEVEL`; the hops between ground impacts fly through the
   same air.
@@ -29,7 +38,9 @@ not yet validated against measured data and may change between releases.
   finishes on fairway.
 - **Animation.** The rendered path is dimple's flight points followed by its
   ground points. Both carry absolute shot times, so the app plays the
-  combined list back against the clock.
+  combined list back against the clock. A ball that dimple does not bring
+  to rest (its time or impact limit ends the ground phase) stops moving
+  8 s after landing at the latest.
 - **Frames.** dimple uses +X downrange, +Y up, +Z right of the target line.
   The scene is right-handed with +Z downrange, +Y up and +X left of the
   target line: the range camera looks down +Z, which puts scene +X on the
