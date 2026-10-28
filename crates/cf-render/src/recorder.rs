@@ -227,6 +227,9 @@ impl SceneRecorder {
     /// Build the next frame's flight geometry from `flights`, with trail
     /// glows facing `camera`, and point the reflections at the newest
     /// flight ([`RtSceneState::from_flights`]).
+    ///
+    /// If the reflections fail to rebuild, it says so on stderr, destroys
+    /// them and renders in `Rasterized` mode from then on.
     pub(crate) fn update_flight(
         &mut self,
         gpu: &mut GpuContext,
@@ -236,7 +239,20 @@ impl SceneRecorder {
         flight_vertices(flights, camera.position, &self.tee, &mut self.content);
         if let Some(reflections) = &mut self.reflections {
             let scene = RtSceneState::from_flights(flights, &self.tee);
-            reflections.set_scene(gpu, scene, &self.grid, &self.tee);
+            if let Err(e) = reflections.set_scene(gpu, scene, &self.grid, &self.tee) {
+                eprintln!("RT scene update failed, rendering without ray tracing: {e}");
+                self.mode = RenderMode::Rasterized;
+                if let Some(reflections) = self.reflections.take() {
+                    // SAFETY: Nothing records with the reflections any more.
+                    // The failed rebuild waited for the device to go idle
+                    // first; this wait covers a failure inside a build
+                    // submission.
+                    unsafe {
+                        gpu.device.device_wait_idle().ok();
+                        reflections.destroy(&gpu.device, &mut gpu.allocator);
+                    }
+                }
+            }
         }
     }
 

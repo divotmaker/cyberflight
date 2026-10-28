@@ -136,22 +136,24 @@ impl Reflections {
     /// Show `scene`. Rebuilds the acceleration structures (with the floor of
     /// `grid` and the tee box of `tee`) only when the geometry changes;
     /// `update_scene` waits for the device to go idle first. The trail fade
-    /// values follow `scene` on every call. A failed rebuild is reported on
-    /// stderr and leaves the old structures.
+    /// values follow `scene` on every successful call.
+    ///
+    /// # Errors
+    /// The rebuild fails. The old structures are destroyed by then, so the
+    /// reflections must not record again; destroy them.
     pub(crate) fn set_scene(
         &mut self,
         gpu: &mut GpuContext,
         scene: RtSceneState,
         grid: &GridConfig,
         tee: &TeeBox,
-    ) {
+    ) -> Result<(), RenderError> {
         if !scene.same_geometry(&self.scene) {
             let geometries = scene.geometry(grid, tee);
-            if let Err(e) = self.pipeline.update_scene(gpu, &geometries) {
-                eprintln!("RT scene update failed: {e}");
-            }
+            self.pipeline.update_scene(gpu, &geometries)?;
         }
         self.scene = scene;
+        Ok(())
     }
 
     /// Recreate the storage image at `extent` (if it differs) and point the

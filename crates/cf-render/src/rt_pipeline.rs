@@ -855,6 +855,11 @@ impl RtPipeline {
     ///
     /// Waits for device idle, destroys old AS resources, builds new ones,
     /// and updates the TLAS descriptor binding.
+    ///
+    /// # Errors
+    /// The wait or a build fails. After a failed build the old structures
+    /// are destroyed and the descriptor set still names the old TLAS, so the
+    /// pipeline must not trace again; destroy it.
     pub fn update_scene(
         &mut self,
         gpu: &mut GpuContext,

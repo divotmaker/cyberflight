@@ -129,7 +129,9 @@ impl OffscreenRenderer {
 
     /// Update dynamic flight geometry for the next `render`. Reflections
     /// show the newest flight's ball and the part of its trail the tracer
-    /// still draws, or the ball on the tee when there is no flight.
+    /// still draws, or the ball on the tee when there is no flight. If the
+    /// reflections fail to rebuild, the renderer says so on stderr and
+    /// renders raster from then on.
     pub fn update_flight(&mut self, flights: &[FlightRenderData], camera: &Camera) {
         self.recorder.update_flight(&mut self.gpu, flights, camera);
     }

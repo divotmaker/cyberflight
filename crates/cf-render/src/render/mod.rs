@@ -413,7 +413,8 @@ impl Renderer {
     /// next `draw_frame` uploads them. Reflections show the newest flight's
     /// ball and the part of its trail the tracer still draws, or the ball on
     /// the tee; the RT scene is rebuilt only when the reflected ball or trail
-    /// changed.
+    /// changed. If that rebuild fails, the renderer says so on stderr and
+    /// renders raster from then on.
     pub fn update_flight(&mut self, flights: &[FlightRenderData], camera: &Camera) {
         self.recorder.update_flight(&mut self.gpu, flights, camera);
     }
