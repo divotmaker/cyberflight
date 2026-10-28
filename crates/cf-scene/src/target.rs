@@ -56,16 +56,16 @@ pub fn default_targets() -> Vec<Target> {
 /// Line segments per ring circle.
 pub const RING_SEGMENTS: u32 = 96;
 
-/// Brightness of the inner rings relative to the outer ring, which marks the
-/// green's edge.
+/// Brightness of a target's inner rings relative to its outer ring.
 pub const INNER_RING_BRIGHTNESS: f32 = 0.45;
 
 /// Ring lines for `targets` as `LINE_LIST` vertex pairs on the range floor.
 ///
 /// Each target gets `num_rings` concentric circles `ring_spacing_m` apart;
-/// the outermost has [`Target::outer_radius_m`], the edge of the green that
-/// [`ground::surface_at`](crate::ground::surface_at) uses. Rings sit 1 cm
-/// above Y = 0 so they draw over the grid.
+/// the outermost has [`Target::outer_radius_m`]. Targets are aiming marks:
+/// they are drawn but do not change the range floor (see
+/// [`ground`](crate::ground)). Rings sit 1 cm above Y = 0 so they draw
+/// over the grid.
 ///
 /// `fade` is the grid's distance fade (see [`GridVertex`]) over
 /// `grid`'s [`fade_distance_m`](GridConfig::fade_distance_m), lowered on
@@ -85,26 +85,39 @@ pub fn generate_target_rings(targets: &[Target], grid: &GridConfig) -> Vec<GridV
             } else {
                 inner_scale
             };
-            let point = |seg: u32| {
-                let angle = (seg as f32 / RING_SEGMENTS as f32) * std::f32::consts::TAU;
-                let p = Vec3::new(
-                    center.x + radius * angle.cos(),
-                    0.01,
-                    center.z + radius * angle.sin(),
-                );
-                let near = 1.0 - (p.length() / fade_dist).min(1.0);
-                GridVertex {
-                    position: p.into(),
-                    fade: 1.0 - near * scale,
-                }
-            };
-            for seg in 0..RING_SEGMENTS {
-                verts.push(point(seg));
-                verts.push(point(seg + 1));
-            }
+            push_ring(&mut verts, center, radius, scale, fade_dist);
         }
     }
     verts
+}
+
+/// Append one ring of `radius` around `center` as [`RING_SEGMENTS`] line
+/// pairs 1 cm above Y = 0, with the grid's distance fade over `fade_dist`
+/// scaled by `scale` (1 = full strength).
+pub(crate) fn push_ring(
+    verts: &mut Vec<GridVertex>,
+    center: Vec3,
+    radius: f32,
+    scale: f32,
+    fade_dist: f32,
+) {
+    let point = |seg: u32| {
+        let angle = (seg as f32 / RING_SEGMENTS as f32) * std::f32::consts::TAU;
+        let p = Vec3::new(
+            center.x + radius * angle.cos(),
+            0.01,
+            center.z + radius * angle.sin(),
+        );
+        let near = 1.0 - (p.length() / fade_dist).min(1.0);
+        GridVertex {
+            position: p.into(),
+            fade: 1.0 - near * scale,
+        }
+    };
+    for seg in 0..RING_SEGMENTS {
+        verts.push(point(seg));
+        verts.push(point(seg + 1));
+    }
 }
 
 #[cfg(test)]
@@ -148,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn outer_ring_is_the_green_edge() {
+    fn outer_ring_has_the_outer_radius() {
         let target = Target {
             center: [-8.0, 0.0, 120.0],
             num_rings: 3,
@@ -159,13 +172,6 @@ mod tests {
         assert_eq!(radii.len(), 3);
         let outer = *radii.last().expect("rings");
         assert!((outer - target.outer_radius_m()).abs() < 1e-3);
-
-        // Just inside the drawn outer ring is green; just outside is fairway.
-        let c = target.center_vec3();
-        let targets = [target];
-        let edge = |r: f32| crate::ground::surface_at(f64::from(c.x + r), f64::from(c.z), &targets);
-        assert_eq!(edge(outer - 0.01), dimple::ground::Surface::GREEN);
-        assert_eq!(edge(outer + 0.01), dimple::ground::Surface::FAIRWAY);
     }
 
     #[test]

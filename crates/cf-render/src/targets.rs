@@ -1,10 +1,12 @@
-//! Target rings: concentric neon circles on the range floor, drawn by both
-//! the windowed and the offscreen renderer with the grid's line pipeline.
+//! Range rings: the targets' concentric neon circles and the green's edge
+//! on the range floor, drawn by both the windowed and the offscreen
+//! renderer with the grid's line pipeline.
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 
 use cf_scene::color;
+use cf_scene::green::{GreenConfig, generate_green_edge};
 use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::target::{Target, generate_target_rings};
 
@@ -18,7 +20,7 @@ pub(crate) type CreateVertexBuffer = fn(
     &[GridVertex],
 ) -> Result<(vk::Buffer, Allocation), RenderError>;
 
-/// Uploaded ring geometry for a range's targets.
+/// Uploaded ring geometry for a range's targets and green.
 pub(crate) struct TargetRings {
     buffer: vk::Buffer,
     allocation: Allocation,
@@ -26,16 +28,20 @@ pub(crate) struct TargetRings {
 }
 
 impl TargetRings {
-    /// Upload the rings of `targets`, faded like `grid`. `None` when there
-    /// is nothing to draw.
+    /// Upload the rings of `targets` and the edge of `green`, faded like
+    /// `grid`. `None` when there is nothing to draw.
     pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
         create: CreateVertexBuffer,
         targets: &[Target],
+        green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<Option<Self>, RenderError> {
-        let verts = generate_target_rings(targets, grid);
+        let mut verts = generate_target_rings(targets, grid);
+        if let Some(green) = green {
+            verts.extend(generate_green_edge(green, grid));
+        }
         if verts.is_empty() {
             return Ok(None);
         }

@@ -34,11 +34,17 @@ not yet validated against measured data and may change between releases.
   position's lateral offset) are dimple's results.
 - **Range floor.** `cf_scene::ground::RangeTerrain` is a dimple `Terrain`
   wrapped in the default `GroundPhysics`: level ground at Y = 0,
-  `Surface::GREEN` inside a target's outer radius and `Surface::FAIRWAY`
-  everywhere else. dimple samples it under the ball at every step, so a
-  ball that runs onto a target rolls on as a green and one that runs off it
-  finishes on fairway. Each target is drawn as concentric orange rings; the
-  brightest, outermost ring is the edge of the green.
+  `Surface::FAIRWAY` everywhere except on the range's optional green. The
+  green (`cf_scene::green::GreenConfig`) is one circle on the target line,
+  set by its distance downrange to the centre (`distance_m`) and its
+  diameter (`diameter_m`); inside it the floor is `Surface::GREEN`, and its
+  edge is drawn as one orange ring. dimple samples the floor under the ball
+  at every step, so a ball that runs onto the green rolls on as a green and
+  one that runs off it finishes on fairway. The default range has no green
+  (`cf_scene::green::DEFAULT_GREEN` is `None`), so every shot plays on
+  fairway; setting `DEFAULT_GREEN` (or `Range::green`) to a `GreenConfig`
+  adds one. The targets are aiming marks drawn as concentric orange rings
+  and do not change the floor.
 - **Animation.** The rendered path is dimple's flight points followed by its
   ground points. Both carry absolute shot times, so the app plays the
   combined list back against the clock. A ball that dimple does not bring
@@ -51,6 +57,6 @@ not yet validated against measured data and may change between releases.
   vector `(x, y, z)` to the scene vector `(−z, y, x)` and
   `scene_to_physics` maps back. Trajectory points go through the first;
   the terrain maps each dimple sample point to the scene with it before
-  looking up the targets, which are in the scene frame. A slice (positive
+  looking up the green, which is in the scene frame. A slice (positive
   azimuth and sidespin) finishes right of the line and is drawn on the
   right of the screen.

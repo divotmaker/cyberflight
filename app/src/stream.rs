@@ -99,7 +99,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         .init_streaming()
         .context("failed to initialize streaming buffers")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     // Start ffmpeg encoder.
@@ -157,7 +157,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
 
         // Poll FRP for new shots.
         for shot in fh.poll(now) {
-            fm.launch(&shot, now, &environment, &range.targets);
+            fm.launch(&shot, now, &environment, range.green);
         }
 
         // Update flight animations.

@@ -4,6 +4,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 
 use cf_scene::camera::Camera;
 use cf_scene::color;
+use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
 use cf_scene::target::Target;
 use cf_scene::tee::{
@@ -89,7 +90,8 @@ pub struct OffscreenRenderer {
     flight_glow_capacity: vk::DeviceSize,
     /// When true, draw the static ball on tee. When false, draw from dynamic flight buffers.
     ball_on_tee_box: bool,
-    /// Rings of the range's targets (see [`OffscreenRenderer::set_targets`]).
+    /// Rings of the range's targets and the green's edge (see
+    /// [`OffscreenRenderer::set_targets`]).
     target_rings: Option<TargetRings>,
 }
 
@@ -931,11 +933,13 @@ impl OffscreenRenderer {
         self.rt_pipeline.is_some()
     }
 
-    /// Draw `targets` as concentric rings on the range floor, faded like
-    /// `grid`. Replaces any rings set before.
+    /// Draw `targets` as concentric rings and the edge of `green` (if any)
+    /// as one ring on the range floor, faded like `grid`. Replaces any rings
+    /// set before.
     pub fn set_targets(
         &mut self,
         targets: &[Target],
+        green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<(), RenderError> {
         if let Some(old) = self.target_rings.take() {
@@ -953,6 +957,7 @@ impl OffscreenRenderer {
             &mut self.gpu.allocator,
             Self::create_vertex_buffer,
             targets,
+            green,
             grid,
         )?;
         Ok(())

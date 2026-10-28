@@ -99,7 +99,7 @@ fn render_driving_range(range: &Range, camera: &Camera) -> Result<()> {
     let mut renderer =
         OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid).context("failed to create renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(camera).context("render failed")?;
     save_png(&frame, &out_path("driving_range.png"))
@@ -269,7 +269,7 @@ fn render_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     let frame = renderer.render(&flight_camera).context("render failed")?;
@@ -312,7 +312,7 @@ fn render_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     let frame = renderer.render(&wide_camera).context("render failed")?;
@@ -354,7 +354,7 @@ fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     let frame = renderer.render(&wide45_camera).context("render failed")?;
@@ -376,7 +376,7 @@ fn render_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     let frame = renderer
@@ -433,7 +433,7 @@ fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     renderer
@@ -513,7 +513,7 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create hero renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
 
     renderer.set_chase_camera(Some(chase));
@@ -555,7 +555,7 @@ fn render_rt_driving_range(range: &Range, camera: &Camera) -> Result<()> {
     let mut renderer = OffscreenRenderer::new_rt(WIDTH, HEIGHT, &range.grid)
         .context("failed to create RT renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
     eprintln!(
         "  RT compositing: {}",
@@ -591,7 +591,7 @@ fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create RT flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&flight_camera).context("render failed")?;
     save_png(&frame, &out_path("flight_rt.png"))
@@ -612,7 +612,7 @@ fn render_rt_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create RT flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("flight_tee_rt.png"))
@@ -648,7 +648,7 @@ fn render_rt_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create RT flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&wide_camera).context("render failed")?;
     save_png(&frame, &out_path("flight_wide_rt.png"))
@@ -684,7 +684,7 @@ fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> 
     )
     .context("failed to create RT flight renderer")?;
     renderer
-        .set_targets(&range.targets, &range.grid)
+        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&wide45_camera).context("render failed")?;
     save_png(&frame, &out_path("flight_wide_45_rt.png"))

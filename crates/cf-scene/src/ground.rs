@@ -1,11 +1,12 @@
 //! The range floor as dimple ground.
 //!
-//! The range is level ground at Y = 0. It is fairway by default; inside a
-//! target's outer radius it is green. Each point maps to a dimple
-//! [`Surface`] preset, and [`RangeTerrain`] serves those to dimple's ground
-//! physics, which samples the terrain under the ball at every step: a ball
-//! that lands short of a target and runs onto it rolls on as a green, and
-//! one that runs off a target rolls out on fairway.
+//! The range is level ground at Y = 0. It is fairway, except inside the
+//! range's optional [`GreenConfig`], where it is green. Each point maps to
+//! a dimple [`Surface`] preset, and [`RangeTerrain`] serves those to
+//! dimple's ground physics, which samples the terrain under the ball at
+//! every step: a ball that lands short of the green and runs onto it rolls
+//! on as a green, and one that runs off it rolls out on fairway. Targets
+//! are aiming marks only and do not change the floor.
 
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
@@ -14,20 +15,14 @@ use dimple::trajectory::{ShotInput, ShotResult};
 use glam::DVec3;
 
 use crate::frame::physics_to_scene;
-use crate::target::Target;
+use crate::green::GreenConfig;
 
-/// Surface at a scene-frame ground point (`x`, `z`), the frame of
-/// [`Target::center`]: [`Surface::GREEN`] inside any target's outer radius,
-/// [`Surface::FAIRWAY`] elsewhere. Targets are circles on the Y = 0 plane.
+/// Surface at a scene-frame ground point (`x`, `z`) (see
+/// [`frame`](crate::frame)): [`Surface::GREEN`] on `green`,
+/// [`Surface::FAIRWAY`] elsewhere, and everywhere when `green` is `None`.
 #[must_use]
-pub fn surface_at(x: f64, z: f64, targets: &[Target]) -> Surface {
-    let on_target = targets.iter().any(|t| {
-        let dx = x - f64::from(t.center[0]);
-        let dz = z - f64::from(t.center[2]);
-        let r = f64::from(t.outer_radius_m());
-        dx * dx + dz * dz <= r * r
-    });
-    if on_target {
+pub fn surface_at(x: f64, z: f64, green: Option<GreenConfig>) -> Surface {
+    if green.is_some_and(|g| g.contains(x, z)) {
         Surface::GREEN
     } else {
         Surface::FAIRWAY
@@ -38,43 +33,43 @@ pub fn surface_at(x: f64, z: f64, targets: &[Target]) -> Surface {
 /// of [`surface_at`].
 ///
 /// dimple samples it in its own frame; each sample is mapped to the scene
-/// with [`physics_to_scene`] before the target lookup.
+/// with [`physics_to_scene`] before the green lookup.
 #[derive(Debug, Clone, Copy)]
-pub struct RangeTerrain<'a> {
-    targets: &'a [Target],
+pub struct RangeTerrain {
+    green: Option<GreenConfig>,
 }
 
-impl<'a> RangeTerrain<'a> {
-    /// The range floor with greens at `targets`.
+impl RangeTerrain {
+    /// The range floor with `green`, or all fairway for `None`.
     #[must_use]
-    pub fn new(targets: &'a [Target]) -> Self {
-        Self { targets }
+    pub fn new(green: Option<GreenConfig>) -> Self {
+        Self { green }
     }
 }
 
-impl Terrain for RangeTerrain<'_> {
+impl Terrain for RangeTerrain {
     fn sample(&self, x: f64, z: f64) -> GroundSample {
         let scene = physics_to_scene(DVec3::new(x, 0.0, z));
         GroundSample {
             height: 0.0,
             normal: DVec3::Y,
-            surface: surface_at(scene.x, scene.z, self.targets),
+            surface: surface_at(scene.x, scene.z, self.green),
         }
     }
 }
 
 /// Simulate a full shot on the range: flight, then impacts, hops, slide
-/// and roll on the range floor with greens at `targets`, hopping through
-/// `env`'s air. The result is in dimple's frame; map positions to the scene
-/// with [`physics_to_scene`].
+/// and roll on the range floor with `green` (all fairway for `None`),
+/// hopping through `env`'s air. The result is in dimple's frame; map
+/// positions to the scene with [`physics_to_scene`].
 #[must_use]
 pub fn simulate_shot(
     input: &ShotInput,
     ball: &BallModel,
     env: &Environment,
-    targets: &[Target],
+    green: Option<GreenConfig>,
 ) -> ShotResult {
-    let ground = GroundPhysics::new(RangeTerrain::new(targets));
+    let ground = GroundPhysics::new(RangeTerrain::new(green));
     dimple::trajectory::simulate_shot(input, ball, env, &ground)
 }
 
@@ -84,22 +79,20 @@ mod tests {
 
     use super::*;
     use crate::frame::screen_x;
+    use crate::range::Range;
     use crate::target::default_targets;
 
-    fn shot(input: &ShotInput, targets: &[Target]) -> ShotResult {
-        simulate_shot(input, &BallModel::TOUR, &Environment::SEA_LEVEL, targets)
+    fn shot(input: &ShotInput, green: Option<GreenConfig>) -> ShotResult {
+        simulate_shot(input, &BallModel::TOUR, &Environment::SEA_LEVEL, green)
     }
 
-    /// A target of `radius` m centred on the scene point of the dimple
-    /// position `p`.
-    fn target_at(p: DVec3, radius: f32) -> Target {
-        let c = physics_to_scene(p);
-        Target {
-            center: [c.x as f32, 0.0, c.z as f32],
-            num_rings: 1,
-            ring_spacing_m: radius,
-            label: "T".to_owned(),
-        }
+    /// A green of `radius` m on the target line at the downrange distance
+    /// of the dimple position `p`.
+    fn green_at(p: DVec3, radius: f64) -> Option<GreenConfig> {
+        Some(GreenConfig {
+            distance_m: physics_to_scene(p).z as f32,
+            diameter_m: (2.0 * radius) as f32,
+        })
     }
 
     fn landing(input: &ShotInput) -> DVec3 {
@@ -107,69 +100,90 @@ mod tests {
         flight.points.last().expect("flight has points").pos
     }
 
-    #[test]
-    fn surface_at_origin_is_fairway() {
-        let targets = default_targets();
-        assert_eq!(surface_at(0.0, 0.0, &targets), Surface::FAIRWAY);
+    /// A shot landing `|lateral|` m off the target line misses a green on
+    /// the line narrower than that and is caught by a wider one.
+    fn assert_green_catches_only_when_wide_enough(input: &ShotInput, land: DVec3) {
+        let off = land.z.abs();
+        let narrow = shot(input, green_at(land, off - 2.0));
+        let wide = shot(input, green_at(land, off + 2.0));
+        assert_eq!(narrow.ground.contacts[0].surface, Surface::FAIRWAY);
+        assert_eq!(wide.ground.contacts[0].surface, Surface::GREEN);
     }
 
     #[test]
-    fn surface_at_target_center_is_green() {
-        let targets = default_targets();
-        // First target is at 45.72m downrange (50 yards)
-        let t = &targets[0];
-        assert!((t.center[2] - 45.72).abs() < 1e-4);
-        assert_eq!(
-            surface_at(f64::from(t.center[0]), f64::from(t.center[2]), &targets),
-            Surface::GREEN
+    fn default_range_is_all_fairway() {
+        let range = Range::new();
+        assert_eq!(range.green, None);
+        assert_eq!(surface_at(0.0, 0.0, range.green), Surface::FAIRWAY);
+        for t in &range.targets {
+            let (x, z) = (f64::from(t.center[0]), f64::from(t.center[2]));
+            assert_eq!(surface_at(x, z, range.green), Surface::FAIRWAY);
+            let r = f64::from(t.outer_radius_m());
+            assert_eq!(surface_at(x + r * 0.5, z, range.green), Surface::FAIRWAY);
+        }
+        for z in (0..300).step_by(5) {
+            for x in (-60..=60).step_by(5) {
+                let s = surface_at(f64::from(x), f64::from(z), range.green);
+                assert_eq!(s, Surface::FAIRWAY, "({x}, {z})");
+            }
+        }
+    }
+
+    #[test]
+    fn targets_do_not_change_the_floor() {
+        // A shot landing on the 150 yd target rolls out on fairway.
+        let input = ShotInput::seven_iron();
+        let land = physics_to_scene(landing(&input));
+        let on_target = default_targets().iter().any(|t| {
+            let dx = land.x - f64::from(t.center[0]);
+            let dz = land.z - f64::from(t.center[2]);
+            dx.hypot(dz) < f64::from(t.outer_radius_m())
+        });
+        assert!(on_target, "seven iron lands on a target: {land:?}");
+        let result = shot(&input, Range::new().green);
+        assert!(
+            result
+                .ground
+                .contacts
+                .iter()
+                .all(|c| c.surface == Surface::FAIRWAY)
         );
     }
 
     #[test]
-    fn surface_at_target_edge_is_green() {
-        let targets = vec![Target::at_distance(100.0, "100")];
-        // Just inside outer radius (5 rings × 5m = 25m), off to the side
-        assert_eq!(surface_at(24.9, 100.0, &targets), Surface::GREEN);
-    }
-
-    #[test]
-    fn surface_outside_target_is_fairway() {
-        let targets = vec![Target::at_distance(100.0, "100")];
-        // Just outside outer radius
-        assert_eq!(surface_at(25.1, 100.0, &targets), Surface::FAIRWAY);
-    }
-
-    #[test]
-    fn surface_at_off_centre_target_is_lateral_sensitive() {
-        // 10m off the target line at scene +X, 100m downrange, 5m radius.
-        let targets = vec![Target {
-            center: [10.0, 0.0, 100.0],
-            num_rings: 1,
-            ring_spacing_m: 5.0,
-            label: "R".to_owned(),
-        }];
-        assert_eq!(surface_at(10.0, 100.0, &targets), Surface::GREEN);
-        assert_eq!(surface_at(-10.0, 100.0, &targets), Surface::FAIRWAY);
-        assert_eq!(surface_at(100.0, 10.0, &targets), Surface::FAIRWAY);
+    fn configured_green_edge() {
+        let green = Some(GreenConfig {
+            distance_m: 100.0,
+            diameter_m: 30.0,
+        });
+        assert_eq!(surface_at(0.0, 100.0, green), Surface::GREEN);
+        assert_eq!(surface_at(14.99, 100.0, green), Surface::GREEN);
+        assert_eq!(surface_at(-14.99, 100.0, green), Surface::GREEN);
+        assert_eq!(surface_at(0.0, 85.01, green), Surface::GREEN);
+        assert_eq!(surface_at(15.01, 100.0, green), Surface::FAIRWAY);
+        assert_eq!(surface_at(0.0, 115.01, green), Surface::FAIRWAY);
+        assert_eq!(surface_at(0.0, 0.0, green), Surface::FAIRWAY);
     }
 
     #[test]
     fn terrain_samples_in_dimple_frame() {
-        // 10m left of the target line (scene +X), 100m downrange.
-        let targets = vec![Target {
-            center: [10.0, 0.0, 100.0],
-            num_rings: 1,
-            ring_spacing_m: 5.0,
-            label: "L".to_owned(),
-        }];
-        let terrain = RangeTerrain::new(&targets);
-        // dimple: x = downrange, z = right, so the target is at z = −10.
-        let on = terrain.sample(100.0, -10.0);
+        // A 10 m green 100 m downrange.
+        let terrain = RangeTerrain::new(Some(GreenConfig {
+            distance_m: 100.0,
+            diameter_m: 10.0,
+        }));
+        // dimple: x = downrange, z = right.
+        let on = terrain.sample(100.0, 0.0);
         assert_eq!(on.surface, Surface::GREEN);
         assert_eq!(on.height, 0.0);
         assert_eq!(on.normal, DVec3::Y);
-        assert_eq!(terrain.sample(100.0, 10.0).surface, Surface::FAIRWAY);
-        assert_eq!(terrain.sample(10.0, -100.0).surface, Surface::FAIRWAY);
+        assert_eq!(terrain.sample(100.0, 4.9).surface, Surface::GREEN);
+        assert_eq!(terrain.sample(100.0, -5.1).surface, Surface::FAIRWAY);
+        assert_eq!(terrain.sample(0.0, 100.0).surface, Surface::FAIRWAY);
+        assert_eq!(
+            RangeTerrain::new(None).sample(100.0, 0.0).surface,
+            Surface::FAIRWAY
+        );
     }
 
     #[test]
@@ -194,8 +208,8 @@ mod tests {
             ShotInput::seven_iron(),
             ShotInput::wedge(),
         ] {
-            let fairway = shot(&input, &[]);
-            let green = shot(&input, &[target_at(landing(&input), 30.0)]);
+            let fairway = shot(&input, None);
+            let green = shot(&input, green_at(landing(&input), 30.0));
             assert_eq!(green.ground.contacts[0].surface, Surface::GREEN);
             assert_eq!(fairway.ground.contacts[0].surface, Surface::FAIRWAY);
             assert!(
@@ -216,15 +230,15 @@ mod tests {
         // A small green under the landing: the driver's run carries it off
         // onto fairway, where it finishes.
         let input = ShotInput::driver();
-        let result = shot(&input, &[target_at(landing(&input), 3.0)]);
+        let green = green_at(landing(&input), 3.0);
+        let result = shot(&input, green);
         assert_eq!(result.ground.contacts[0].surface, Surface::GREEN);
         let rest = physics_to_scene(result.final_pos);
-        let targets = [target_at(landing(&input), 3.0)];
-        assert_eq!(surface_at(rest.x, rest.z, &targets), Surface::FAIRWAY);
+        assert_eq!(surface_at(rest.x, rest.z, green), Surface::FAIRWAY);
     }
 
     #[test]
-    fn pushed_shot_lands_on_target_right_of_line() {
+    fn pushed_shot_lands_right_of_the_green() {
         let input = ShotInput {
             launch_azimuth_deg: 4.0,
             ..ShotInput::seven_iron()
@@ -236,16 +250,11 @@ mod tests {
             land.z
         );
         assert!(physics_to_scene(land).x < -5.0);
-
-        let mirrored = DVec3::new(land.x, land.y, -land.z);
-        let on_line = shot(&input, &[target_at(land, 3.0)]);
-        let off_line = shot(&input, &[target_at(mirrored, 3.0)]);
-        assert_eq!(on_line.ground.contacts[0].surface, Surface::GREEN);
-        assert_eq!(off_line.ground.contacts[0].surface, Surface::FAIRWAY);
+        assert_green_catches_only_when_wide_enough(&input, land);
     }
 
     #[test]
-    fn pulled_shot_lands_on_target_left_of_line() {
+    fn pulled_shot_lands_left_of_the_green() {
         let input = ShotInput {
             launch_azimuth_deg: -4.0,
             ..ShotInput::seven_iron()
@@ -257,16 +266,11 @@ mod tests {
             land.z
         );
         assert!(physics_to_scene(land).x > 5.0);
-
-        let mirrored = DVec3::new(land.x, land.y, -land.z);
-        let on_line = shot(&input, &[target_at(land, 3.0)]);
-        let off_line = shot(&input, &[target_at(mirrored, 3.0)]);
-        assert_eq!(on_line.ground.contacts[0].surface, Surface::GREEN);
-        assert_eq!(off_line.ground.contacts[0].surface, Surface::FAIRWAY);
+        assert_green_catches_only_when_wide_enough(&input, land);
     }
 
     #[test]
-    fn hook_lands_on_target_left_of_line() {
+    fn hook_lands_left_of_the_green() {
         let input = ShotInput {
             launch_azimuth_deg: -1.0,
             sidespin_rpm: -900.0,
@@ -276,27 +280,7 @@ mod tests {
         assert!(land.z < -5.0, "hook should land left: z={:.2}", land.z);
         let c = physics_to_scene(land);
         assert!(screen_x(c) < 0.0, "hook lands on the left of the screen");
-
-        // A green centred on the landing, on scene +X (the golfer's left),
-        // catches it; the same green mirrored to the right does not.
-        let left = vec![Target {
-            center: [c.x as f32, 0.0, c.z as f32],
-            num_rings: 1,
-            ring_spacing_m: 3.0,
-            label: "L".to_owned(),
-        }];
-        let right = vec![Target {
-            center: [-c.x as f32, 0.0, c.z as f32],
-            ..left[0].clone()
-        }];
-        assert_eq!(
-            shot(&input, &left).ground.contacts[0].surface,
-            Surface::GREEN
-        );
-        assert_eq!(
-            shot(&input, &right).ground.contacts[0].surface,
-            Surface::FAIRWAY
-        );
+        assert_green_catches_only_when_wide_enough(&input, land);
     }
 
     // LATERAL SIGN: a slice (positive azimuth and sidespin) finishes right
@@ -314,16 +298,16 @@ mod tests {
             sidespin_rpm: -600.0,
             ..ShotInput::driver()
         };
-        let targets = default_targets();
+        let green = Range::new().green;
 
-        let sliced = shot(&slice, &targets);
+        let sliced = shot(&slice, green);
         assert!(sliced.flight.lateral_m > 10.0, "slice lands right");
         assert!(sliced.final_pos.z > 10.0, "slice finishes right");
         let rest = physics_to_scene(sliced.final_pos);
         assert!(rest.x < -10.0, "scene X of a slice: {:.1}", rest.x);
         assert!(screen_x(rest) > 0.05, "slice on screen: {}", screen_x(rest));
 
-        let hooked = shot(&hook, &targets);
+        let hooked = shot(&hook, green);
         assert!((hooked.final_pos.z + sliced.final_pos.z).abs() < 1e-6);
         assert!(screen_x(physics_to_scene(hooked.final_pos)) < -0.05);
     }

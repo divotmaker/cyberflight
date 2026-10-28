@@ -7,6 +7,7 @@ use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use cf_scene::camera::Camera;
+use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
 use cf_scene::target::Target;
 use cf_scene::tee::{
@@ -120,7 +121,8 @@ pub struct Renderer {
     rt_needs_update: bool,
     /// Optional chase camera for the right 20% viewport (set per-frame).
     pub(super) chase_camera: Option<Camera>,
-    /// Rings of the range's targets (see [`Renderer::set_targets`]).
+    /// Rings of the range's targets and the green's edge (see
+    /// [`Renderer::set_targets`]).
     pub(super) target_rings: Option<TargetRings>,
 }
 
@@ -671,11 +673,13 @@ impl Renderer {
         }
     }
 
-    /// Draw `targets` as concentric rings on the range floor, faded like
-    /// `grid`. Replaces any rings set before.
+    /// Draw `targets` as concentric rings and the edge of `green` (if any)
+    /// as one ring on the range floor, faded like `grid`. Replaces any rings
+    /// set before.
     pub fn set_targets(
         &mut self,
         targets: &[Target],
+        green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<(), RenderError> {
         if let Some(old) = self.target_rings.take() {
@@ -693,6 +697,7 @@ impl Renderer {
             &mut self.gpu.allocator,
             Self::create_vertex_buffer,
             targets,
+            green,
             grid,
         )?;
         Ok(())

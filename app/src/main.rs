@@ -116,7 +116,11 @@ impl App {
         let mut renderer =
             Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
         renderer
-            .set_targets(&self.range.targets, &self.range.grid)
+            .set_targets(
+                &self.range.targets,
+                self.range.green.as_ref(),
+                &self.range.grid,
+            )
             .context("failed to upload target rings")?;
         eprintln!(
             "Renderer initialized: {}x{}",
@@ -146,7 +150,7 @@ impl App {
     fn advance(&mut self, now: f64) -> Vec<cf_render::render::FlightRenderData> {
         for shot in self.frp.poll(now) {
             self.flights
-                .launch(&shot, now, &self.environment, &self.range.targets);
+                .launch(&shot, now, &self.environment, self.range.green);
         }
         self.flights.update(now)
     }
