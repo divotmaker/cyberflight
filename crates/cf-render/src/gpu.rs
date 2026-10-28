@@ -1,10 +1,11 @@
-//! GPU helpers shared by both renderers: the byte view of GPU-facing data and
-//! push constants.
+//! GPU helpers shared by both renderers: the byte view of GPU-facing data,
+//! push constants and shader modules.
 
 use ash::vk;
 
 use cf_scene::grid::GridVertex;
 
+use crate::error::RenderError;
 use crate::pipeline::GridPushConstants;
 use crate::rt_pipeline::RtPushConstants;
 
@@ -73,6 +74,36 @@ pub(crate) unsafe fn push_constants<T: GpuData>(
     }
 }
 
+/// The 32-bit words of the SPIR-V binary `spv`.
+///
+/// # Errors
+/// [`RenderError::ShaderCompilation`] when `spv` is not a whole number of
+/// words or does not start with the SPIR-V magic number.
+pub(crate) fn spirv_words(spv: &[u8]) -> Result<Vec<u32>, RenderError> {
+    ash::util::read_spv(&mut std::io::Cursor::new(spv))
+        .map_err(|e| RenderError::ShaderCompilation(e.to_string()))
+}
+
+/// Create a shader module from the SPIR-V binary `spv`.
+///
+/// # Errors
+/// [`RenderError::ShaderCompilation`] for a malformed binary (see
+/// [`spirv_words`]), [`RenderError::Vulkan`] if module creation fails.
+pub(crate) fn load_shader(
+    device: &ash::Device,
+    spv: &[u8],
+) -> Result<vk::ShaderModule, RenderError> {
+    let code = spirv_words(spv)?;
+    let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
+    // SAFETY: `code` is a whole number of SPIR-V words starting with the magic
+    // number, and `create_info` borrows it for the duration of the call.
+    unsafe {
+        device
+            .create_shader_module(&create_info, None)
+            .map_err(RenderError::Vulkan)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +118,32 @@ mod tests {
         assert_eq!(bytes.len(), 32);
         assert_eq!(&bytes[..4], &1.0_f32.to_ne_bytes());
         assert_eq!(&bytes[28..], &0.5_f32.to_ne_bytes());
+    }
+
+    #[test]
+    fn spirv_words_match_a_little_endian_decode() {
+        let spv = include_bytes!("../shaders/grid.vert.spv");
+        let expected: Vec<u32> = spv
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(spirv_words(spv).unwrap(), expected);
+    }
+
+    #[test]
+    fn spirv_words_reject_a_partial_word() {
+        let spv = include_bytes!("../shaders/grid.vert.spv");
+        assert!(matches!(
+            spirv_words(&spv[..spv.len() - 1]),
+            Err(RenderError::ShaderCompilation(_))
+        ));
+    }
+
+    #[test]
+    fn spirv_words_reject_a_bad_magic_number() {
+        assert!(matches!(
+            spirv_words(&[0u8; 8]),
+            Err(RenderError::ShaderCompilation(_))
+        ));
     }
 }

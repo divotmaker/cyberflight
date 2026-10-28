@@ -1,6 +1,7 @@
 use ash::vk;
 
 use crate::error::RenderError;
+use crate::gpu::load_shader;
 
 /// Push constants for the grid pipeline.
 #[repr(C)]
@@ -45,10 +46,8 @@ impl GridPipeline {
         final_layout: vk::ImageLayout,
     ) -> Result<Self, RenderError> {
         let render_pass = Self::create_render_pass(device, color_format, final_layout)?;
-        let vert_module =
-            Self::create_shader_module(device, include_bytes!("../shaders/grid.vert.spv"))?;
-        let frag_module =
-            Self::create_shader_module(device, include_bytes!("../shaders/grid.frag.spv"))?;
+        let vert_module = load_shader(device, include_bytes!("../shaders/grid.vert.spv"))?;
+        let frag_module = load_shader(device, include_bytes!("../shaders/grid.frag.spv"))?;
         let pipeline_layout = Self::create_pipeline_layout(device)?;
         let pipeline = Self::create_pipeline(
             device,
@@ -164,27 +163,6 @@ impl GridPipeline {
         unsafe {
             device
                 .create_render_pass(&create_info, None)
-                .map_err(RenderError::Vulkan)
-        }
-    }
-
-    fn create_shader_module(
-        device: &ash::Device,
-        spirv: &[u8],
-    ) -> Result<vk::ShaderModule, RenderError> {
-        // Align the SPIR-V bytes to u32
-        assert!(spirv.len() % 4 == 0, "SPIR-V size must be 4-byte aligned");
-        let code: Vec<u32> = spirv
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-
-        let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
-
-        // SAFETY: Creating shader module from valid SPIR-V.
-        unsafe {
-            device
-                .create_shader_module(&create_info, None)
                 .map_err(RenderError::Vulkan)
         }
     }
@@ -427,14 +405,6 @@ impl GridPipeline {
                 .create_render_pass(&create_info, None)
                 .map_err(RenderError::Vulkan)
         }
-    }
-
-    /// Create a shader module from SPIR-V bytes (public for use by composite pass).
-    pub fn create_shader_module_pub(
-        device: &ash::Device,
-        spirv: &[u8],
-    ) -> Result<vk::ShaderModule, RenderError> {
-        Self::create_shader_module(device, spirv)
     }
 
     /// Clean up Vulkan resources.

@@ -6,6 +6,7 @@ use cf_scene::camera::Camera;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
+use crate::gpu::load_shader;
 
 /// Push constants for the ray tracing pipeline.
 #[repr(C)]
@@ -162,12 +163,9 @@ impl RtPipeline {
         let base_alignment = rt_props.shader_group_base_alignment;
 
         // ── Shaders ──
-        let rgen_module =
-            Self::create_shader_module(&gpu.device, include_bytes!("../shaders/rt.rgen.spv"))?;
-        let rmiss_module =
-            Self::create_shader_module(&gpu.device, include_bytes!("../shaders/rt.rmiss.spv"))?;
-        let rchit_module =
-            Self::create_shader_module(&gpu.device, include_bytes!("../shaders/rt.rchit.spv"))?;
+        let rgen_module = load_shader(&gpu.device, include_bytes!("../shaders/rt.rgen.spv"))?;
+        let rmiss_module = load_shader(&gpu.device, include_bytes!("../shaders/rt.rmiss.spv"))?;
+        let rchit_module = load_shader(&gpu.device, include_bytes!("../shaders/rt.rchit.spv"))?;
 
         // ── Descriptor set layout: TLAS + storage image ──
         let bindings = [
@@ -993,25 +991,6 @@ impl RtPipeline {
         };
 
         Ok((image, view, allocation))
-    }
-
-    fn create_shader_module(
-        device: &ash::Device,
-        spirv: &[u8],
-    ) -> Result<vk::ShaderModule, RenderError> {
-        assert!(spirv.len() % 4 == 0, "SPIR-V size must be 4-byte aligned");
-        let code: Vec<u32> = spirv
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-
-        let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
-        // SAFETY: Creating shader module from valid SPIR-V.
-        unsafe {
-            device
-                .create_shader_module(&create_info, None)
-                .map_err(RenderError::Vulkan)
-        }
     }
 
     /// Rebuild all acceleration structures with new geometry.

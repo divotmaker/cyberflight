@@ -15,6 +15,7 @@ use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
+use crate::gpu::load_shader;
 use crate::gpu::push_constants;
 use crate::green::GreenEdge;
 use crate::pipeline::{GridPipeline, GridPushConstants};
@@ -1699,14 +1700,8 @@ impl OffscreenRenderer {
         };
 
         // Shaders.
-        let vert_module = GridPipeline::create_shader_module_pub(
-            device,
-            include_bytes!("../shaders/composite.vert.spv"),
-        )?;
-        let frag_module = GridPipeline::create_shader_module_pub(
-            device,
-            include_bytes!("../shaders/composite.frag.spv"),
-        )?;
+        let vert_module = load_shader(device, include_bytes!("../shaders/composite.vert.spv"))?;
+        let frag_module = load_shader(device, include_bytes!("../shaders/composite.frag.spv"))?;
 
         // Pipeline: fullscreen triangle, additive blending, no vertex input.
         let entry_point = c"main";

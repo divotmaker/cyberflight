@@ -22,6 +22,7 @@ pub struct FlightRenderData {
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
+use crate::gpu::load_shader;
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
 use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
@@ -1120,14 +1121,8 @@ impl Renderer {
         };
 
         // Shaders
-        let vert_module = GridPipeline::create_shader_module_pub(
-            device,
-            include_bytes!("../../shaders/composite.vert.spv"),
-        )?;
-        let frag_module = GridPipeline::create_shader_module_pub(
-            device,
-            include_bytes!("../../shaders/composite.frag.spv"),
-        )?;
+        let vert_module = load_shader(device, include_bytes!("../../shaders/composite.vert.spv"))?;
+        let frag_module = load_shader(device, include_bytes!("../../shaders/composite.frag.spv"))?;
 
         // Pipeline: fullscreen triangle, additive blending, no vertex input.
         let entry_point = c"main";
