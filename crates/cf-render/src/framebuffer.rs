@@ -4,7 +4,6 @@ use gpu_allocator::vulkan::Allocator;
 
 use crate::error::RenderError;
 use crate::gpu::{HostBuffer, Image2d, Image2dDesc};
-use crate::pipeline::DEPTH_STENCIL_FORMAT;
 
 /// Offscreen render target for headless rendering.
 pub struct OffscreenTarget {
@@ -12,7 +11,7 @@ pub struct OffscreenTarget {
     pub height: u32,
     pub format: vk::Format,
     pub(crate) color: Image2d,
-    pub(crate) depth_stencil: Image2d,
+    pub(crate) depth: Image2d,
     pub framebuffer: vk::Framebuffer,
     /// Readback buffer: `width * height * 4` bytes of RGBA8.
     pub(crate) staging: HostBuffer,
@@ -26,6 +25,7 @@ impl OffscreenTarget {
         width: u32,
         height: u32,
         format: vk::Format,
+        depth_format: vk::Format,
         render_pass: vk::RenderPass,
     ) -> Result<Self, RenderError> {
         let extent = vk::Extent2D { width, height };
@@ -41,21 +41,21 @@ impl OffscreenTarget {
             },
         )?;
 
-        // Create depth/stencil image for stencil masking
-        let depth_stencil = Image2d::new(
+        // Depth image for depth testing
+        let depth = Image2d::new(
             device,
             allocator,
             &Image2dDesc {
                 extent,
-                format: DEPTH_STENCIL_FORMAT,
+                format: depth_format,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                aspect: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
-                name: "offscreen depth stencil",
+                aspect: vk::ImageAspectFlags::DEPTH,
+                name: "offscreen depth",
             },
         )?;
 
-        // Create framebuffer (color + depth/stencil)
-        let attachments = [color.view(), depth_stencil.view()];
+        // Create framebuffer (color + depth)
+        let attachments = [color.view(), depth.view()];
         let fb_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&attachments)
@@ -85,7 +85,7 @@ impl OffscreenTarget {
             height,
             format,
             color,
-            depth_stencil,
+            depth,
             framebuffer,
             staging,
         })
@@ -101,7 +101,7 @@ impl OffscreenTarget {
         unsafe {
             device.destroy_framebuffer(self.framebuffer, None);
             self.color.destroy(device, allocator);
-            self.depth_stencil.destroy(device, allocator);
+            self.depth.destroy(device, allocator);
             self.staging.destroy(device, allocator);
         }
     }

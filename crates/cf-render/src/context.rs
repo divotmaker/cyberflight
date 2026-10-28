@@ -6,6 +6,7 @@ use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::error::RenderError;
+use crate::gpu::pick_depth_format;
 
 /// GPU configuration.
 #[derive(Debug, Clone)]
@@ -48,6 +49,10 @@ pub struct GpuContext {
     pub rt_supported: bool,
     /// Whether the device supports line widths > 1.0.
     pub wide_lines: bool,
+    /// Depth attachment format: the first of `X8_D24_UNORM_PACK32` and
+    /// `D32_SFLOAT` with optimal-tiling depth attachment support, else
+    /// `D16_UNORM`.
+    pub depth_format: vk::Format,
 }
 
 impl GpuContext {
@@ -155,6 +160,26 @@ impl GpuContext {
         let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let command_pool = Self::create_command_pool(&device, queue_family_index)?;
 
+        let depth_format = pick_depth_format(|format| {
+            // SAFETY: Querying format properties of a valid physical device.
+            let props =
+                unsafe { instance.get_physical_device_format_properties(physical_device, format) };
+            props
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        });
+
+        // SAFETY: Reading device name for logging.
+        let props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) };
+        let dev_major = vk::api_version_major(props.api_version);
+        let dev_minor = vk::api_version_minor(props.api_version);
+        let dev_patch = vk::api_version_patch(props.api_version);
+        eprintln!(
+            "GPU: {} (Vulkan {dev_major}.{dev_minor}.{dev_patch}), depth {depth_format:?}",
+            name.to_string_lossy()
+        );
+
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
@@ -180,6 +205,7 @@ impl GpuContext {
             allocator: ManuallyDrop::new(allocator),
             rt_supported,
             wide_lines,
+            depth_format,
         })
     }
 
@@ -291,18 +317,6 @@ impl GpuContext {
         }
 
         let (pd, qi, _) = best.ok_or(RenderError::NoSuitableQueue)?;
-
-        // SAFETY: Reading device name for logging.
-        let props = unsafe { instance.get_physical_device_properties(pd) };
-        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) };
-        let dev_major = vk::api_version_major(props.api_version);
-        let dev_minor = vk::api_version_minor(props.api_version);
-        let dev_patch = vk::api_version_patch(props.api_version);
-        eprintln!(
-            "GPU: {} (Vulkan {dev_major}.{dev_minor}.{dev_patch})",
-            name.to_string_lossy()
-        );
-
         Ok((pd, qi))
     }
 

@@ -27,7 +27,7 @@ use crate::error::RenderError;
 use crate::gpu::{HostBuffer, Image2d, Image2dDesc, load_shader};
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
-use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
+use crate::pipeline::GridPipeline;
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::window::Swapchain;
@@ -78,8 +78,8 @@ pub struct Renderer {
     pub(super) hud_line_count: u32,
     pub(super) hud_fill_buffer: ManuallyDrop<HostBuffer>,
     pub(super) hud_fill_count: u32,
-    // Depth/stencil image for depth testing (`None` only after a failed rebuild).
-    depth_stencil: Option<Image2d>,
+    // Depth image for depth testing (`None` only after a failed rebuild).
+    depth: Option<Image2d>,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available: Vec<vk::Semaphore>,
     render_finished: Vec<vk::Semaphore>,
@@ -122,18 +122,19 @@ impl Renderer {
         let pipeline = GridPipeline::new(
             &gpu.device,
             swapchain.format,
+            gpu.depth_format,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         )?;
 
-        let depth_stencil =
-            Self::create_depth_stencil(&gpu.device, &mut gpu.allocator, swapchain.extent)?;
-
-        let framebuffers = Self::create_framebuffers(
+        let depth = Self::create_depth(
             &gpu.device,
-            &swapchain,
-            pipeline.render_pass,
-            depth_stencil.view(),
+            &mut gpu.allocator,
+            gpu.depth_format,
+            swapchain.extent,
         )?;
+
+        let framebuffers =
+            Self::create_framebuffers(&gpu.device, &swapchain, pipeline.render_pass, depth.view())?;
 
         // HUD render pass: color-only overlay, preserves scene content, transitions to PRESENT_SRC.
         let hud_render_pass = GridPipeline::create_hud_render_pass(
@@ -298,7 +299,7 @@ impl Renderer {
             hud_line_count: 0,
             hud_fill_buffer: ManuallyDrop::new(hud_fill_buffer),
             hud_fill_count: 0,
-            depth_stencil: Some(depth_stencil),
+            depth: Some(depth),
             hud_render_pass,
             hud_framebuffers,
             hud_fill_pipeline,
@@ -536,7 +537,7 @@ impl Renderer {
                 .map_err(RenderError::Vulkan)?;
         }
 
-        // Destroy old framebuffers (scene + HUD) and depth/stencil
+        // Destroy old framebuffers (scene + HUD) and depth
         for fb in self.framebuffers.drain(..) {
             // SAFETY: Framebuffers are no longer in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
@@ -545,9 +546,9 @@ impl Renderer {
             // SAFETY: HUD framebuffers are no longer in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
         }
-        if let Some(depth_stencil) = self.depth_stencil.take() {
-            // SAFETY: Depth/stencil no longer in use (waited idle above).
-            unsafe { depth_stencil.destroy(&self.gpu.device, &mut self.gpu.allocator) };
+        if let Some(depth) = self.depth.take() {
+            // SAFETY: Depth no longer in use (waited idle above).
+            unsafe { depth.destroy(&self.gpu.device, &mut self.gpu.allocator) };
         }
 
         self.swapchain.recreate(
@@ -563,19 +564,20 @@ impl Renderer {
         let actual_w = self.swapchain.extent.width;
         let actual_h = self.swapchain.extent.height;
 
-        let depth_stencil = Self::create_depth_stencil(
+        let depth = Self::create_depth(
             &self.gpu.device,
             &mut self.gpu.allocator,
+            self.gpu.depth_format,
             self.swapchain.extent,
         )?;
-        let depth_stencil_view = depth_stencil.view();
-        self.depth_stencil = Some(depth_stencil);
+        let depth_view = depth.view();
+        self.depth = Some(depth);
 
         self.framebuffers = Self::create_framebuffers(
             &self.gpu.device,
             &self.swapchain,
             self.pipeline.render_pass,
-            depth_stencil_view,
+            depth_view,
         )?;
         self.hud_framebuffers =
             Self::create_hud_framebuffers(&self.gpu.device, &self.swapchain, self.hud_render_pass)?;
@@ -777,13 +779,13 @@ impl Renderer {
         device: &ash::Device,
         swapchain: &Swapchain,
         render_pass: vk::RenderPass,
-        depth_stencil_view: vk::ImageView,
+        depth_view: vk::ImageView,
     ) -> Result<Vec<vk::Framebuffer>, RenderError> {
         swapchain
             .image_views
             .iter()
             .map(|&view| {
-                let attachments = [view, depth_stencil_view];
+                let attachments = [view, depth_view];
                 let fb_info = vk::FramebufferCreateInfo::default()
                     .render_pass(render_pass)
                     .attachments(&attachments)
@@ -828,9 +830,10 @@ impl Renderer {
             .collect()
     }
 
-    fn create_depth_stencil(
+    fn create_depth(
         device: &ash::Device,
         allocator: &mut Allocator,
+        format: vk::Format,
         extent: vk::Extent2D,
     ) -> Result<Image2d, RenderError> {
         Image2d::new(
@@ -838,10 +841,10 @@ impl Renderer {
             allocator,
             &Image2dDesc {
                 extent,
-                format: DEPTH_STENCIL_FORMAT,
+                format,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                aspect: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
-                name: "depth stencil",
+                aspect: vk::ImageAspectFlags::DEPTH,
+                name: "depth",
             },
         )
     }
@@ -1126,8 +1129,8 @@ impl Drop for Renderer {
             ] {
                 ManuallyDrop::take(buffer).destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
-            if let Some(depth_stencil) = self.depth_stencil.take() {
-                depth_stencil.destroy(&self.gpu.device, &mut self.gpu.allocator);
+            if let Some(depth) = self.depth.take() {
+                depth.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
             if let Some(ref mut composite) = self.composite {

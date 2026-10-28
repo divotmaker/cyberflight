@@ -106,7 +106,12 @@ impl OffscreenRenderer {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL
         };
 
-        let pipeline = GridPipeline::new(&gpu.device, OFFSCREEN_FORMAT, raster_final_layout)?;
+        let pipeline = GridPipeline::new(
+            &gpu.device,
+            OFFSCREEN_FORMAT,
+            gpu.depth_format,
+            raster_final_layout,
+        )?;
 
         let target = OffscreenTarget::new(
             &gpu.device,
@@ -114,6 +119,7 @@ impl OffscreenRenderer {
             width,
             height,
             OFFSCREEN_FORMAT,
+            gpu.depth_format,
             pipeline.render_pass,
         )?;
 
@@ -285,6 +291,7 @@ impl OffscreenRenderer {
         let pipeline = GridPipeline::new(
             &gpu.device,
             OFFSCREEN_FORMAT,
+            gpu.depth_format,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         )?;
 
@@ -294,6 +301,7 @@ impl OffscreenRenderer {
             width,
             height,
             OFFSCREEN_FORMAT,
+            gpu.depth_format,
             pipeline.render_pass,
         )?;
 
@@ -501,7 +509,12 @@ impl OffscreenRenderer {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL
         };
 
-        let pipeline = GridPipeline::new(&gpu.device, OFFSCREEN_FORMAT, raster_final_layout)?;
+        let pipeline = GridPipeline::new(
+            &gpu.device,
+            OFFSCREEN_FORMAT,
+            gpu.depth_format,
+            raster_final_layout,
+        )?;
 
         let target = OffscreenTarget::new(
             &gpu.device,
@@ -509,6 +522,7 @@ impl OffscreenRenderer {
             width,
             height,
             OFFSCREEN_FORMAT,
+            gpu.depth_format,
             pipeline.render_pass,
         )?;
 
@@ -1109,8 +1123,8 @@ impl OffscreenRenderer {
 
     /// Render the grid and read back the result as RGBA8 pixels.
     ///
-    /// When RT is enabled, renders the raster scene (skipping stencil reflections),
-    /// traces RT reflection rays, and composites them onto the rasterized output.
+    /// When RT is enabled, renders the raster scene, traces RT reflection
+    /// rays, and composites them onto the rasterized output.
     pub fn render(&self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
         let target = self.target.as_ref().expect("target exists");
         let device = &self.gpu.device;

@@ -13,9 +13,6 @@ pub struct GridPushConstants {
     pub color: [f32; 4],
 }
 
-/// Depth/stencil format for floor reflection masking.
-pub const DEPTH_STENCIL_FORMAT: vk::Format = vk::Format::D24_UNORM_S8_UINT;
-
 /// Rasterization pipelines for the neon scene.
 ///
 /// Contains a LINE_LIST pipeline (grid) and two TRIANGLE_LIST pipelines
@@ -43,9 +40,11 @@ impl GridPipeline {
     pub fn new(
         device: &ash::Device,
         color_format: vk::Format,
+        depth_format: vk::Format,
         final_layout: vk::ImageLayout,
     ) -> Result<Self, RenderError> {
-        let render_pass = Self::create_render_pass(device, color_format, final_layout)?;
+        let render_pass =
+            Self::create_render_pass(device, color_format, depth_format, final_layout)?;
         let vert_module = load_shader(device, include_bytes!("../shaders/grid.vert.spv"))?;
         let frag_module = load_shader(device, include_bytes!("../shaders/grid.frag.spv"))?;
         let pipeline_layout = Self::create_pipeline_layout(device)?;
@@ -97,6 +96,7 @@ impl GridPipeline {
     fn create_render_pass(
         device: &ash::Device,
         color_format: vk::Format,
+        depth_format: vk::Format,
         final_layout: vk::ImageLayout,
     ) -> Result<vk::RenderPass, RenderError> {
         let color_attachment = vk::AttachmentDescription::default()
@@ -109,12 +109,12 @@ impl GridPipeline {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(final_layout);
 
-        let depth_stencil_attachment = vk::AttachmentDescription::default()
-            .format(DEPTH_STENCIL_FORMAT)
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(depth_format)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -123,7 +123,7 @@ impl GridPipeline {
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
-        let depth_stencil_ref = vk::AttachmentReference::default()
+        let depth_ref = vk::AttachmentReference::default()
             .attachment(1)
             .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
@@ -131,7 +131,7 @@ impl GridPipeline {
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_refs)
-            .depth_stencil_attachment(&depth_stencil_ref);
+            .depth_stencil_attachment(&depth_ref);
 
         let dependency = vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
@@ -150,7 +150,7 @@ impl GridPipeline {
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             );
 
-        let attachments = [color_attachment, depth_stencil_attachment];
+        let attachments = [color_attachment, depth_attachment];
         let subpasses = [subpass];
         let dependencies = [dependency];
 

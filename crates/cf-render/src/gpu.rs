@@ -481,6 +481,16 @@ impl Image2d {
     }
 }
 
+/// The depth format to render with: the first of `X8_D24_UNORM_PACK32` and
+/// `D32_SFLOAT` that `supports`, else `D16_UNORM`, which every device
+/// supports as a depth attachment.
+pub(crate) fn pick_depth_format(supports: impl Fn(vk::Format) -> bool) -> vk::Format {
+    [vk::Format::X8_D24_UNORM_PACK32, vk::Format::D32_SFLOAT]
+        .into_iter()
+        .find(|&format| supports(format))
+        .unwrap_or(vk::Format::D16_UNORM)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +556,43 @@ mod tests {
     fn fit_is_zero_below_one_element() {
         assert_eq!(fit(15, 16, 3), 0);
         assert_eq!(fit(0, 16, 3), 0);
+    }
+
+    #[test]
+    fn depth_format_prefers_24_bit() {
+        let all = [
+            vk::Format::X8_D24_UNORM_PACK32,
+            vk::Format::D32_SFLOAT,
+            vk::Format::D16_UNORM,
+        ];
+        assert_eq!(
+            pick_depth_format(|f| all.contains(&f)),
+            vk::Format::X8_D24_UNORM_PACK32
+        );
+    }
+
+    #[test]
+    fn depth_format_without_24_bit_is_d32() {
+        let set = [vk::Format::D32_SFLOAT, vk::Format::D16_UNORM];
+        assert_eq!(
+            pick_depth_format(|f| set.contains(&f)),
+            vk::Format::D32_SFLOAT
+        );
+    }
+
+    #[test]
+    fn depth_format_falls_back_to_d16() {
+        assert_eq!(
+            pick_depth_format(|f| f == vk::Format::D16_UNORM),
+            vk::Format::D16_UNORM
+        );
+    }
+
+    #[test]
+    fn depth_format_with_only_24_bit() {
+        assert_eq!(
+            pick_depth_format(|f| f == vk::Format::X8_D24_UNORM_PACK32),
+            vk::Format::X8_D24_UNORM_PACK32
+        );
     }
 }
