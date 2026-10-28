@@ -2,6 +2,8 @@ mod hud;
 mod raster;
 mod raytrace;
 
+use std::mem::ManuallyDrop;
+
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
@@ -22,7 +24,7 @@ pub struct FlightRenderData {
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::load_shader;
+use crate::gpu::{HostBuffer, load_shader};
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
 use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
@@ -54,41 +56,28 @@ pub struct Renderer {
     pub swapchain: Swapchain,
     pub pipeline: GridPipeline,
     pub(super) framebuffers: Vec<vk::Framebuffer>,
-    pub(super) vertex_buffer: vk::Buffer,
-    vertex_allocation: Option<Allocation>,
+    pub(super) vertex_buffer: ManuallyDrop<HostBuffer>,
     pub(super) vertex_count: u32,
-    pub(super) fill_buffer: vk::Buffer,
-    fill_allocation: Option<Allocation>,
+    pub(super) fill_buffer: ManuallyDrop<HostBuffer>,
     pub(super) tee_fill_count: u32,
     pub(super) tee_border_count: u32,
     pub(super) ball_count: u32,
-    pub(super) glow_buffer: vk::Buffer,
-    glow_allocation: Option<Allocation>,
+    pub(super) glow_buffer: ManuallyDrop<HostBuffer>,
     pub(super) glow_count: u32,
     // Whether to draw the static ball on the tee box (hidden when a flight is active).
     pub(super) ball_on_tee_box: bool,
     // Dynamic per-frame flight geometry (in-flight balls + trail glow).
-    pub(super) flight_line_buffer: vk::Buffer,
-    flight_line_allocation: Option<Allocation>,
+    pub(super) flight_line_buffer: ManuallyDrop<HostBuffer>,
     pub(super) flight_line_count: u32,
-    flight_line_capacity: vk::DeviceSize,
-    pub(super) flight_fill_buffer: vk::Buffer,
-    flight_fill_allocation: Option<Allocation>,
+    pub(super) flight_fill_buffer: ManuallyDrop<HostBuffer>,
     pub(super) flight_fill_count: u32,
-    flight_fill_capacity: vk::DeviceSize,
-    pub(super) flight_glow_buffer: vk::Buffer,
-    flight_glow_allocation: Option<Allocation>,
+    pub(super) flight_glow_buffer: ManuallyDrop<HostBuffer>,
     pub(super) flight_glow_count: u32,
-    flight_glow_capacity: vk::DeviceSize,
     // HUD overlay geometry (2D, pixel coordinates).
-    pub(super) hud_line_buffer: vk::Buffer,
-    hud_line_allocation: Option<Allocation>,
+    pub(super) hud_line_buffer: ManuallyDrop<HostBuffer>,
     pub(super) hud_line_count: u32,
-    hud_line_capacity: vk::DeviceSize,
-    pub(super) hud_fill_buffer: vk::Buffer,
-    hud_fill_allocation: Option<Allocation>,
+    pub(super) hud_fill_buffer: ManuallyDrop<HostBuffer>,
     pub(super) hud_fill_count: u32,
-    hud_fill_capacity: vk::DeviceSize,
     // Depth/stencil image for depth testing.
     depth_stencil_image: vk::Image,
     depth_stencil_view: vk::ImageView,
@@ -166,8 +155,13 @@ impl Renderer {
 
         let grid_verts = generate_grid_vertices(grid_config);
         let vertex_count = grid_verts.len() as u32;
-        let (vertex_buffer, vertex_allocation) =
-            Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &grid_verts)?;
+        let vertex_buffer = HostBuffer::with_data(
+            &gpu.device,
+            &mut gpu.allocator,
+            &grid_verts,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "grid",
+        )?;
 
         let tee = TeeBox::default();
         let tee_fill_verts = generate_tee_fill(&tee);
@@ -180,55 +174,70 @@ impl Renderer {
         let mut fill_verts = tee_fill_verts;
         fill_verts.extend(tee_border_verts);
         fill_verts.extend(ball_verts);
-        let (fill_buffer, fill_allocation) =
-            Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &fill_verts)?;
+        let fill_buffer = HostBuffer::with_data(
+            &gpu.device,
+            &mut gpu.allocator,
+            &fill_verts,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "tee and ball",
+        )?;
 
         let glow_verts = generate_ball_glow(&tee, 16, 32);
         let glow_count = glow_verts.len() as u32;
-        let (glow_buffer, glow_allocation) =
-            Self::create_vertex_buffer(&gpu.device, &mut gpu.allocator, &glow_verts)?;
+        let glow_buffer = HostBuffer::with_data(
+            &gpu.device,
+            &mut gpu.allocator,
+            &glow_verts,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "ball glow",
+        )?;
 
         // Pre-allocate dynamic flight buffers (empty initially).
         // Line: trail centerline (LINE_LIST), ~2000 points × 2 verts × 16 bytes = ~64 KB
-        let flight_line_capacity: vk::DeviceSize = 128 * 1024;
-        let (flight_line_buffer, flight_line_allocation) = Self::create_dynamic_buffer(
+        let flight_line_buffer = HostBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
-            flight_line_capacity,
+            128 * 1024,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            MemoryLocation::CpuToGpu,
             "flight line",
         )?;
         // Fill: up to 5 in-flight balls × 1728 verts = ~140 KB
-        let flight_fill_capacity: vk::DeviceSize = 256 * 1024;
-        let (flight_fill_buffer, flight_fill_allocation) = Self::create_dynamic_buffer(
+        let flight_fill_buffer = HostBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
-            flight_fill_capacity,
+            256 * 1024,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            MemoryLocation::CpuToGpu,
             "flight fill",
         )?;
         // Glow: up to 5 in-flight balls × (ball glow + trail glow) ≈ 6 MB
-        let flight_glow_capacity: vk::DeviceSize = 8 * 1024 * 1024;
-        let (flight_glow_buffer, flight_glow_allocation) = Self::create_dynamic_buffer(
+        let flight_glow_buffer = HostBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
-            flight_glow_capacity,
+            8 * 1024 * 1024,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            MemoryLocation::CpuToGpu,
             "flight glow",
         )?;
 
         // Pre-allocate HUD overlay buffers.
         // Lines: ~5000 text verts + decoration lines ≈ 128 KB
-        let hud_line_capacity: vk::DeviceSize = 128 * 1024;
-        let (hud_line_buffer, hud_line_allocation) = Self::create_dynamic_buffer(
+        let hud_line_buffer = HostBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
-            hud_line_capacity,
+            128 * 1024,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            MemoryLocation::CpuToGpu,
             "hud lines",
         )?;
         // Fill: panel background = 6 verts × 16 bytes = 96 bytes, allocate 4 KB
-        let hud_fill_capacity: vk::DeviceSize = 4 * 1024;
-        let (hud_fill_buffer, hud_fill_allocation) = Self::create_dynamic_buffer(
+        let hud_fill_buffer = HostBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
-            hud_fill_capacity,
+            4 * 1024,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            MemoryLocation::CpuToGpu,
             "hud fill",
         )?;
 
@@ -277,38 +286,25 @@ impl Renderer {
             swapchain,
             pipeline,
             framebuffers,
-            vertex_buffer,
-            vertex_allocation: Some(vertex_allocation),
+            vertex_buffer: ManuallyDrop::new(vertex_buffer),
             vertex_count,
-            fill_buffer,
-            fill_allocation: Some(fill_allocation),
+            fill_buffer: ManuallyDrop::new(fill_buffer),
             tee_fill_count,
             tee_border_count,
             ball_count,
-            glow_buffer,
-            glow_allocation: Some(glow_allocation),
+            glow_buffer: ManuallyDrop::new(glow_buffer),
             glow_count,
-            flight_fill_buffer,
+            flight_fill_buffer: ManuallyDrop::new(flight_fill_buffer),
             ball_on_tee_box: true,
-            flight_line_buffer,
-            flight_line_allocation: Some(flight_line_allocation),
+            flight_line_buffer: ManuallyDrop::new(flight_line_buffer),
             flight_line_count: 0,
-            flight_line_capacity,
-            flight_fill_allocation: Some(flight_fill_allocation),
             flight_fill_count: 0,
-            flight_fill_capacity,
-            flight_glow_buffer,
-            flight_glow_allocation: Some(flight_glow_allocation),
+            flight_glow_buffer: ManuallyDrop::new(flight_glow_buffer),
             flight_glow_count: 0,
-            flight_glow_capacity,
-            hud_line_buffer,
-            hud_line_allocation: Some(hud_line_allocation),
+            hud_line_buffer: ManuallyDrop::new(hud_line_buffer),
             hud_line_count: 0,
-            hud_line_capacity,
-            hud_fill_buffer,
-            hud_fill_allocation: Some(hud_fill_allocation),
+            hud_fill_buffer: ManuallyDrop::new(hud_fill_buffer),
             hud_fill_count: 0,
-            hud_fill_capacity,
             depth_stencil_image,
             depth_stencil_view,
             depth_stencil_allocation: Some(depth_stencil_allocation),
@@ -682,13 +678,7 @@ impl Renderer {
                 old.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
         }
-        self.green_edge = GreenEdge::new(
-            &self.gpu.device,
-            &mut self.gpu.allocator,
-            Self::create_vertex_buffer,
-            green,
-            grid,
-        )?;
+        self.green_edge = GreenEdge::new(&self.gpu.device, &mut self.gpu.allocator, green, grid)?;
         Ok(())
     }
 
@@ -777,18 +767,9 @@ impl Renderer {
             self.rt_needs_update = true;
         }
 
-        if let Some(alloc) = &self.flight_line_allocation {
-            self.flight_line_count =
-                Self::upload_to_mapped(alloc, &line_verts, self.flight_line_capacity);
-        }
-        if let Some(alloc) = &self.flight_fill_allocation {
-            self.flight_fill_count =
-                Self::upload_to_mapped(alloc, &fill_verts, self.flight_fill_capacity);
-        }
-        if let Some(alloc) = &self.flight_glow_allocation {
-            self.flight_glow_count =
-                Self::upload_to_mapped(alloc, &glow_verts, self.flight_glow_capacity);
-        }
+        self.flight_line_count = self.flight_line_buffer.write(&line_verts);
+        self.flight_fill_count = self.flight_fill_buffer.write(&fill_verts);
+        self.flight_glow_count = self.flight_glow_buffer.write(&glow_verts);
 
         // Rebuild RT TLAS if scene changed.
         if self.rt_needs_update {
@@ -805,12 +786,8 @@ impl Renderer {
 
     /// Update HUD overlay geometry for this frame.
     pub fn update_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
-        if let Some(alloc) = &self.hud_line_allocation {
-            self.hud_line_count = Self::upload_to_mapped(alloc, lines, self.hud_line_capacity);
-        }
-        if let Some(alloc) = &self.hud_fill_allocation {
-            self.hud_fill_count = Self::upload_to_mapped(alloc, fills, self.hud_fill_capacity);
-        }
+        self.hud_line_count = self.hud_line_buffer.write(lines);
+        self.hud_fill_count = self.hud_fill_buffer.write(fills);
     }
 
     // ── Private helpers ──
@@ -940,130 +917,6 @@ impl Renderer {
         };
 
         Ok((image, view, allocation))
-    }
-
-    fn create_vertex_buffer(
-        device: &ash::Device,
-        allocator: &mut Allocator,
-        vertices: &[GridVertex],
-    ) -> Result<(vk::Buffer, Allocation), RenderError> {
-        let size = std::mem::size_of_val(vertices) as vk::DeviceSize;
-
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        // SAFETY: Creating a buffer.
-        let buffer = unsafe {
-            device
-                .create_buffer(&buffer_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // SAFETY: Getting memory requirements for the buffer.
-        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-        let allocation = allocator
-            .allocate(&AllocationCreateDesc {
-                name: "grid vertices",
-                requirements,
-                location: MemoryLocation::CpuToGpu,
-                linear: true,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })
-            .map_err(|e| RenderError::Allocator(e.to_string()))?;
-
-        // SAFETY: Binding memory to buffer.
-        unsafe {
-            device
-                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-                .map_err(RenderError::Vulkan)?;
-        }
-
-        // Copy vertex data
-        if let Some(mapped) = allocation.mapped_ptr() {
-            // SAFETY: Writing to mapped GPU memory within allocation bounds.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    vertices.as_ptr().cast::<u8>(),
-                    mapped.as_ptr().cast::<u8>(),
-                    size as usize,
-                );
-            }
-        }
-
-        Ok((buffer, allocation))
-    }
-
-    /// Create a pre-allocated dynamic buffer for per-frame geometry updates.
-    fn create_dynamic_buffer(
-        device: &ash::Device,
-        allocator: &mut Allocator,
-        capacity: vk::DeviceSize,
-        name: &str,
-    ) -> Result<(vk::Buffer, Allocation), RenderError> {
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(capacity)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        // SAFETY: Creating a buffer.
-        let buffer = unsafe {
-            device
-                .create_buffer(&buffer_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // SAFETY: Getting memory requirements for the buffer.
-        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-        let allocation = allocator
-            .allocate(&AllocationCreateDesc {
-                name,
-                requirements,
-                location: MemoryLocation::CpuToGpu,
-                linear: true,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })
-            .map_err(|e| RenderError::Allocator(e.to_string()))?;
-
-        // SAFETY: Binding memory to buffer.
-        unsafe {
-            device
-                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-                .map_err(RenderError::Vulkan)?;
-        }
-
-        Ok((buffer, allocation))
-    }
-
-    /// Write vertices into a pre-allocated mapped buffer.
-    ///
-    /// Returns the number of vertices written. Silently truncates if over capacity.
-    fn upload_to_mapped(
-        allocation: &Allocation,
-        vertices: &[GridVertex],
-        capacity: vk::DeviceSize,
-    ) -> u32 {
-        if vertices.is_empty() {
-            return 0;
-        }
-        let byte_size = std::mem::size_of_val(vertices);
-        let write_size = byte_size.min(capacity as usize);
-        let vert_count = write_size / std::mem::size_of::<GridVertex>();
-
-        if let Some(mapped) = allocation.mapped_ptr() {
-            // SAFETY: Writing to mapped GPU memory within allocation bounds.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    vertices.as_ptr().cast::<u8>(),
-                    mapped.as_ptr().cast::<u8>(),
-                    write_size,
-                );
-            }
-        }
-        vert_count as u32
     }
 
     /// Create the composite pass for blending RT reflections onto the rasterized scene.
@@ -1332,50 +1185,26 @@ impl Drop for Renderer {
             self.gpu
                 .device
                 .destroy_render_pass(self.hud_render_pass, None);
-            self.gpu.device.destroy_buffer(self.vertex_buffer, None);
-            self.gpu.device.destroy_buffer(self.fill_buffer, None);
-            self.gpu.device.destroy_buffer(self.glow_buffer, None);
-            self.gpu
-                .device
-                .destroy_buffer(self.flight_line_buffer, None);
-            self.gpu
-                .device
-                .destroy_buffer(self.flight_fill_buffer, None);
-            self.gpu
-                .device
-                .destroy_buffer(self.flight_glow_buffer, None);
-            self.gpu.device.destroy_buffer(self.hud_line_buffer, None);
-            self.gpu.device.destroy_buffer(self.hud_fill_buffer, None);
+            // SAFETY: Each `ManuallyDrop` buffer is taken once, here in `Drop`,
+            // and never used after.
+            for buffer in [
+                &mut self.vertex_buffer,
+                &mut self.fill_buffer,
+                &mut self.glow_buffer,
+                &mut self.flight_line_buffer,
+                &mut self.flight_fill_buffer,
+                &mut self.flight_glow_buffer,
+                &mut self.hud_line_buffer,
+                &mut self.hud_fill_buffer,
+            ] {
+                ManuallyDrop::take(buffer).destroy(&self.gpu.device, &mut self.gpu.allocator);
+            }
             self.gpu
                 .device
                 .destroy_image_view(self.depth_stencil_view, None);
             self.gpu
                 .device
                 .destroy_image(self.depth_stencil_image, None);
-            if let Some(alloc) = self.vertex_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.fill_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.glow_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.flight_line_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.flight_fill_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.flight_glow_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.hud_line_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
-            if let Some(alloc) = self.hud_fill_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
-            }
             if let Some(alloc) = self.depth_stencil_allocation.take() {
                 let _ = self.gpu.allocator.free(alloc);
             }
@@ -1406,7 +1235,7 @@ impl Drop for Renderer {
                     .destroy_shader_module(composite.frag_module, None);
             }
 
-            if let Some(ref mut rtp) = self.rt_pipeline {
+            if let Some(rtp) = self.rt_pipeline.take() {
                 rtp.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 

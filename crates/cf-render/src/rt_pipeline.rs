@@ -6,7 +6,7 @@ use cf_scene::camera::Camera;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::load_shader;
+use crate::gpu::{DeviceBuffer, HostBuffer, load_shader};
 
 /// Push constants for the ray tracing pipeline.
 #[repr(C)]
@@ -76,8 +76,7 @@ pub const GEOM_TEE_BOX_BORDER: u32 = 4;
 /// A single acceleration structure (BLAS or TLAS) with its backing buffer.
 struct AccelStruct {
     accel: vk::AccelerationStructureKHR,
-    buffer: vk::Buffer,
-    allocation: Option<Allocation>,
+    buffer: DeviceBuffer,
 }
 
 /// Ray tracing pipeline: shaders, SBT, descriptors, and acceleration structures.
@@ -93,8 +92,7 @@ pub struct RtPipeline {
     descriptor_set: vk::DescriptorSet,
 
     // Shader binding table
-    sbt_buffer: vk::Buffer,
-    sbt_allocation: Option<Allocation>,
+    sbt: HostBuffer,
     raygen_region: vk::StridedDeviceAddressRegionKHR,
     miss_region: vk::StridedDeviceAddressRegionKHR,
     hit_region: vk::StridedDeviceAddressRegionKHR,
@@ -109,14 +107,13 @@ pub struct RtPipeline {
     tlas: Option<AccelStruct>,
 
     // Geometry buffers (kept alive for AS references)
-    geometry_buffers: Vec<(vk::Buffer, Option<Allocation>)>,
+    geometry_buffers: Vec<HostBuffer>,
     // Instance buffer
-    instance_buffer: Option<vk::Buffer>,
-    instance_allocation: Option<Allocation>,
+    instance_buffer: Option<HostBuffer>,
 
     // Scratch buffers of the current BLAS/TLAS build, freed with the AS on the
     // next `update_scene` or on drop.
-    scratch_buffers: Vec<(vk::Buffer, Option<Allocation>)>,
+    scratch_buffers: Vec<DeviceBuffer>,
 
     // Storage image for RT output
     pub storage_image: vk::Image,
@@ -285,34 +282,24 @@ impl RtPipeline {
                 .map_err(RenderError::Vulkan)?
         };
 
-        let (sbt_buffer, sbt_allocation) = create_buffer(
+        // Each handle at a region_stride offset for base alignment; the gaps are zero.
+        let mut sbt_data = vec![0u8; sbt_size as usize];
+        for i in 0..group_count as usize {
+            let src = i * handle_size as usize;
+            let dst = i * region_stride as usize;
+            sbt_data[dst..dst + handle_size as usize]
+                .copy_from_slice(&handle_data[src..src + handle_size as usize]);
+        }
+        let sbt = HostBuffer::with_data(
             &gpu.device,
             &mut gpu.allocator,
-            sbt_size,
+            &sbt_data,
             vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            MemoryLocation::CpuToGpu,
             "rt sbt",
         )?;
 
-        // Write handles into SBT buffer (each at region_stride offset for base alignment)
-        if let Some(mapped) = sbt_allocation.mapped_ptr() {
-            let dst = mapped.as_ptr().cast::<u8>();
-            for i in 0..group_count as usize {
-                let src_offset = i * handle_size as usize;
-                let dst_offset = i * region_stride as usize;
-                // SAFETY: Writing within mapped allocation bounds.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        handle_data.as_ptr().add(src_offset),
-                        dst.add(dst_offset),
-                        handle_size as usize,
-                    );
-                }
-            }
-        }
-
-        let sbt_address = buffer_device_address(&gpu.device, sbt_buffer);
+        let sbt_address = sbt.device_address(&gpu.device);
         let raygen_region = vk::StridedDeviceAddressRegionKHR {
             device_address: sbt_address,
             stride: u64::from(region_stride),
@@ -366,7 +353,7 @@ impl RtPipeline {
         let (blas_list, geometry_buffers, scratch_buffers) =
             Self::build_all_blas(gpu, &accel_loader, geometries)?;
 
-        let (tlas, instance_buffer, instance_allocation, tlas_scratch) =
+        let (tlas, instance_buffer, tlas_scratch) =
             Self::build_tlas(gpu, &accel_loader, geometries, &blas_list)?;
 
         let mut all_scratch = scratch_buffers;
@@ -409,8 +396,7 @@ impl RtPipeline {
             descriptor_pool,
             descriptor_set_layout,
             descriptor_set,
-            sbt_buffer,
-            sbt_allocation: Some(sbt_allocation),
+            sbt,
             raygen_region,
             miss_region,
             hit_region,
@@ -421,7 +407,6 @@ impl RtPipeline {
             tlas: Some(tlas),
             geometry_buffers,
             instance_buffer: Some(instance_buffer),
-            instance_allocation: Some(instance_allocation),
             scratch_buffers: all_scratch,
             storage_image,
             storage_view,
@@ -536,14 +521,7 @@ impl RtPipeline {
         gpu: &mut GpuContext,
         accel_loader: &ash::khr::acceleration_structure::Device,
         geometries: &[RtGeometry],
-    ) -> Result<
-        (
-            Vec<AccelStruct>,
-            Vec<(vk::Buffer, Option<Allocation>)>,
-            Vec<(vk::Buffer, Option<Allocation>)>,
-        ),
-        RenderError,
-    > {
+    ) -> Result<(Vec<AccelStruct>, Vec<HostBuffer>, Vec<DeviceBuffer>), RenderError> {
         let mut blas_list = Vec::new();
         let mut geo_buffers = Vec::new();
         let mut scratch_buffers = Vec::new();
@@ -555,27 +533,15 @@ impl RtPipeline {
             }
 
             // Upload positions to a device-address-able buffer
-            let pos_bytes = geom.positions.len() * std::mem::size_of::<f32>();
-            let (pos_buffer, pos_allocation) = create_buffer(
+            let pos_buffer = HostBuffer::with_data(
                 &gpu.device,
                 &mut gpu.allocator,
-                pos_bytes as u64,
+                &geom.positions,
                 vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                MemoryLocation::CpuToGpu,
                 "blas positions",
             )?;
-            if let Some(mapped) = pos_allocation.mapped_ptr() {
-                // SAFETY: Writing geometry data to mapped buffer.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        geom.positions.as_ptr().cast::<u8>(),
-                        mapped.as_ptr().cast::<u8>(),
-                        pos_bytes,
-                    );
-                }
-            }
-            let pos_addr = buffer_device_address(&gpu.device, pos_buffer);
+            let pos_addr = pos_buffer.device_address(&gpu.device);
 
             let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
                 .vertex_format(vk::Format::R32G32B32_SFLOAT)
@@ -611,19 +577,18 @@ impl RtPipeline {
             }
 
             // Create AS buffer
-            let (as_buffer, as_allocation) = create_buffer(
+            let as_buffer = DeviceBuffer::new(
                 &gpu.device,
                 &mut gpu.allocator,
                 sizes.acceleration_structure_size,
                 vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                MemoryLocation::GpuOnly,
                 "blas",
             )?;
 
             let as_create_info = vk::AccelerationStructureCreateInfoKHR::default()
-                .buffer(as_buffer)
-                .size(sizes.acceleration_structure_size)
+                .buffer(as_buffer.handle())
+                .size(as_buffer.size())
                 .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
 
             // SAFETY: Creating acceleration structure.
@@ -634,16 +599,15 @@ impl RtPipeline {
             };
 
             // Scratch buffer
-            let (scratch_buffer, scratch_allocation) = create_buffer(
+            let scratch_buffer = DeviceBuffer::new(
                 &gpu.device,
                 &mut gpu.allocator,
                 sizes.build_scratch_size,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                MemoryLocation::GpuOnly,
                 "blas scratch",
             )?;
 
-            let scratch_addr = buffer_device_address(&gpu.device, scratch_buffer);
+            let scratch_addr = scratch_buffer.device_address(&gpu.device);
 
             // Build BLAS on device
             let build_info_final = vk::AccelerationStructureBuildGeometryInfoKHR::default()
@@ -690,10 +654,9 @@ impl RtPipeline {
             blas_list.push(AccelStruct {
                 accel,
                 buffer: as_buffer,
-                allocation: Some(as_allocation),
             });
-            geo_buffers.push((pos_buffer, Some(pos_allocation)));
-            scratch_buffers.push((scratch_buffer, Some(scratch_allocation)));
+            geo_buffers.push(pos_buffer);
+            scratch_buffers.push(scratch_buffer);
         }
 
         Ok((blas_list, geo_buffers, scratch_buffers))
@@ -707,15 +670,7 @@ impl RtPipeline {
         accel_loader: &ash::khr::acceleration_structure::Device,
         geometries: &[RtGeometry],
         blas_list: &[AccelStruct],
-    ) -> Result<
-        (
-            AccelStruct,
-            vk::Buffer,
-            Allocation,
-            (vk::Buffer, Option<Allocation>),
-        ),
-        RenderError,
-    > {
+    ) -> Result<(AccelStruct, HostBuffer, DeviceBuffer), RenderError> {
         let mut instances: Vec<vk::AccelerationStructureInstanceKHR> = Vec::new();
 
         for (geom, blas) in geometries.iter().zip(blas_list.iter()) {
@@ -771,31 +726,16 @@ impl RtPipeline {
         }
 
         let instance_count = instances.len() as u32;
-        let instance_bytes =
-            instances.len() * std::mem::size_of::<vk::AccelerationStructureInstanceKHR>();
-
-        let (instance_buffer, instance_allocation) = create_buffer(
+        let instance_buffer = HostBuffer::with_data(
             &gpu.device,
             &mut gpu.allocator,
-            instance_bytes as u64,
+            &instances,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            MemoryLocation::CpuToGpu,
             "tlas instances",
         )?;
 
-        if let Some(mapped) = instance_allocation.mapped_ptr() {
-            // SAFETY: Writing instance data to mapped buffer.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    instances.as_ptr().cast::<u8>(),
-                    mapped.as_ptr().cast::<u8>(),
-                    instance_bytes,
-                );
-            }
-        }
-
-        let instance_addr = buffer_device_address(&gpu.device, instance_buffer);
+        let instance_addr = instance_buffer.device_address(&gpu.device);
 
         let instances_data = vk::AccelerationStructureGeometryInstancesDataKHR::default()
             .array_of_pointers(false)
@@ -829,19 +769,18 @@ impl RtPipeline {
             );
         }
 
-        let (tlas_buffer, tlas_allocation) = create_buffer(
+        let tlas_buffer = DeviceBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
             sizes.acceleration_structure_size,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            MemoryLocation::GpuOnly,
             "tlas",
         )?;
 
         let tlas_create_info = vk::AccelerationStructureCreateInfoKHR::default()
-            .buffer(tlas_buffer)
-            .size(sizes.acceleration_structure_size)
+            .buffer(tlas_buffer.handle())
+            .size(tlas_buffer.size())
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
 
         // SAFETY: Creating TLAS.
@@ -851,15 +790,14 @@ impl RtPipeline {
                 .map_err(RenderError::Vulkan)?
         };
 
-        let (scratch_buffer, scratch_allocation) = create_buffer(
+        let scratch_buffer = DeviceBuffer::new(
             &gpu.device,
             &mut gpu.allocator,
             sizes.build_scratch_size,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            MemoryLocation::GpuOnly,
             "tlas scratch",
         )?;
-        let scratch_addr = buffer_device_address(&gpu.device, scratch_buffer);
+        let scratch_addr = scratch_buffer.device_address(&gpu.device);
 
         let build_info_final = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
@@ -904,15 +842,9 @@ impl RtPipeline {
         let tlas = AccelStruct {
             accel: tlas_accel,
             buffer: tlas_buffer,
-            allocation: Some(tlas_allocation),
         };
 
-        Ok((
-            tlas,
-            instance_buffer,
-            instance_allocation,
-            (scratch_buffer, Some(scratch_allocation)),
-        ))
+        Ok((tlas, instance_buffer, scratch_buffer))
     }
 
     // ── Storage image ──
@@ -1015,7 +947,7 @@ impl RtPipeline {
         let (blas_list, geometry_buffers, scratch_buffers) =
             Self::build_all_blas(gpu, &self.accel_loader, geometries)?;
 
-        let (tlas, instance_buffer, instance_allocation, tlas_scratch) =
+        let (tlas, instance_buffer, tlas_scratch) =
             Self::build_tlas(gpu, &self.accel_loader, geometries, &blas_list)?;
 
         let mut all_scratch = scratch_buffers;
@@ -1026,7 +958,6 @@ impl RtPipeline {
         self.scratch_buffers = all_scratch;
         self.tlas = Some(tlas);
         self.instance_buffer = Some(instance_buffer);
-        self.instance_allocation = Some(instance_allocation);
 
         // Update TLAS descriptor binding (handle changed on rebuild).
         let tlas_handle = self.tlas.as_ref().expect("just built").accel;
@@ -1060,39 +991,24 @@ impl RtPipeline {
             if let Some(tlas) = self.tlas.take() {
                 self.accel_loader
                     .destroy_acceleration_structure(tlas.accel, None);
-                device.destroy_buffer(tlas.buffer, None);
-                if let Some(alloc) = tlas.allocation {
-                    let _ = allocator.free(alloc);
-                }
+                tlas.buffer.destroy(device, allocator);
             }
 
-            if let Some(buf) = self.instance_buffer.take() {
-                device.destroy_buffer(buf, None);
-            }
-            if let Some(alloc) = self.instance_allocation.take() {
-                let _ = allocator.free(alloc);
+            if let Some(buffer) = self.instance_buffer.take() {
+                buffer.destroy(device, allocator);
             }
 
             for blas in self.blas_list.drain(..) {
                 self.accel_loader
                     .destroy_acceleration_structure(blas.accel, None);
-                device.destroy_buffer(blas.buffer, None);
-                if let Some(alloc) = blas.allocation {
-                    let _ = allocator.free(alloc);
-                }
+                blas.buffer.destroy(device, allocator);
             }
 
-            for (buf, alloc) in self.geometry_buffers.drain(..) {
-                device.destroy_buffer(buf, None);
-                if let Some(alloc) = alloc {
-                    let _ = allocator.free(alloc);
-                }
+            for buffer in self.geometry_buffers.drain(..) {
+                buffer.destroy(device, allocator);
             }
-            for (buf, alloc) in self.scratch_buffers.drain(..) {
-                device.destroy_buffer(buf, None);
-                if let Some(alloc) = alloc {
-                    let _ = allocator.free(alloc);
-                }
+            for buffer in self.scratch_buffers.drain(..) {
+                buffer.destroy(device, allocator);
             }
         }
     }
@@ -1101,7 +1017,7 @@ impl RtPipeline {
     ///
     /// # Safety
     /// Must be called before destroying the device. Device must be idle.
-    pub unsafe fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+    pub unsafe fn destroy(mut self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: All resources are no longer in use (caller guarantees device idle).
         unsafe {
             self.destroy_accel_structures(device, allocator);
@@ -1114,10 +1030,7 @@ impl RtPipeline {
             }
 
             // SBT
-            device.destroy_buffer(self.sbt_buffer, None);
-            if let Some(alloc) = self.sbt_allocation.take() {
-                let _ = allocator.free(alloc);
-            }
+            self.sbt.destroy(device, allocator);
 
             // Pipeline
             device.destroy_pipeline(self.pipeline, None);
@@ -1137,56 +1050,6 @@ impl RtPipeline {
 
 fn align_up(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
-}
-
-fn buffer_device_address(device: &ash::Device, buffer: vk::Buffer) -> vk::DeviceAddress {
-    // SAFETY: Buffer was created with SHADER_DEVICE_ADDRESS usage.
-    unsafe {
-        device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
-    }
-}
-
-fn create_buffer(
-    device: &ash::Device,
-    allocator: &mut Allocator,
-    size: vk::DeviceSize,
-    usage: vk::BufferUsageFlags,
-    location: MemoryLocation,
-    name: &'static str,
-) -> Result<(vk::Buffer, Allocation), RenderError> {
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-    // SAFETY: Creating a buffer.
-    let buffer = unsafe {
-        device
-            .create_buffer(&buffer_info, None)
-            .map_err(RenderError::Vulkan)?
-    };
-
-    // SAFETY: Getting memory requirements.
-    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-    let allocation = allocator
-        .allocate(&AllocationCreateDesc {
-            name,
-            requirements,
-            location,
-            linear: true,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })
-        .map_err(|e| RenderError::Allocator(e.to_string()))?;
-
-    // SAFETY: Binding memory to buffer.
-    unsafe {
-        device
-            .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-            .map_err(RenderError::Vulkan)?;
-    }
-
-    Ok((buffer, allocation))
 }
 
 /// Submit a one-shot command buffer and wait for completion.

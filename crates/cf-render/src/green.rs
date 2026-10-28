@@ -3,22 +3,15 @@
 //! grid's line pipeline. With no green nothing is drawn.
 
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, Allocator};
+use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::color;
 use cf_scene::green::{GreenConfig, generate_green_edge};
 use cf_scene::grid::{GridConfig, GridVertex};
 
 use crate::error::RenderError;
-use crate::gpu::push_constants;
+use crate::gpu::{HostBuffer, push_constants};
 use crate::pipeline::{GridPipeline, GridPushConstants};
-
-/// Creates a host-visible vertex buffer holding `vertices`.
-pub(crate) type CreateVertexBuffer = fn(
-    &ash::Device,
-    &mut Allocator,
-    &[GridVertex],
-) -> Result<(vk::Buffer, Allocation), RenderError>;
 
 /// Edge vertices of `green`: one ring, or none when there is no green.
 fn edge_vertices(green: Option<&GreenConfig>, grid: &GridConfig) -> Vec<GridVertex> {
@@ -27,8 +20,7 @@ fn edge_vertices(green: Option<&GreenConfig>, grid: &GridConfig) -> Vec<GridVert
 
 /// Uploaded edge geometry of a range's green.
 pub(crate) struct GreenEdge {
-    buffer: vk::Buffer,
-    allocation: Allocation,
+    buffer: HostBuffer,
     count: u32,
 }
 
@@ -38,7 +30,6 @@ impl GreenEdge {
     pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
-        create: CreateVertexBuffer,
         green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<Option<Self>, RenderError> {
@@ -46,10 +37,15 @@ impl GreenEdge {
         if verts.is_empty() {
             return Ok(None);
         }
-        let (buffer, allocation) = create(device, allocator, &verts)?;
+        let buffer = HostBuffer::with_data(
+            device,
+            allocator,
+            &verts,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "green edge",
+        )?;
         Ok(Some(Self {
             buffer,
-            allocation,
             count: verts.len() as u32,
         }))
     }
@@ -83,7 +79,7 @@ impl GreenEdge {
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc,
             );
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.buffer], &[0]);
+            device.cmd_bind_vertex_buffers(cb, 0, &[self.buffer.handle()], &[0]);
             device.cmd_draw(cb, self.count, 1, 0, 0);
         }
     }
@@ -94,10 +90,7 @@ impl GreenEdge {
     /// The GPU must no longer use the buffer (wait idle first).
     pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: Caller guarantees the buffer is idle.
-        unsafe {
-            device.destroy_buffer(self.buffer, None);
-        }
-        let _ = allocator.free(self.allocation);
+        unsafe { self.buffer.destroy(device, allocator) };
     }
 }
 

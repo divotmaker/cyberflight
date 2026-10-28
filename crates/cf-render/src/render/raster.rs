@@ -184,7 +184,7 @@ impl Renderer {
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_cyan,
             );
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
+            device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer.handle()], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
 
             // Green edge (LINE_LIST, neon green, 1px)
@@ -202,7 +202,7 @@ impl Renderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline.fill_pipeline,
             );
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
+            device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
             push_constants(
                 device,
                 cb,
@@ -236,7 +236,7 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline.glow_pipeline,
                 );
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer], &[0]);
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
@@ -252,7 +252,7 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline.fill_pipeline,
                 );
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
@@ -277,7 +277,7 @@ impl Renderer {
                     self.pipeline.pipeline, // LINE_LIST grid pipeline
                 );
                 device.cmd_set_line_width(cb, if self.gpu.wide_lines { 2.0 } else { 1.0 });
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_line_buffer], &[0]);
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_line_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
@@ -295,7 +295,7 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline.glow_pipeline,
                 );
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_glow_buffer], &[0]);
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_glow_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
@@ -313,7 +313,7 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline.fill_pipeline,
                 );
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_fill_buffer], &[0]);
+                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_fill_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,

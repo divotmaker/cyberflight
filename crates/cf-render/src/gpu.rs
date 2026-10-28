@@ -1,7 +1,9 @@
 //! GPU helpers shared by both renderers: the byte view of GPU-facing data,
-//! push constants and shader modules.
+//! push constants, shader modules and buffers.
 
 use ash::vk;
+use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use cf_scene::grid::GridVertex;
 
@@ -104,6 +106,251 @@ pub(crate) fn load_shader(
     }
 }
 
+/// Create a buffer of `size` bytes and bind fresh memory at `location` to it.
+fn create_buffer(
+    device: &ash::Device,
+    allocator: &mut Allocator,
+    size: vk::DeviceSize,
+    usage: vk::BufferUsageFlags,
+    location: MemoryLocation,
+    name: &'static str,
+) -> Result<(vk::Buffer, Allocation), RenderError> {
+    let buffer_info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(usage)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: Valid create info; the buffer is destroyed below on error or by
+    // its owner's `destroy`.
+    let buffer = unsafe {
+        device
+            .create_buffer(&buffer_info, None)
+            .map_err(RenderError::Vulkan)?
+    };
+    // SAFETY: `buffer` was just created on `device`.
+    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    let allocation = match allocator.allocate(&AllocationCreateDesc {
+        name,
+        requirements,
+        location,
+        linear: true,
+        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+    }) {
+        Ok(allocation) => allocation,
+        Err(e) => {
+            // SAFETY: `buffer` is unused.
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(RenderError::Allocator(e.to_string()));
+        }
+    };
+    // SAFETY: `allocation` satisfies `buffer`'s requirements and is unbound.
+    if let Err(e) =
+        unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
+    {
+        // SAFETY: `buffer` is unused.
+        unsafe { device.destroy_buffer(buffer, None) };
+        let _ = allocator.free(allocation);
+        return Err(RenderError::Vulkan(e));
+    }
+    Ok((buffer, allocation))
+}
+
+/// Device address of `buffer`, which was created with `SHADER_DEVICE_ADDRESS`.
+fn device_address(device: &ash::Device, buffer: vk::Buffer) -> vk::DeviceAddress {
+    // SAFETY: Callers only pass buffers created with `SHADER_DEVICE_ADDRESS`
+    // usage on a device with `bufferDeviceAddress` enabled.
+    unsafe {
+        device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
+    }
+}
+
+/// How many of `len` elements of `elem_size` bytes fit in `capacity_bytes`.
+fn fit(capacity_bytes: usize, elem_size: usize, len: usize) -> usize {
+    if elem_size == 0 {
+        return len;
+    }
+    len.min(capacity_bytes / elem_size)
+}
+
+/// Host-visible, persistently mapped buffer that knows its size. Writes are
+/// bounded by that size; it never writes past the allocation.
+pub(crate) struct HostBuffer {
+    buffer: vk::Buffer,
+    allocation: Allocation,
+    size: vk::DeviceSize,
+    name: &'static str,
+    warned: bool,
+}
+
+impl HostBuffer {
+    /// A mapped buffer of `size` bytes at `location` (`CpuToGpu` or
+    /// `GpuToCpu`, both host-coherent, so writes and reads need no flush).
+    ///
+    /// # Errors
+    /// Buffer creation or allocation fails, or the memory is not mapped.
+    pub(crate) fn new(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        location: MemoryLocation,
+        name: &'static str,
+    ) -> Result<Self, RenderError> {
+        let (buffer, allocation) = create_buffer(device, allocator, size, usage, location, name)?;
+        if allocation.mapped_ptr().is_none() {
+            // SAFETY: `buffer` is unused.
+            unsafe { device.destroy_buffer(buffer, None) };
+            let _ = allocator.free(allocation);
+            return Err(RenderError::Allocator(format!(
+                "{name}: memory is not host-mapped"
+            )));
+        }
+        Ok(Self {
+            buffer,
+            allocation,
+            size,
+            name,
+            warned: false,
+        })
+    }
+
+    /// A `CpuToGpu` buffer holding exactly `data`, at least one element in
+    /// size so the buffer is never empty.
+    ///
+    /// # Errors
+    /// As [`HostBuffer::new`].
+    pub(crate) fn with_data<T: GpuData>(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        data: &[T],
+        usage: vk::BufferUsageFlags,
+        name: &'static str,
+    ) -> Result<Self, RenderError> {
+        let size = size_of_val(data).max(size_of::<T>()) as vk::DeviceSize;
+        let mut buffer = Self::new(
+            device,
+            allocator,
+            size,
+            usage,
+            MemoryLocation::CpuToGpu,
+            name,
+        )?;
+        buffer.write(data);
+        Ok(buffer)
+    }
+
+    /// Write `data` from offset 0 and return the number of elements written:
+    /// all of them, or the leading ones that fit. The first truncation of
+    /// this buffer prints one warning.
+    ///
+    /// The copy is bounded by the buffer size, so it is memory-safe on the
+    /// host. If pending GPU work still reads the buffer, the GPU may see a mix
+    /// of old and new contents: wait for that work first to avoid it.
+    pub(crate) fn write<T: GpuData>(&mut self, data: &[T]) -> u32 {
+        let count = fit(self.size as usize, size_of::<T>(), data.len());
+        if count < data.len() && !self.warned {
+            eprintln!(
+                "WARN: {}: {} elements do not fit in {} bytes; using the first {count}",
+                self.name,
+                data.len(),
+                self.size
+            );
+            self.warned = true;
+        }
+        let bytes = as_bytes(&data[..count]);
+        let Some(mapped) = self.allocation.mapped_slice_mut() else {
+            return 0;
+        };
+        mapped[..bytes.len()].copy_from_slice(bytes);
+        count as u32
+    }
+
+    /// The buffer's contents (`size` bytes).
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.allocation
+            .mapped_slice()
+            .map_or(&[], |mapped| &mapped[..self.size as usize])
+    }
+
+    pub(crate) fn handle(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    /// Device address; the buffer must have `SHADER_DEVICE_ADDRESS` usage.
+    pub(crate) fn device_address(&self, device: &ash::Device) -> vk::DeviceAddress {
+        device_address(device, self.buffer)
+    }
+
+    /// Destroy the buffer and free its memory.
+    ///
+    /// # Safety
+    /// No pending GPU work uses the buffer; `device` and `allocator` are the
+    /// ones it was created with.
+    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+        // SAFETY: The caller guarantees the buffer is unused.
+        unsafe { device.destroy_buffer(self.buffer, None) };
+        let _ = allocator.free(self.allocation);
+    }
+}
+
+/// Device-local buffer (acceleration-structure storage, scratch). No host access.
+pub(crate) struct DeviceBuffer {
+    buffer: vk::Buffer,
+    allocation: Allocation,
+    size: vk::DeviceSize,
+}
+
+impl DeviceBuffer {
+    /// A `GpuOnly` buffer of `size` bytes.
+    ///
+    /// # Errors
+    /// Buffer creation or allocation fails.
+    pub(crate) fn new(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        name: &'static str,
+    ) -> Result<Self, RenderError> {
+        let (buffer, allocation) = create_buffer(
+            device,
+            allocator,
+            size,
+            usage,
+            MemoryLocation::GpuOnly,
+            name,
+        )?;
+        Ok(Self {
+            buffer,
+            allocation,
+            size,
+        })
+    }
+
+    pub(crate) fn handle(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    pub(crate) fn size(&self) -> vk::DeviceSize {
+        self.size
+    }
+
+    /// Device address; the buffer must have `SHADER_DEVICE_ADDRESS` usage.
+    pub(crate) fn device_address(&self, device: &ash::Device) -> vk::DeviceAddress {
+        device_address(device, self.buffer)
+    }
+
+    /// Destroy the buffer and free its memory.
+    ///
+    /// # Safety
+    /// No pending GPU work uses the buffer; `device` and `allocator` are the
+    /// ones it was created with.
+    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+        // SAFETY: The caller guarantees the buffer is unused.
+        unsafe { device.destroy_buffer(self.buffer, None) };
+        let _ = allocator.free(self.allocation);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +392,29 @@ mod tests {
             spirv_words(&[0u8; 8]),
             Err(RenderError::ShaderCompilation(_))
         ));
+    }
+
+    #[test]
+    fn fit_keeps_everything_that_fits() {
+        assert_eq!(fit(64, 16, 4), 4);
+        assert_eq!(fit(64, 16, 3), 3);
+    }
+
+    #[test]
+    fn fit_keeps_the_leading_whole_elements_on_overflow() {
+        assert_eq!(fit(64, 16, 5), 4);
+        assert_eq!(fit(70, 16, 100), 4);
+    }
+
+    #[test]
+    fn fit_of_nothing_is_nothing() {
+        assert_eq!(fit(64, 16, 0), 0);
+        assert_eq!(fit(0, 16, 0), 0);
+    }
+
+    #[test]
+    fn fit_is_zero_below_one_element() {
+        assert_eq!(fit(15, 16, 3), 0);
+        assert_eq!(fit(0, 16, 3), 0);
     }
 }

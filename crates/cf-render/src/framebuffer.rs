@@ -3,6 +3,7 @@ use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use crate::error::RenderError;
+use crate::gpu::HostBuffer;
 use crate::pipeline::DEPTH_STENCIL_FORMAT;
 
 /// Offscreen render target for headless rendering.
@@ -17,8 +18,8 @@ pub struct OffscreenTarget {
     pub depth_stencil_view: vk::ImageView,
     pub depth_stencil_allocation: Allocation,
     pub framebuffer: vk::Framebuffer,
-    pub staging_buffer: vk::Buffer,
-    pub staging_allocation: Allocation,
+    /// Readback buffer: `width * height * 4` bytes of RGBA8.
+    pub(crate) staging: HostBuffer,
 }
 
 impl OffscreenTarget {
@@ -180,43 +181,15 @@ impl OffscreenTarget {
                 .map_err(RenderError::Vulkan)?
         };
 
-        // Create staging buffer for readback (4 bytes per pixel)
-        let staging_size = u64::from(width) * u64::from(height) * 4;
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(staging_size)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        // SAFETY: Creating staging buffer.
-        let staging_buffer = unsafe {
-            device
-                .create_buffer(&buffer_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // SAFETY: Querying staging buffer memory requirements.
-        let staging_reqs = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
-
-        let staging_allocation = allocator
-            .allocate(&AllocationCreateDesc {
-                name: "offscreen staging",
-                requirements: staging_reqs,
-                location: MemoryLocation::GpuToCpu,
-                linear: true,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })
-            .map_err(|e| RenderError::Allocator(e.to_string()))?;
-
-        // SAFETY: Binding memory to staging buffer.
-        unsafe {
-            device
-                .bind_buffer_memory(
-                    staging_buffer,
-                    staging_allocation.memory(),
-                    staging_allocation.offset(),
-                )
-                .map_err(RenderError::Vulkan)?;
-        }
+        // Staging buffer for readback (4 bytes per pixel)
+        let staging = HostBuffer::new(
+            device,
+            allocator,
+            u64::from(width) * u64::from(height) * 4,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuToCpu,
+            "offscreen staging",
+        )?;
 
         Ok(Self {
             width,
@@ -229,8 +202,7 @@ impl OffscreenTarget {
             depth_stencil_view,
             depth_stencil_allocation,
             framebuffer,
-            staging_buffer,
-            staging_allocation,
+            staging,
         })
     }
 
@@ -246,10 +218,9 @@ impl OffscreenTarget {
             device.destroy_image(self.image, None);
             device.destroy_image_view(self.depth_stencil_view, None);
             device.destroy_image(self.depth_stencil_image, None);
-            device.destroy_buffer(self.staging_buffer, None);
+            self.staging.destroy(device, allocator);
         }
         let _ = allocator.free(self.image_allocation);
         let _ = allocator.free(self.depth_stencil_allocation);
-        let _ = allocator.free(self.staging_allocation);
     }
 }
