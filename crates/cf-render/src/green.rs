@@ -10,6 +10,7 @@ use cf_scene::green::{GreenConfig, generate_green_edge};
 use cf_scene::grid::{GridConfig, GridVertex};
 
 use crate::error::RenderError;
+use crate::gpu::push_constants;
 use crate::pipeline::{GridPipeline, GridPushConstants};
 
 /// Creates a host-visible vertex buffer holding `vertices`.
@@ -73,18 +74,14 @@ impl GreenEdge {
         // SAFETY: Caller guarantees an active render pass; the buffer lives
         // until `destroy`, and the push constants match the pipeline layout.
         unsafe {
-            let pc_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
             device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
             device.cmd_set_line_width(cb, 1.0);
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_bytes,
+                &pc,
             );
             device.cmd_bind_vertex_buffers(cb, 0, &[self.buffer], &[0]);
             device.cmd_draw(cb, self.count, 1, 0, 0);

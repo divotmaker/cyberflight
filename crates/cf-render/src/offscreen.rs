@@ -15,6 +15,7 @@ use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
+use crate::gpu::push_constants;
 use crate::green::GreenEdge;
 use crate::pipeline::{GridPipeline, GridPushConstants};
 use crate::readback::FrameBuffers;
@@ -727,36 +728,24 @@ impl OffscreenRenderer {
                 view_proj,
                 color: color::CYAN.into(),
             };
-            let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_cyan).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
             let pc_black = GridPushConstants {
                 view_proj,
                 color: [0.0, 0.0, 0.0, 1.0],
             };
-            let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_black).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
             let pc_magenta = GridPushConstants {
                 view_proj,
                 color: color::MAGENTA.into(),
             };
-            let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_magenta).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
 
             // Grid lines (LINE_LIST, cyan)
             device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
             device.cmd_set_line_width(cb, 1.0);
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 self.pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_cyan_bytes,
+                &pc_cyan,
             );
             device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
@@ -773,22 +762,22 @@ impl OffscreenRenderer {
                 self.pipeline.fill_pipeline,
             );
             device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 self.pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_black_bytes,
+                &pc_black,
             );
             device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
 
             // Tee box border (cyan)
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 self.pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_cyan_bytes,
+                &pc_cyan,
             );
             device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
 
@@ -802,12 +791,12 @@ impl OffscreenRenderer {
                     );
                     device.cmd_set_line_width(cb, 1.0);
                     device.cmd_bind_vertex_buffers(cb, 0, &[trail_buf], &[0]);
-                    device.cmd_push_constants(
+                    push_constants(
+                        device,
                         cb,
                         self.pipeline.pipeline_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        pc_magenta_bytes,
+                        &pc_magenta,
                     );
                     device.cmd_draw(cb, self.trail_line_count, 1, 0, 0);
                 }
@@ -818,12 +807,12 @@ impl OffscreenRenderer {
                     self.pipeline.glow_pipeline,
                 );
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_magenta_bytes,
+                    &pc_magenta,
                 );
                 device.cmd_draw(cb, self.glow_count, 1, 0, 0);
 
@@ -833,12 +822,12 @@ impl OffscreenRenderer {
                     self.pipeline.fill_pipeline,
                 );
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_black_bytes,
+                    &pc_black,
                 );
                 device.cmd_draw(
                     cb,
@@ -858,12 +847,12 @@ impl OffscreenRenderer {
                         );
                         device.cmd_set_line_width(cb, 1.0);
                         device.cmd_bind_vertex_buffers(cb, 0, &[flight_line_buf], &[0]);
-                        device.cmd_push_constants(
+                        push_constants(
+                            device,
                             cb,
                             self.pipeline.pipeline_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            pc_magenta_bytes,
+                            &pc_magenta,
                         );
                         device.cmd_draw(cb, self.flight_line_count, 1, 0, 0);
                     }
@@ -876,12 +865,12 @@ impl OffscreenRenderer {
                             self.pipeline.glow_pipeline,
                         );
                         device.cmd_bind_vertex_buffers(cb, 0, &[flight_glow_buf], &[0]);
-                        device.cmd_push_constants(
+                        push_constants(
+                            device,
                             cb,
                             self.pipeline.pipeline_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            pc_magenta_bytes,
+                            &pc_magenta,
                         );
                         device.cmd_draw(cb, self.flight_glow_count, 1, 0, 0);
                     }
@@ -894,12 +883,12 @@ impl OffscreenRenderer {
                             self.pipeline.fill_pipeline,
                         );
                         device.cmd_bind_vertex_buffers(cb, 0, &[flight_fill_buf], &[0]);
-                        device.cmd_push_constants(
+                        push_constants(
+                            device,
                             cb,
                             self.pipeline.pipeline_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            pc_black_bytes,
+                            &pc_black,
                         );
                         device.cmd_draw(cb, self.flight_fill_count, 1, 0, 0);
                     }
@@ -1319,10 +1308,6 @@ impl OffscreenRenderer {
                             view_proj: hud_proj.to_cols_array_2d(),
                             color: [0.0, 0.0, 0.0, 0.8],
                         };
-                        let pc_hud_bg_bytes: &[u8] = std::slice::from_raw_parts(
-                            std::ptr::from_ref(&pc_hud_bg).cast::<u8>(),
-                            std::mem::size_of::<GridPushConstants>(),
-                        );
                         device.cmd_bind_pipeline(
                             self.command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
@@ -1334,12 +1319,12 @@ impl OffscreenRenderer {
                             &[hud_fill_buf],
                             &[0],
                         );
-                        device.cmd_push_constants(
+                        push_constants(
+                            device,
                             self.command_buffer,
                             self.pipeline.pipeline_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            pc_hud_bg_bytes,
+                            &pc_hud_bg,
                         );
                         device.cmd_draw(self.command_buffer, self.hud_fill_count, 1, 0, 0);
                     }
@@ -1351,10 +1336,6 @@ impl OffscreenRenderer {
                             view_proj: hud_proj.to_cols_array_2d(),
                             color: [1.0, 1.0, 1.0, 1.0],
                         };
-                        let pc_hud_text_bytes: &[u8] = std::slice::from_raw_parts(
-                            std::ptr::from_ref(&pc_hud_text).cast::<u8>(),
-                            std::mem::size_of::<GridPushConstants>(),
-                        );
                         device.cmd_bind_pipeline(
                             self.command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
@@ -1367,12 +1348,12 @@ impl OffscreenRenderer {
                             &[hud_line_buf],
                             &[0],
                         );
-                        device.cmd_push_constants(
+                        push_constants(
+                            device,
                             self.command_buffer,
                             self.pipeline.pipeline_layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            pc_hud_text_bytes,
+                            &pc_hud_text,
                         );
                         device.cmd_draw(self.command_buffer, self.hud_line_count, 1, 0, 0);
                     }

@@ -1,6 +1,7 @@
 pub mod context;
 pub mod error;
 pub mod framebuffer;
+mod gpu;
 mod green;
 pub mod mode;
 pub mod offscreen;

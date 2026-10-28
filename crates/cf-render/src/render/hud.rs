@@ -1,5 +1,6 @@
 use ash::vk;
 
+use crate::gpu::push_constants;
 use crate::pipeline::GridPushConstants;
 
 use super::Renderer;
@@ -60,22 +61,18 @@ impl Renderer {
                         view_proj: hud_proj.to_cols_array_2d(),
                         color: [0.0, 0.0, 0.0, 0.8],
                     };
-                    let pc_hud_bg_bytes: &[u8] = std::slice::from_raw_parts(
-                        std::ptr::from_ref(&pc_hud_bg).cast::<u8>(),
-                        std::mem::size_of::<GridPushConstants>(),
-                    );
                     device.cmd_bind_pipeline(
                         cb,
                         vk::PipelineBindPoint::GRAPHICS,
                         self.hud_fill_pipeline,
                     );
                     device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_fill_buffer], &[0]);
-                    device.cmd_push_constants(
+                    push_constants(
+                        device,
                         cb,
                         self.pipeline.pipeline_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        pc_hud_bg_bytes,
+                        &pc_hud_bg,
                     );
                     device.cmd_draw(cb, self.hud_fill_count, 1, 0, 0);
                 }
@@ -85,10 +82,6 @@ impl Renderer {
                         view_proj: hud_proj.to_cols_array_2d(),
                         color: [1.0, 1.0, 1.0, 1.0],
                     };
-                    let pc_hud_text_bytes: &[u8] = std::slice::from_raw_parts(
-                        std::ptr::from_ref(&pc_hud_text).cast::<u8>(),
-                        std::mem::size_of::<GridPushConstants>(),
-                    );
                     device.cmd_bind_pipeline(
                         cb,
                         vk::PipelineBindPoint::GRAPHICS,
@@ -96,12 +89,12 @@ impl Renderer {
                     );
                     device.cmd_set_line_width(cb, 1.0);
                     device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_line_buffer], &[0]);
-                    device.cmd_push_constants(
+                    push_constants(
+                        device,
                         cb,
                         self.pipeline.pipeline_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        pc_hud_text_bytes,
+                        &pc_hud_text,
                     );
                     device.cmd_draw(cb, self.hud_line_count, 1, 0, 0);
                 }

@@ -510,16 +510,12 @@ impl RtPipeline {
                 &[],
             );
 
-            let pc_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(push_constants).cast::<u8>(),
-                std::mem::size_of::<RtPushConstants>(),
-            );
-            device.cmd_push_constants(
+            crate::gpu::push_constants(
+                device,
                 cb,
                 self.pipeline_layout,
                 vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-                0,
-                pc_bytes,
+                push_constants,
             );
 
             self.rt_loader.cmd_trace_rays(

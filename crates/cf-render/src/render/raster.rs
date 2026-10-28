@@ -3,6 +3,7 @@ use ash::vk;
 use cf_scene::camera::Camera;
 use cf_scene::color;
 
+use crate::gpu::push_constants;
 use crate::pipeline::GridPushConstants;
 
 use super::{CHASE_VIEWPORT_FRAC, Renderer};
@@ -176,16 +177,12 @@ impl Renderer {
                 view_proj,
                 color: color::CYAN.into(),
             };
-            let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_cyan).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 self.pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_cyan_bytes,
+                &pc_cyan,
             );
             device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
@@ -200,32 +197,28 @@ impl Renderer {
                 view_proj,
                 color: [0.0, 0.0, 0.0, 1.0],
             };
-            let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_black).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
             device.cmd_bind_pipeline(
                 cb,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline.fill_pipeline,
             );
             device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 self.pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_black_bytes,
+                &pc_black,
             );
             device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
 
             // Tee box border (cyan filled quads)
-            device.cmd_push_constants(
+            push_constants(
+                device,
                 cb,
                 self.pipeline.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                pc_cyan_bytes,
+                &pc_cyan,
             );
             device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
 
@@ -234,10 +227,6 @@ impl Renderer {
                 view_proj,
                 color: color::MAGENTA.into(),
             };
-            let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
-                std::ptr::from_ref(&pc_magenta).cast::<u8>(),
-                std::mem::size_of::<GridPushConstants>(),
-            );
 
             // Static ball on tee box (hidden when a flight is active)
             if self.ball_on_tee_box {
@@ -248,12 +237,12 @@ impl Renderer {
                     self.pipeline.glow_pipeline,
                 );
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_magenta_bytes,
+                    &pc_magenta,
                 );
                 device.cmd_draw(cb, self.glow_count, 1, 0, 0);
 
@@ -264,12 +253,12 @@ impl Renderer {
                     self.pipeline.fill_pipeline,
                 );
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_black_bytes,
+                    &pc_black,
                 );
                 device.cmd_draw(
                     cb,
@@ -289,12 +278,12 @@ impl Renderer {
                 );
                 device.cmd_set_line_width(cb, if self.gpu.wide_lines { 2.0 } else { 1.0 });
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_line_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_magenta_bytes,
+                    &pc_magenta,
                 );
                 device.cmd_draw(cb, self.flight_line_count, 1, 0, 0);
             }
@@ -307,12 +296,12 @@ impl Renderer {
                     self.pipeline.glow_pipeline,
                 );
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_glow_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_magenta_bytes,
+                    &pc_magenta,
                 );
                 device.cmd_draw(cb, self.flight_glow_count, 1, 0, 0);
             }
@@ -325,12 +314,12 @@ impl Renderer {
                     self.pipeline.fill_pipeline,
                 );
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_fill_buffer], &[0]);
-                device.cmd_push_constants(
+                push_constants(
+                    device,
                     cb,
                     self.pipeline.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    pc_black_bytes,
+                    &pc_black,
                 );
                 device.cmd_draw(cb, self.flight_fill_count, 1, 0, 0);
             }
