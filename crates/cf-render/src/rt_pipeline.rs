@@ -15,30 +15,29 @@ pub struct RtPushConstants {
     pub camera_pos: [f32; 4],
     /// Inverse view-projection matrix (screen → world).
     pub inv_view_proj: [[f32; 4]; 4],
-    /// Grid parameters: [spacing_m, line_half_width, max_fade_dist, viewport_y_offset].
-    pub grid_params: [f32; 4],
+    /// x = tracer fade value at the trail's oldest point, y/z = unused (0),
+    /// w = viewport Y offset in pixels.
+    pub params: [f32; 4],
     /// Ball position (xyz), w = trail fade distance in meters.
     pub ball_pos: [f32; 4],
 }
-
-/// Grid line half-width in meters used by the RT floor shader.
-const RT_GRID_LINE_HALF_WIDTH: f32 = 0.15;
 
 impl RtPushConstants {
     /// Pack push constants for one trace dispatch.
     ///
     /// `aspect` is the dispatch viewport's width / height and `viewport_offset`
     /// its top-left corner in storage-image pixels. `trail_fade_dist` is the
-    /// trail reflection fade distance in meters (0 selects the shader default).
+    /// trail reflection fade distance in meters (0 selects the shader default)
+    /// and `trail_tail_t` the tracer fade value at the trail's oldest point
+    /// (see [`RtTrail`](crate::rt_offscreen::RtTrail)).
     #[must_use]
     pub fn new(
         camera: &Camera,
         aspect: f32,
         viewport_offset: [f32; 2],
-        grid_spacing_m: f32,
-        grid_max_fade_dist: f32,
         ball_center: glam::Vec3,
         trail_fade_dist: f32,
+        trail_tail_t: f32,
     ) -> Self {
         let view = camera.view_matrix();
         let mut proj = camera.projection_matrix(aspect);
@@ -53,12 +52,7 @@ impl RtPushConstants {
                 viewport_offset[0],
             ],
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            grid_params: [
-                grid_spacing_m,
-                RT_GRID_LINE_HALF_WIDTH,
-                grid_max_fade_dist,
-                viewport_offset[1],
-            ],
+            params: [trail_tail_t, 0.0, 0.0, viewport_offset[1]],
             ball_pos: [ball_center.x, ball_center.y, ball_center.z, trail_fade_dist],
         }
     }

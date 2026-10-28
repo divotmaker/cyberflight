@@ -19,10 +19,9 @@ impl Renderer {
             camera,
             aspect,
             [vp_offset_x, vp_offset_y],
-            self.grid_spacing_m,
-            self.grid_max_fade_dist,
             self.rt_ball_center,
             self.rt_trail_fade_dist,
+            self.rt_trail_tail_t,
         )
     }
 

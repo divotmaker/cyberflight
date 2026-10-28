@@ -7,7 +7,7 @@ layout(set = 0, binding = 1, rgba16f) uniform image2D outputImage;
 layout(push_constant) uniform PushConstants {
     vec4 camera_pos;        // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;     // screen->world transform
-    vec4 grid_params;       // x = spacing_m, y = line_half_width, z = max_fade_dist, w = viewport Y offset (pixels)
+    vec4 params;            // x = trail tail fade value, yz = unused, w = viewport Y offset (pixels)
     vec4 ball_pos;          // xyz = ball center, w = trail fade distance (meters)
 } pc;
 
@@ -16,7 +16,7 @@ layout(location = 0) rayPayloadEXT vec4 payload; // rgb + alpha (1 = hit floor, 
 void main() {
     ivec2 local_pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
-    ivec2 viewport_offset = ivec2(pc.camera_pos.w, pc.grid_params.w);
+    ivec2 viewport_offset = ivec2(pc.camera_pos.w, pc.params.w);
     ivec2 pixel = local_pixel + viewport_offset;
 
     // NDC: [-1, 1] with Y flipped for Vulkan (relative to dispatch viewport)

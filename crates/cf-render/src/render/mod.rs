@@ -111,12 +111,11 @@ pub struct Renderer {
     pub(super) rt_pipeline: Option<RtPipeline>,
     // RT reflection composite pass (present only when RT pipeline exists).
     pub(super) composite: Option<CompositePass>,
-    pub(super) grid_spacing_m: f32,
-    pub(super) grid_max_fade_dist: f32,
     // Cached RT scene data for per-frame TLAS rebuilds.
     pub(super) rt_ball_center: glam::Vec3,
     rt_trail_points: Vec<glam::Vec3>,
     pub(super) rt_trail_fade_dist: f32,
+    pub(super) rt_trail_tail_t: f32,
     rt_needs_update: bool,
     /// Optional chase camera for the right 20% viewport (set per-frame).
     pub(super) chase_camera: Option<Camera>,
@@ -233,11 +232,6 @@ impl Renderer {
         )?;
 
         // Build RT pipeline if hardware supports it.
-        let spacing_m = grid_config.unit.to_meters(f64::from(grid_config.spacing)) as f32;
-        let dr = grid_config.unit.to_meters(f64::from(grid_config.downrange)) as f32;
-        let lat = grid_config.unit.to_meters(f64::from(grid_config.lateral)) as f32;
-        let grid_max_fade_dist = (dr * dr + lat * lat).sqrt();
-
         let (render_mode, rt_pipeline) = if gpu.rt_supported {
             let tee = TeeBox::default();
             let geometries = build_scene_geometry(grid_config, &tee, &[]);
@@ -331,8 +325,6 @@ impl Renderer {
             render_mode,
             rt_pipeline,
             composite,
-            grid_spacing_m: spacing_m,
-            grid_max_fade_dist,
             rt_ball_center: glam::Vec3::new(
                 0.0,
                 cf_scene::tee::TEE_ELEVATION + tee.ball_radius,
@@ -340,6 +332,7 @@ impl Renderer {
             ),
             rt_trail_points: Vec::new(),
             rt_trail_fade_dist: 0.0,
+            rt_trail_tail_t: 0.0,
             rt_needs_update: false,
             chase_camera: None,
             green_edge: None,
@@ -711,7 +704,7 @@ impl Renderer {
     /// and uploads them to the pre-allocated dynamic buffers. Also caches
     /// RT scene data for per-frame TLAS rebuild.
     pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
-        use crate::rt_offscreen::trim_trail_from_ball_pub;
+        use crate::rt_offscreen::RtTrail;
         use cf_scene::tee::{generate_ball_at, generate_ball_glow_at};
         use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, generate_trail_glow, generate_trail_line};
 
@@ -726,7 +719,7 @@ impl Renderer {
         // trail, the flight the HUD and chase camera follow.
         let mut new_rt_ball =
             glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
-        let mut new_rt_trail: Vec<glam::Vec3> = Vec::new();
+        let mut new_rt_trail = RtTrail::default();
 
         for (i, flight) in flights.iter().enumerate() {
             // Ball mesh at flight position
@@ -756,35 +749,30 @@ impl Renderer {
                 ));
             }
 
-            // Use the newest flight for RT reflections.
-            // Filter trail points by the same time-based fade as the raster trail
-            // so the RT reflection disappears in sync with the visible tracer.
+            // Use the newest flight for RT reflections. The reflected trail is
+            // the part of the trail the raster tracer still draws, so the
+            // reflection disappears in sync with the visible tracer.
             if i + 1 == flights.len() {
-                let ball_center = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-                let trail_positions: Vec<glam::Vec3> = flight
-                    .trail_points
-                    .iter()
-                    .filter(|p| (flight.current_time - p.time) < DEFAULT_TRAIL_LIFETIME)
-                    .map(|p| p.position)
-                    .collect();
-                let trimmed = trim_trail_from_ball_pub(&trail_positions, 0.8);
-
-                new_rt_ball = ball_center;
-                new_rt_trail = trimmed;
+                new_rt_ball = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
+                new_rt_trail = RtTrail::new(
+                    &flight.trail_points,
+                    flight.current_time,
+                    DEFAULT_TRAIL_LIFETIME,
+                );
             }
         }
 
+        // The tail fade value changes as the trail ages, even between TLAS
+        // rebuilds.
+        self.rt_trail_tail_t = new_rt_trail.tail_t;
+
         // Check if RT scene changed and needs TLAS rebuild.
         if self.rt_pipeline.is_some()
-            && (new_rt_ball != self.rt_ball_center || new_rt_trail != self.rt_trail_points)
+            && (new_rt_ball != self.rt_ball_center || new_rt_trail.points != self.rt_trail_points)
         {
             self.rt_ball_center = new_rt_ball;
-            self.rt_trail_points = new_rt_trail.clone();
-            // Compute trail fade distance (arc length of trimmed trail).
-            self.rt_trail_fade_dist = new_rt_trail
-                .windows(2)
-                .map(|w| (w[1] - w[0]).length())
-                .sum();
+            self.rt_trail_fade_dist = new_rt_trail.fade_dist;
+            self.rt_trail_points = new_rt_trail.points;
             self.rt_needs_update = true;
         }
 

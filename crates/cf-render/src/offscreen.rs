@@ -19,7 +19,7 @@ use crate::green::GreenEdge;
 use crate::pipeline::{GridPipeline, GridPushConstants};
 use crate::readback::FrameBuffers;
 use crate::render::FlightRenderData;
-use crate::rt_offscreen::build_scene_geometry;
+use crate::rt_offscreen::{RtTrail, arc_length, build_scene_geometry, trail_fade_t};
 use crate::rt_pipeline::{RtPipeline, RtPushConstants};
 
 /// Offscreen renderer for headless PNG generation.
@@ -65,12 +65,12 @@ pub struct OffscreenRenderer {
     composite_sampler: Option<vk::Sampler>,
     composite_vert_module: Option<vk::ShaderModule>,
     composite_frag_module: Option<vk::ShaderModule>,
-    grid_spacing_m: f32,
-    grid_max_fade_dist: f32,
     /// Ball center position for RT push constants (xyz).
     rt_ball_center: glam::Vec3,
-    /// RT trail fade distance (arc length of trimmed trail, meters).
+    /// RT trail fade distance (arc length of the reflected trail, meters).
     rt_trail_fade_dist: f32,
+    /// Tracer fade value at the reflected trail's oldest point.
+    rt_trail_tail_t: f32,
     /// Optional chase camera for split viewport (right 20%).
     chase_camera: Option<Camera>,
 
@@ -162,12 +162,6 @@ impl OffscreenRenderer {
                 .map_err(RenderError::Vulkan)?
         };
 
-        // Grid params for RT push constants.
-        let spacing_m = grid_config.unit.to_meters(f64::from(grid_config.spacing)) as f32;
-        let dr = grid_config.unit.to_meters(f64::from(grid_config.downrange)) as f32;
-        let lat = grid_config.unit.to_meters(f64::from(grid_config.lateral)) as f32;
-        let max_fade_dist = (dr * dr + lat * lat).sqrt();
-
         // Build RT pipeline + composite pass if hardware supports it.
         let ball_center = glam::Vec3::new(0.0, tee.ball_radius, 0.0);
         let geometries = build_scene_geometry(grid_config, &tee, &[]);
@@ -250,10 +244,9 @@ impl OffscreenRenderer {
             composite_sampler,
             composite_vert_module,
             composite_frag_module,
-            grid_spacing_m: spacing_m,
-            grid_max_fade_dist: max_fade_dist,
             rt_ball_center: ball_center,
             rt_trail_fade_dist: 0.0,
+            rt_trail_tail_t: 0.0,
             chase_camera: None,
 
             flight_line_buffer: None,
@@ -406,10 +399,9 @@ impl OffscreenRenderer {
             composite_sampler: None,
             composite_vert_module: None,
             composite_frag_module: None,
-            grid_spacing_m: 0.0,
-            grid_max_fade_dist: 0.0,
             rt_ball_center: ball_center,
             rt_trail_fade_dist: 0.0,
+            rt_trail_tail_t: 0.0,
             chase_camera: None,
 
             flight_line_buffer: None,
@@ -444,7 +436,7 @@ impl OffscreenRenderer {
             ball_center,
             &geometries,
             None,
-            0.0,
+            &RtTrail::default(),
         )
     }
 
@@ -465,11 +457,9 @@ impl OffscreenRenderer {
         let tee = TeeBox::default();
         let ball_center = ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
 
-        // Build RT geometry from trail positions.
-        let trail_positions: Vec<glam::Vec3> = trail_points.iter().map(|p| p.position).collect();
-        let trimmed = crate::rt_offscreen::trim_trail_from_ball_pub(&trail_positions, 0.8);
-        let trim_len: f32 = trimmed.windows(2).map(|w| (w[1] - w[0]).length()).sum();
-        let geometries = build_scene_geometry(grid_config, &tee, &trimmed);
+        // Reflect the part of the trail the raster tracer draws.
+        let trail = RtTrail::new(trail_points, current_time, max_lifetime);
+        let geometries = build_scene_geometry(grid_config, &tee, &trail.points);
 
         Self::create_rt(
             width,
@@ -479,7 +469,7 @@ impl OffscreenRenderer {
             ball_center,
             &geometries,
             Some((trail_points, current_time, max_lifetime, camera)),
-            trim_len,
+            &trail,
         )
     }
 
@@ -493,7 +483,7 @@ impl OffscreenRenderer {
         ball_center: glam::Vec3,
         geometries: &[crate::rt_pipeline::RtGeometry],
         flight: Option<(&[TrailPoint], f64, f64, &Camera)>,
-        trail_fade_dist: f32,
+        trail: &RtTrail,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
             validation: cfg!(debug_assertions),
@@ -605,12 +595,6 @@ impl OffscreenRenderer {
                 .map_err(RenderError::Vulkan)?
         };
 
-        // Compute grid params for RT push constants.
-        let spacing_m = grid_config.unit.to_meters(f64::from(grid_config.spacing)) as f32;
-        let dr = grid_config.unit.to_meters(f64::from(grid_config.downrange)) as f32;
-        let lat = grid_config.unit.to_meters(f64::from(grid_config.lateral)) as f32;
-        let max_fade_dist = (dr * dr + lat * lat).sqrt();
-
         // Build RT pipeline + composite pass if hardware supports it.
         let (
             rt_pipeline,
@@ -693,10 +677,9 @@ impl OffscreenRenderer {
             composite_sampler,
             composite_vert_module,
             composite_frag_module,
-            grid_spacing_m: spacing_m,
-            grid_max_fade_dist: max_fade_dist,
             rt_ball_center: ball_center,
-            rt_trail_fade_dist: trail_fade_dist,
+            rt_trail_fade_dist: trail.fade_dist,
+            rt_trail_tail_t: trail.tail_t,
             chase_camera: None,
 
             flight_line_buffer: None,
@@ -1134,11 +1117,11 @@ impl OffscreenRenderer {
 
             if let Some(newest) = newest {
                 self.rt_ball_center = newest.ball_pos;
+                self.rt_trail_tail_t = newest.trail_points.first().map_or(0.0, |p| {
+                    trail_fade_t(p.time, newest.current_time, DEFAULT_TRAIL_LIFETIME)
+                });
             }
-            self.rt_trail_fade_dist = rt_trail_points
-                .windows(2)
-                .map(|w| (w[1] - w[0]).length())
-                .sum();
+            self.rt_trail_fade_dist = arc_length(&rt_trail_points);
 
             let grid_config = cf_scene::grid::GridConfig::default();
             let geometries = build_scene_geometry(&grid_config, &tee, &rt_trail_points);
@@ -1539,10 +1522,9 @@ impl OffscreenRenderer {
                 camera,
                 width as f32 / height as f32,
                 [0.0, 0.0],
-                self.grid_spacing_m,
-                self.grid_max_fade_dist,
                 self.rt_ball_center,
                 self.rt_trail_fade_dist,
+                self.rt_trail_tail_t,
             );
 
             // Step 1: Transition RT storage image: UNDEFINED -> GENERAL

@@ -6,7 +6,7 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(push_constant) uniform PushConstants {
     vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;
-    vec4 grid_params; // x = spacing_m, y = line_half_width, z = max_fade_dist, w = viewport Y offset (pixels)
+    vec4 params;      // x = trail tail fade value, yz = unused, w = viewport Y offset (pixels)
     vec4 ball_pos;    // xyz = ball center, w = trail fade distance (meters)
 } pc;
 
@@ -128,10 +128,16 @@ void main() {
         payload = vec4(TEE_COLOR, 1.0);
 
     } else if (geom_type == 3) {
-        // Trail: emissive magenta, fading to transparent at the tail.
+        // Trail: emissive magenta with the raster tracer's fade. The tracer
+        // fade value t runs from 1 at the ball to params.x at the trail's
+        // oldest point, interpolated by distance from the ball over the
+        // trail's arc length (ball_pos.w).
         float fade_dist = pc.ball_pos.w > 0.0 ? pc.ball_pos.w : 50.0;
-        float d = distance(hit_pos, pc.ball_pos.xyz);
-        float alpha = 1.0 - clamp(d / fade_dist, 0.0, 1.0);
+        float u = clamp(distance(hit_pos, pc.ball_pos.xyz) / fade_dist, 0.0, 1.0);
+        float t = 1.0 - u * (1.0 - pc.params.x);
+        // Raster core alpha (1 - 0.7 (1 - t))^2, times its tip taper over t < 0.15.
+        float core = 1.0 - 0.7 * (1.0 - t);
+        float alpha = core * core * min(t / 0.15, 1.0);
 
         // Only floor reflection rays reach the trail (mask 0x04), so this
         // runs at the pipeline's maximum recursion depth and traces nothing.
