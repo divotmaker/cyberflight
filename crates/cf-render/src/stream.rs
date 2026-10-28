@@ -496,7 +496,7 @@ impl StreamEncoder {
             OutputMode::Udp { dest } => format!("udp://{dest}"),
         };
         eprintln!(
-            "StreamEncoder: {}x{} @ {}fps, {}bps, alpha_strip={} → {}",
+            "StreamEncoder: {}x{} @ {}fps, {}bps, alpha_strip={} -> {}",
             config.width, config.height, config.fps, config.bitrate, config.strip_alpha, dest_desc,
         );
 

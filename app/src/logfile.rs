@@ -9,6 +9,10 @@
 //! stops reading while text is selected in the console); beyond that, lines
 //! are left out of the console, never out of the log, and printing never
 //! waits for the console.
+//!
+//! The console gets the bytes as printed (UTF-8). A Windows console on its
+//! default code page shows non-ASCII characters garbled; the log file is
+//! UTF-8 throughout.
 
 use std::fs::File;
 use std::io::{self, Read, Write};

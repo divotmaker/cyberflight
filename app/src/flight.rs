@@ -343,9 +343,9 @@ const LATE_INTAKE_S: f64 = 0.25;
 
 /// The FRP device dialled without `--frp`: flighthook on this machine.
 ///
-/// An IPv4 address rather than `localhost`: flighthook listens on IPv4
-/// only, and where `localhost` resolves to `::1` first (Windows), every dial
-/// waits for the refused IPv6 attempt (about 2 s) before trying IPv4.
+/// An IPv4 address rather than `localhost`: by default flighthook listens on
+/// IPv4 only, and where `localhost` resolves to `::1` first (Windows), every
+/// dial waits for the refused IPv6 attempt (about 2 s) before trying IPv4.
 pub const DEFAULT_FRP_URL: &str = "ws://127.0.0.1:5880/frp";
 
 /// The FRP device URL: the value after `--frp` in `args`, or
@@ -1113,6 +1113,8 @@ mod tests {
         assert_eq!(shots.len(), 1);
         assert_eq!(shots[0].shot.shot_number, 7);
         assert!(shots[0].arrival > 0.0);
+        // The intake sends each event before it wakes the app.
+        wait_until(|| wakes.load(Ordering::SeqCst) >= 2);
         assert_eq!(wakes.load(Ordering::SeqCst), 2, "connected, then the shot");
     }
 
