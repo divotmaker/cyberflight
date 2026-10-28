@@ -296,13 +296,16 @@ impl SceneRecorder {
     /// `RayTraced` mode, the reflections of the main view and the inset,
     /// then the HUD pass, which leaves the colour image in the output layout.
     ///
+    /// The upload is a host write into the per-frame buffers, which every
+    /// frame shares; a frame the GPU has not finished may draw a mix of old
+    /// and new vertices ([`FrameResources::upload`]).
+    ///
     /// # Safety
     /// `cb` is recording, outside a render pass. `target`'s framebuffers were
     /// created with [`Self::scene_pass`] and [`Self::hud_pass`] over one
     /// colour image of the recorder's colour format and `target.extent`
     /// (plus a depth image of the device's depth format for `scene`), and the
-    /// recorder was [`resize`](Self::resize)d to `target.extent`. The GPU has
-    /// finished the frames that read the per-frame buffers.
+    /// recorder was [`resize`](Self::resize)d to `target.extent`.
     pub(crate) unsafe fn record_frame(
         &mut self,
         device: &ash::Device,
