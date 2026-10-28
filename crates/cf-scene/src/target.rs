@@ -193,6 +193,10 @@ mod tests {
         let expected_outer = (1.0 - dist(outer) / fade_dist).powi(2);
         assert!((alpha(inner) - expected_inner).abs() < 1e-5);
         assert!((alpha(outer) - expected_outer).abs() < 1e-5);
+        // The inner ring is nearer the tee, so it fades less with distance;
+        // only its lower brightness can make it the dimmer ring.
+        assert!(dist(inner) < dist(outer));
+        assert!(alpha(inner) < alpha(outer));
     }
 
     #[test]
