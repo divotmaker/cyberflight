@@ -345,13 +345,50 @@ pub fn try_establish(endpoint: &mut FrpEndpoint) -> (Option<FrpConnection>, bool
     }
 }
 
+/// Turns FRP messages into shots: tracks launch monitor ready states and
+/// aggregates each shot's lifecycle events.
+///
+/// Every message is fed, whatever is on screen, so a shot that arrives while
+/// an earlier ball is still flying or rolling is never lost.
+#[derive(Debug, Default)]
+pub struct ShotIntake {
+    shots: ShotAggregator,
+    /// Last known ready state per launch monitor device ID.
+    pub lm_states: HashMap<String, bool>,
+}
+
+impl ShotIntake {
+    /// Process one FRP message. Returns a shot once its `shot_finished`
+    /// arrives and it converts to a simulation input.
+    pub fn ingest(&mut self, msg: &FrpMessage) -> Option<ReceivedShot> {
+        if let FrpMessage::Envelope(env) = msg {
+            if let FrpEvent::DeviceTelemetry {
+                telemetry: Some(t), ..
+            } = &env.event
+            {
+                if let Some(ready) = t.get(flightrelay::types::telemetry::READY) {
+                    self.lm_states.insert(env.device.clone(), ready == "true");
+                }
+            }
+        }
+        let completed = self.shots.feed(msg)?;
+        let received = ReceivedShot::from_frp(&completed);
+        if received.is_none() {
+            eprintln!(
+                "WARN: shot #{} from {} not shown: no ball flight data",
+                completed.key.shot_number, completed.device
+            );
+        }
+        received
+    }
+}
+
 /// Shared FRP connection state used by both windowed and streaming modes.
 pub struct FrpState {
     /// Outlives the connections it produces; `establish` again to reconnect.
     pub endpoint: FrpEndpoint,
     pub conn: Option<FrpConnection>,
-    pub shots: ShotAggregator,
-    pub lm_states: HashMap<String, bool>,
+    pub intake: ShotIntake,
     pub connected: bool,
     pub last_reconnect_attempt: f64,
 }
@@ -366,15 +403,15 @@ impl FrpState {
         Ok(Self {
             endpoint,
             conn,
-            shots: ShotAggregator::new(),
-            lm_states: HashMap::new(),
+            intake: ShotIntake::default(),
             connected,
             last_reconnect_attempt: 0.0,
         })
     }
 
-    /// Poll FRP for new shots. Returns any completed ReceivedShot.
-    pub fn poll(&mut self, now: f64, animating: bool) -> Option<ReceivedShot> {
+    /// Drain all pending FRP messages. Returns the shots completed by them,
+    /// oldest first.
+    pub fn poll(&mut self, now: f64) -> Vec<ReceivedShot> {
         // Reconnect if disconnected (try every 5 seconds).
         if self.conn.is_none() && now - self.last_reconnect_attempt >= 5.0 {
             self.last_reconnect_attempt = now;
@@ -383,30 +420,13 @@ impl FrpState {
             self.connected = connected;
         }
 
-        let mut result = None;
+        let mut shots = Vec::new();
         let mut disconnected = false;
 
         if let Some(conn) = &mut self.conn {
             loop {
                 match conn.try_recv() {
-                    Ok(Some(msg)) => {
-                        // Update launch monitor ready state from device telemetry.
-                        if let FrpMessage::Envelope(env) = &msg {
-                            if let FrpEvent::DeviceTelemetry {
-                                telemetry: Some(t), ..
-                            } = &env.event
-                            {
-                                if let Some(ready) = t.get(flightrelay::types::telemetry::READY) {
-                                    self.lm_states.insert(env.device.clone(), ready == "true");
-                                }
-                            }
-                        }
-                        if !animating {
-                            if let Some(completed) = self.shots.feed(&msg) {
-                                result = ReceivedShot::from_frp(&completed);
-                            }
-                        }
-                    }
+                    Ok(Some(msg)) => shots.extend(self.intake.ingest(&msg)),
                     Ok(None) => break,
                     Err(flightrelay::FrpError::Json(_)) => {
                         // some messages may not be parsable due to extension
@@ -424,10 +444,10 @@ impl FrpState {
         if disconnected {
             self.connected = false;
             self.conn = None;
-            self.lm_states.clear();
+            self.intake.lm_states.clear();
         }
 
-        result
+        shots
     }
 }
 
@@ -445,6 +465,32 @@ impl FlightManager {
             last_telemetry: None,
             trail_subsample: DEFAULT_TRAIL_SUBSAMPLE,
         }
+    }
+
+    /// Simulate `shot` and start animating it at `now`.
+    ///
+    /// Earlier balls keep animating to rest; the newest ball drives the chase
+    /// camera and the HUD.
+    pub fn launch(
+        &mut self,
+        shot: &ReceivedShot,
+        now: f64,
+        env: &Environment,
+        targets: &[cf_scene::target::Target],
+    ) {
+        if self.is_animating(now) {
+            eprintln!(
+                "Shot #{} from {} launched while an earlier ball is still moving",
+                shot.shot_number, shot.device
+            );
+        }
+        self.flights.push(AnimatedFlight::from_received(
+            shot,
+            now,
+            &BallModel::TOUR,
+            env,
+            targets,
+        ));
     }
 
     /// Update flight state: mark landed, remove expired, build render data.
@@ -476,7 +522,6 @@ impl FlightManager {
         self.flights.iter().any(|f| f.is_animating(now))
     }
 
-    /// Build HUD geometry for the current frame.
     /// Compute the chase camera for the most recent active flight (if any).
     pub fn chase_camera(&mut self, now: f64) -> Option<Camera> {
         self.flights
@@ -485,6 +530,7 @@ impl FlightManager {
             .find_map(|f| f.chase_camera(now))
     }
 
+    /// Build HUD geometry for the current frame from the newest shot.
     pub fn build_hud(
         &mut self,
         now: f64,
@@ -530,6 +576,80 @@ mod tests {
             &Environment::SEA_LEVEL,
             targets,
         )
+    }
+
+    fn envelope(event: FrpEvent) -> FrpMessage {
+        FrpMessage::Envelope(flightrelay::FrpEnvelope::new("test.0", event))
+    }
+
+    /// The lifecycle messages of shot `n`: trigger, ball flight, finished.
+    fn shot_messages(n: u32, speed_mph: f64, elevation_deg: f64) -> Vec<FrpMessage> {
+        let key = flightrelay::ShotKey {
+            shot_id: format!("shot-{n}"),
+            shot_number: n,
+        };
+        let ball = flightrelay::BallFlight {
+            launch_speed: Some(flightrelay::Velocity::MilesPerHour(speed_mph)),
+            launch_elevation: Some(elevation_deg),
+            launch_azimuth: Some(0.0),
+            backspin_rpm: Some(3000),
+            sidespin_rpm: Some(0),
+            ..flightrelay::BallFlight::default()
+        };
+        vec![
+            envelope(FrpEvent::shot_trigger(key.clone())),
+            envelope(FrpEvent::ball_flight(key.clone(), ball)),
+            envelope(FrpEvent::ShotFinished { key }),
+        ]
+    }
+
+    /// Feed `msgs` to `intake`, launching every completed shot at `now`.
+    fn deliver(intake: &mut ShotIntake, fm: &mut FlightManager, msgs: &[FrpMessage], now: f64) {
+        for msg in msgs {
+            if let Some(shot) = intake.ingest(msg) {
+                fm.launch(&shot, now, &Environment::SEA_LEVEL, &default_targets());
+            }
+        }
+    }
+
+    #[test]
+    fn shot_during_rollout_is_launched() {
+        let mut intake = ShotIntake::default();
+        let mut fm = FlightManager::new();
+        deliver(&mut intake, &mut fm, &shot_messages(1, 160.0, 11.0), 0.0);
+        assert_eq!(fm.flights.len(), 1);
+
+        // The drive is on the ground but still rolling.
+        let now = fm.flights[0].result.flight.flight_time + 1.0;
+        assert!(fm.is_animating(now));
+        deliver(&mut intake, &mut fm, &shot_messages(2, 100.0, 24.0), now);
+        assert_eq!(fm.flights.len(), 2, "second shot is launched, not dropped");
+
+        // Both balls are drawn; the HUD and the chase camera follow the newest.
+        let t = now + 0.5;
+        assert_eq!(fm.update(t).len(), 2);
+        let _ = fm.build_hud(t, true, &intake.lm_states, true, 1920.0, 1080.0);
+        let shown = fm.last_telemetry.as_ref().expect("telemetry");
+        assert!((shown.ball_speed_mph - 100.0).abs() < 1e-9);
+        let chase = fm.chase_camera(t).expect("newest ball is followed");
+        let newest = &fm.flights[1];
+        assert_eq!(chase.target, to_scene(newest.result.final_pos));
+        let ball = newest.render_data(t, 1).expect("in flight").ball_pos;
+        assert!(((chase.position - ball).length() - 125f32.sqrt()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn shot_without_speed_is_not_launched() {
+        let mut intake = ShotIntake::default();
+        let mut fm = FlightManager::new();
+        let mut msgs = shot_messages(1, 160.0, 11.0);
+        if let FrpMessage::Envelope(env) = &mut msgs[1] {
+            if let FrpEvent::BallFlight { ball, .. } = &mut env.event {
+                ball.launch_speed = None;
+            }
+        }
+        deliver(&mut intake, &mut fm, &msgs, 0.0);
+        assert!(fm.flights.is_empty());
     }
 
     #[test]

@@ -15,10 +15,9 @@ use cf_render::context::{GpuConfig, GpuContext};
 use cf_render::render::Renderer;
 use cf_render::window::Swapchain;
 use cf_scene::range::Range;
-use dimple::aero::BallModel;
 use dimple::environment::Environment;
 
-use flight::{AnimatedFlight, FlightManager, FrpState};
+use flight::{FlightManager, FrpState};
 
 struct App {
     windowed: bool,
@@ -98,15 +97,9 @@ impl App {
     fn update(&mut self) {
         let now = self.start_time.elapsed().as_secs_f64();
 
-        let animating = self.flights.is_animating(now);
-        if let Some(received) = self.frp.poll(now, animating) {
-            self.flights.flights.push(AnimatedFlight::from_received(
-                &received,
-                now,
-                &BallModel::TOUR,
-                &self.environment,
-                &self.range.targets,
-            ));
+        for shot in self.frp.poll(now) {
+            self.flights
+                .launch(&shot, now, &self.environment, &self.range.targets);
         }
 
         let render_data = self.flights.update(now);
@@ -121,7 +114,7 @@ impl App {
             let hud = self.flights.build_hud(
                 now,
                 chase_camera.is_some(),
-                &self.frp.lm_states,
+                &self.frp.intake.lm_states,
                 self.frp.connected,
                 screen_w,
                 screen_h,

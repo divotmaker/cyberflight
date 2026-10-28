@@ -9,10 +9,9 @@ use anyhow::{Context, Result};
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::stream::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_scene::range::Range;
-use dimple::aero::BallModel;
 use dimple::environment::Environment;
 
-use crate::flight::{AnimatedFlight, FlightManager, FrpState};
+use crate::flight::{FlightManager, FrpState};
 
 struct StreamArgs {
     config: StreamConfig,
@@ -153,15 +152,8 @@ pub fn run_stream() -> Result<()> {
         }
 
         // Poll FRP for new shots.
-        let animating = fm.is_animating(now);
-        if let Some(received) = fh.poll(now, animating) {
-            fm.flights.push(AnimatedFlight::from_received(
-                &received,
-                now,
-                &BallModel::TOUR,
-                &environment,
-                &range.targets,
-            ));
+        for shot in fh.poll(now) {
+            fm.launch(&shot, now, &environment, &range.targets);
         }
 
         // Update flight animations.
@@ -178,7 +170,7 @@ pub fn run_stream() -> Result<()> {
         let hud = fm.build_hud(
             now,
             chase_camera.is_some(),
-            &fh.lm_states,
+            &fh.intake.lm_states,
             fh.connected,
             config.width as f32,
             config.height as f32,
