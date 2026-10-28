@@ -12,7 +12,7 @@ use cf_scene::tee::TeeBox;
 use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::flight::{FlightRenderData, flight_vertices};
-use crate::frame::{FrameContent, FrameResources};
+use crate::frame::{FrameContent, FrameResources, TracerBuffers};
 use crate::mode::{RenderMode, RtMode};
 use crate::pipeline::ScenePipelines;
 use crate::reflections::{ReflectionFrame, Reflections, TraceView};
@@ -78,9 +78,11 @@ pub(crate) struct FrameTarget {
 pub(crate) struct SceneRecorder {
     pipelines: ScenePipelines,
     geometry: SceneGeometry,
-    /// Next frame's flights and HUD, uploaded into `frame` by `record_frame`.
+    /// Next frame's flights and HUD, uploaded into the buffers of the frame
+    /// in flight by `record_frame`.
     content: FrameContent,
-    frame: FrameResources,
+    /// The GPU buffers, one set per frame in flight.
+    frames: Vec<FrameResources>,
     reflections: Option<Reflections>,
     mode: RenderMode,
     /// Chase camera for the right 20 % inset.
@@ -93,6 +95,9 @@ impl SceneRecorder {
     /// Create the passes and pipelines for an `extent` image of
     /// `color_format` that the HUD pass leaves in `output_layout`, and the
     /// scene of `grid` with the default tee box and the ball on the tee.
+    /// Every resource the CPU rewrites per frame (the vertex buffers and the
+    /// ray tracer's structures built from them) exists `frames` times (at
+    /// least once), one set for each frame in flight.
     ///
     /// It adds reflections of the ball on the tee, mirrored across the floor
     /// ([`RenderMode::Rasterized`]); with `RtMode::Auto` and a device that
@@ -110,6 +115,7 @@ impl SceneRecorder {
         extent: vk::Extent2D,
         grid: &GridConfig,
         rt: RtMode,
+        frames: usize,
     ) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let pipelines =
@@ -123,25 +129,35 @@ impl SceneRecorder {
                     return Err(e);
                 }
             };
-        let frame = match FrameResources::new(&gpu.device, &mut gpu.allocator, gpu.rt_supported) {
-            Ok(frame) => frame,
-            Err(e) => {
-                // SAFETY: Just created; no GPU work has used them.
-                unsafe {
-                    geometry.destroy(&gpu.device, &mut gpu.allocator);
-                    pipelines.destroy(&gpu.device);
+        let mut made: Vec<FrameResources> = Vec::with_capacity(frames.max(1));
+        for _ in 0..frames.max(1) {
+            match FrameResources::new(&gpu.device, &mut gpu.allocator, gpu.rt_supported) {
+                Ok(frame) => made.push(frame),
+                Err(e) => {
+                    // SAFETY: Just created; no GPU work has used them.
+                    unsafe {
+                        for frame in made {
+                            frame.destroy(&gpu.device, &mut gpu.allocator);
+                        }
+                        geometry.destroy(&gpu.device, &mut gpu.allocator);
+                        pipelines.destroy(&gpu.device);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
-        };
-        let tracer_buffers = frame.tracer_buffers().filter(|_| rt == RtMode::Auto);
+        }
+        let tracer_buffers: Option<Vec<TracerBuffers>> = made
+            .iter()
+            .map(FrameResources::tracer_buffers)
+            .collect::<Option<_>>()
+            .filter(|_| rt == RtMode::Auto);
         let reflections = match Reflections::new(
             gpu,
             color_format,
             extent,
             grid,
             &tee,
-            tracer_buffers.as_ref(),
+            tracer_buffers.as_deref(),
         ) {
             Ok(reflections) => Some(reflections),
             Err(e) => {
@@ -161,7 +177,7 @@ impl SceneRecorder {
             pipelines,
             geometry,
             content: FrameContent::default(),
-            frame,
+            frames: made,
             reflections,
             mode,
             chase: None,
@@ -257,20 +273,21 @@ impl SceneRecorder {
         self.pipelines.hud_pass
     }
 
-    /// Upload the next frame's content and record the frame seen from
-    /// `camera`: the scene pass (with the chase inset), then the reflections
-    /// of the main view and the inset, ray-traced in `RayTraced` mode and
-    /// mirrored otherwise, then the HUD pass, which leaves the colour image
-    /// in the output layout.
+    /// Upload the next frame's content into the buffers of frame `frame` in
+    /// flight and record the frame seen from `camera`: the scene pass (with
+    /// the chase inset), then the reflections of the main view and the
+    /// inset, ray-traced in `RayTraced` mode and mirrored otherwise, then
+    /// the HUD pass, which leaves the colour image in the output layout.
     ///
-    /// The upload is a host write into the per-frame buffers, which every
-    /// frame shares; a frame the GPU has not finished may draw, mirror or
-    /// build the ray tracer's structures from a mix of old and new vertices
+    /// The upload is a host write into the buffers of `frame` alone, which no
+    /// other frame in flight reads or builds the ray tracer's structures from
     /// ([`FrameResources::upload`]).
     ///
     /// # Safety
-    /// `cb` is recording, outside a render pass. `target`'s framebuffers were
-    /// created with [`Self::scene_pass`] and [`Self::hud_pass`] over one
+    /// `cb` is recording, outside a render pass. The GPU has finished the
+    /// frame that last used `frame` (its fence was waited on), and `frame`
+    /// is less than the `frames` the recorder was created with. `target`'s
+    /// framebuffers were created with [`Self::scene_pass`] and [`Self::hud_pass`] over one
     /// colour image of the recorder's colour format and `target.extent`
     /// (plus a depth image of the device's depth format for `scene`), and the
     /// recorder was [`resize`](Self::resize)d to `target.extent`.
@@ -280,8 +297,11 @@ impl SceneRecorder {
         cb: vk::CommandBuffer,
         target: &FrameTarget,
         camera: &Camera,
+        frame: usize,
     ) {
-        self.frame.upload(&self.content);
+        let resources = &mut self.frames[frame];
+        resources.upload(&self.content);
+        let resources = &self.frames[frame];
         let extent = target.extent;
         let main_view = TraceView {
             camera: *camera,
@@ -323,7 +343,7 @@ impl SceneRecorder {
                 device,
                 cb,
                 &self.pipelines,
-                &self.frame,
+                resources,
                 view_proj(camera, main_view.aspect()),
             );
 
@@ -352,7 +372,7 @@ impl SceneRecorder {
                     device,
                     cb,
                     &self.pipelines,
-                    &self.frame,
+                    resources,
                     view_proj(&inset.camera, inset.aspect()),
                 );
             }
@@ -361,7 +381,7 @@ impl SceneRecorder {
             // Floor reflections: main view, plus the chase inset when set.
             if let Some(reflections) = &self.reflections {
                 let ray_traced = self.mode == RenderMode::RayTraced;
-                let tracer = self.frame.newest_tracer();
+                let tracer = resources.newest_tracer();
                 let with_chase;
                 let main_only;
                 let views: &[TraceView] = match chase_view {
@@ -374,14 +394,15 @@ impl SceneRecorder {
                         &main_only
                     }
                 };
-                let frame = ReflectionFrame {
+                let reflection_frame = ReflectionFrame {
                     views,
                     tracer: &tracer,
                     overlay: target.overlay,
                     extent,
+                    frame,
                     ray_traced,
                 };
-                reflections.record(device, cb, &frame);
+                reflections.record(device, cb, &reflection_frame);
             }
 
             // HUD pass: the HUD over everything; ends in the output layout.
@@ -392,7 +413,7 @@ impl SceneRecorder {
             device.cmd_begin_render_pass(cb, &hud_pass_info, vk::SubpassContents::INLINE);
             device.cmd_set_viewport(cb, 0, &[viewport]);
             device.cmd_set_scissor(cb, 0, &[full]);
-            self.frame.draw_hud(
+            resources.draw_hud(
                 device,
                 cb,
                 self.pipelines.hud_fill,
@@ -415,7 +436,9 @@ impl SceneRecorder {
             if let Some(reflections) = self.reflections {
                 reflections.destroy(device, allocator);
             }
-            self.frame.destroy(device, allocator);
+            for frame in self.frames {
+                frame.destroy(device, allocator);
+            }
             self.geometry.destroy(device, allocator);
             self.pipelines.destroy(device);
         }

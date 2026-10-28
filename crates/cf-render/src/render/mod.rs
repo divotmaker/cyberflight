@@ -57,6 +57,8 @@ impl Renderer {
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
         // Ray-traced reflections when the device supports them; mirrored if not.
+        // One frame in flight per swapchain image (see `create_sync_objects`),
+        // each with its own buffers and ray tracer structures.
         let recorder = match SceneRecorder::new(
             &mut gpu,
             swapchain.format,
@@ -64,6 +66,7 @@ impl Renderer {
             swapchain.extent,
             grid_config,
             RtMode::Auto,
+            swapchain.image_views.len(),
         ) {
             Ok(recorder) => recorder,
             Err(e) => {
@@ -187,7 +190,8 @@ impl Renderer {
                 .map_err(RenderError::Vulkan)?;
 
             // Scene, reflections and HUD; leaves the image in PRESENT_SRC_KHR.
-            self.recorder.record_frame(device, cb, &target, camera);
+            self.recorder
+                .record_frame(device, cb, &target, camera, frame);
 
             device.end_command_buffer(cb).map_err(RenderError::Vulkan)?;
         }

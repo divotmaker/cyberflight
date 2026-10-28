@@ -205,9 +205,11 @@ impl FrameResources {
     /// Copy `content` into the buffers. Each buffer keeps the leading
     /// vertices that fit (see [`HostBuffer::write`]).
     ///
-    /// The GPU must have finished the frames that read these buffers (draw
-    /// from them, and build the ray tracer's structures from them);
-    /// otherwise it may see a mix of old and new vertices.
+    /// The GPU must have finished the frame that last used these buffers
+    /// (drew from them, and built the ray tracer's structures from them);
+    /// otherwise it may see a mix of old and new vertices. One
+    /// `FrameResources` per frame in flight keeps the others' buffers out of
+    /// the write.
     pub(crate) fn upload(&mut self, content: &FrameContent) {
         let data: [&[GridVertex]; SLOTS] = [
             &content.flight_lines,

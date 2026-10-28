@@ -116,7 +116,8 @@ struct PipelineObjects {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     descriptor_pool: vk::DescriptorPool,
-    descriptor_set: vk::DescriptorSet,
+    /// One set per frame in flight.
+    descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 impl PipelineObjects {
@@ -280,21 +281,25 @@ impl PipelineObjects {
         Ok(())
     }
 
-    /// Create the descriptor pool and allocate the one descriptor set.
-    fn create_descriptor_set(&mut self, device: &ash::Device) -> Result<(), RenderError> {
+    /// Create the descriptor pool and allocate `count` descriptor sets.
+    fn create_descriptor_sets(
+        &mut self,
+        device: &ash::Device,
+        count: u32,
+    ) -> Result<(), RenderError> {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                .descriptor_count(1),
+                .descriptor_count(count),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(1),
+                .descriptor_count(count),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(2),
+                .descriptor_count(2 * count),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
+            .max_sets(count)
             .pool_sizes(&pool_sizes);
         // SAFETY: Creating descriptor pool.
         self.descriptor_pool = unsafe {
@@ -303,15 +308,15 @@ impl PipelineObjects {
                 .map_err(RenderError::Vulkan)?
         };
 
-        let set_layouts = [self.descriptor_set_layout];
+        let set_layouts = vec![self.descriptor_set_layout; count as usize];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.descriptor_pool)
             .set_layouts(&set_layouts);
-        // SAFETY: Allocating descriptor set.
-        self.descriptor_set = unsafe {
+        // SAFETY: Allocating descriptor sets.
+        self.descriptor_sets = unsafe {
             device
                 .allocate_descriptor_sets(&alloc_info)
-                .map_err(RenderError::Vulkan)?[0]
+                .map_err(RenderError::Vulkan)?
         };
         Ok(())
     }
@@ -804,24 +809,31 @@ impl StaticBlas {
     }
 }
 
+/// One frame in flight's instances and top-level structure.
+struct SceneFrame {
+    instances: HostBuffer,
+    tlas: Rebuilt,
+}
+
 /// The scene the tracer is traced in: the static bottom-level structures,
-/// the instances (those, then the tracer's tube and centre line) and the
-/// top-level structure over them, which is rebuilt every frame.
+/// shared by every frame in flight, and per frame the instances (those, then
+/// the frame's tracer tube and centre line) and the top-level structure over
+/// them, which is rebuilt every frame.
 ///
 /// Each part is stored as soon as it exists, so after a failure
 /// [`destroy`](Self::destroy) frees what was built.
 #[derive(Default)]
 struct SceneAccel {
     statics: Vec<StaticBlas>,
-    instances: Option<HostBuffer>,
+    frames: Vec<SceneFrame>,
     instance_count: u32,
-    tlas: Option<Rebuilt>,
 }
 
 impl SceneAccel {
     /// Build the static structures of `geometries` (one submission, which
-    /// completes before this returns), the instances of those and `tracer`,
-    /// and create the top-level structure over them.
+    /// completes before this returns), and for each of `tracers` the
+    /// instances of those and the tracer, and a top-level structure over
+    /// them.
     ///
     /// # Errors
     /// A buffer or structure fails to create or the build submission fails;
@@ -831,7 +843,7 @@ impl SceneAccel {
         loader: &ash::khr::acceleration_structure::Device,
         gpu: &mut GpuContext,
         geometries: &[RtGeometry],
-        tracer: &TracerAccel,
+        tracers: &[TracerAccel],
     ) -> Result<(), RenderError> {
         for geom in geometries.iter().filter(|g| g.primitive_count() > 0) {
             let blas = StaticBlas::new(loader, gpu, geom)?;
@@ -851,49 +863,58 @@ impl SceneAccel {
             }
         }
 
-        let mut instances: Vec<vk::AccelerationStructureInstanceKHR> = self
-            .statics
-            .iter()
-            .map(|blas| {
-                instance(
-                    blas.accel.address(loader),
-                    blas.geom_type,
-                    HIT_GROUP_TRIANGLES,
-                    blas.transform,
-                )
-            })
-            .collect();
-        instances.push(instance(
-            tracer.tube.accel.address(loader),
-            GEOM_TRAIL,
-            HIT_GROUP_GLOW,
-            glam::Mat4::IDENTITY,
-        ));
-        instances.push(instance(
-            tracer.line.accel.address(loader),
-            GEOM_TRAIL_LINE,
-            HIT_GROUP_LINE,
-            glam::Mat4::IDENTITY,
-        ));
-        self.instance_count = instances.len() as u32;
-        let buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &instances,
-            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            "tlas instances",
-        )?;
-        let address = buffer.device_address(&gpu.device);
-        self.instances = Some(buffer);
-        self.tlas = Some(Rebuilt::new(
-            loader,
-            gpu,
-            vk::AccelerationStructureTypeKHR::TOP_LEVEL,
-            instances_geometry(address),
-            self.instance_count,
-            ("tlas", "tlas scratch"),
-        )?);
+        for tracer in tracers {
+            let mut instances: Vec<vk::AccelerationStructureInstanceKHR> = self
+                .statics
+                .iter()
+                .map(|blas| {
+                    instance(
+                        blas.accel.address(loader),
+                        blas.geom_type,
+                        HIT_GROUP_TRIANGLES,
+                        blas.transform,
+                    )
+                })
+                .collect();
+            instances.push(instance(
+                tracer.tube.accel.address(loader),
+                GEOM_TRAIL,
+                HIT_GROUP_GLOW,
+                glam::Mat4::IDENTITY,
+            ));
+            instances.push(instance(
+                tracer.line.accel.address(loader),
+                GEOM_TRAIL_LINE,
+                HIT_GROUP_LINE,
+                glam::Mat4::IDENTITY,
+            ));
+            self.instance_count = instances.len() as u32;
+            let instances = HostBuffer::with_data(
+                &gpu.device,
+                &mut gpu.allocator,
+                &instances,
+                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                "tlas instances",
+            )?;
+            let address = instances.device_address(&gpu.device);
+            let tlas = match Rebuilt::new(
+                loader,
+                gpu,
+                vk::AccelerationStructureTypeKHR::TOP_LEVEL,
+                instances_geometry(address),
+                self.instance_count,
+                ("tlas", "tlas scratch"),
+            ) {
+                Ok(tlas) => tlas,
+                Err(e) => {
+                    // SAFETY: Just created; no GPU work has used it.
+                    unsafe { instances.destroy(&gpu.device, &mut gpu.allocator) };
+                    return Err(e);
+                }
+            };
+            self.frames.push(SceneFrame { instances, tlas });
+        }
         Ok(())
     }
 
@@ -907,11 +928,9 @@ impl SceneAccel {
     ) {
         // SAFETY: The caller guarantees nothing uses them.
         unsafe {
-            if let Some(tlas) = self.tlas {
-                tlas.destroy(loader, device, allocator);
-            }
-            if let Some(instances) = self.instances {
-                instances.destroy(device, allocator);
+            for frame in self.frames {
+                frame.tlas.destroy(loader, device, allocator);
+                frame.instances.destroy(device, allocator);
             }
             for blas in self.statics {
                 blas.destroy(loader, device, allocator);
@@ -990,10 +1009,14 @@ pub(crate) fn line_aabbs(vertices: &[GridVertex]) -> Vec<f32> {
 /// Ray tracing pipeline: shaders, SBT, descriptors, and acceleration
 /// structures.
 ///
-/// The floor and tee box are bottom-level structures built once. The
-/// tracer's tube and centre line are rebuilt every frame in the frame's
-/// command buffer ([`RtPipeline::record_build`]) from the frame's own vertex
-/// buffers, with the top-level structure over everything.
+/// The floor and tee box are bottom-level structures built once, shared by
+/// every frame in flight. The tracer's tube and centre line are rebuilt every
+/// frame in the frame's command buffer ([`RtPipeline::record_build`]) from
+/// the frame's own vertex buffers, with the top-level structure over
+/// everything. Each frame in flight has its own copy of everything that
+/// rebuild writes or the traces read (the tracer's structures, the top-level
+/// structure with its instances, the descriptor set), so a frame only writes
+/// what its own fence has proven idle.
 pub struct RtPipeline {
     accel_loader: ash::khr::acceleration_structure::Device,
     rt_loader: ash::khr::ray_tracing_pipeline::Device,
@@ -1008,11 +1031,13 @@ pub struct RtPipeline {
     hit_region: vk::StridedDeviceAddressRegionKHR,
 
     // Acceleration structures
-    tracer: TracerAccel,
+    /// The tracer's structures, one per frame in flight.
+    tracers: Vec<TracerAccel>,
     /// `None` until [`Self::set_static_geometry`] built it.
     scene: Option<SceneAccel>,
-    /// The structures were last built with no tracer in them.
-    tracer_empty: Cell<bool>,
+    /// Per frame in flight: its structures were last built with no tracer in
+    /// them.
+    tracer_empty: Vec<Cell<bool>>,
 }
 
 /// Geometry of the static scene: opaque triangles of one instance.
@@ -1036,8 +1061,8 @@ impl RtGeometry {
 
 impl RtPipeline {
     /// Create the RT pipeline, writing `storage_view` (the reflection image,
-    /// `rgba16f`, `STORAGE` usage), tracing `geometries` and the tracer in
-    /// `tracer`'s buffers.
+    /// `rgba16f`, `STORAGE` usage), tracing `geometries` and, for frame `i`
+    /// in flight, the tracer in `tracers[i]`'s buffers.
     ///
     /// # Errors
     /// A part fails to create or build; what was created is destroyed first.
@@ -1045,7 +1070,7 @@ impl RtPipeline {
         gpu: &mut GpuContext,
         storage_view: vk::ImageView,
         geometries: &[RtGeometry],
-        tracer: &TracerBuffers,
+        tracers: &[TracerBuffers],
     ) -> Result<Self, RenderError> {
         let accel_loader =
             ash::khr::acceleration_structure::Device::new(&gpu.instance, &gpu.device);
@@ -1074,10 +1099,27 @@ impl RtPipeline {
         };
 
         let created = objects
-            .create_descriptor_set(&gpu.device)
-            .and_then(|()| TracerAccel::new(&accel_loader, gpu, tracer));
-        let tracer_accel = match created {
-            Ok(tracer_accel) => tracer_accel,
+            .create_descriptor_sets(&gpu.device, tracers.len() as u32)
+            .and_then(|()| {
+                let mut made = Vec::with_capacity(tracers.len());
+                for buffers in tracers {
+                    match TracerAccel::new(&accel_loader, gpu, buffers) {
+                        Ok(accel) => made.push(accel),
+                        Err(e) => {
+                            for accel in made {
+                                // SAFETY: Just created; no GPU work has used it.
+                                unsafe {
+                                    accel.destroy(&accel_loader, &gpu.device, &mut gpu.allocator);
+                                }
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(made)
+            });
+        let tracer_accels = match created {
+            Ok(tracer_accels) => tracer_accels,
             Err(e) => {
                 // SAFETY: Just created; no GPU work has used them.
                 unsafe {
@@ -1096,14 +1138,14 @@ impl RtPipeline {
             raygen_region,
             miss_region,
             hit_region,
-            tracer: tracer_accel,
+            tracers: tracer_accels,
             scene: None,
-            tracer_empty: Cell::new(false),
+            tracer_empty: tracers.iter().map(|_| Cell::new(false)).collect(),
         };
-        // SAFETY: The set was just allocated and no command buffer uses it.
+        // SAFETY: The sets were just allocated and no command buffer uses them.
         unsafe {
             pipeline.bind_storage(&gpu.device, storage_view);
-            pipeline.bind_tracer_buffers(&gpu.device, tracer);
+            pipeline.bind_tracer_buffers(&gpu.device, tracers);
         }
         if let Err(e) = pipeline.set_static_geometry(gpu, geometries) {
             // SAFETY: No command buffer has traced with the pipeline. The
@@ -1185,38 +1227,48 @@ impl RtPipeline {
         Ok((sbt, [raygen_region, miss_region, hit_region]))
     }
 
-    /// Point the descriptor set's binding 1 at `storage_view`, e.g. after
+    /// Point binding 1 of every descriptor set at `storage_view`, e.g. after
     /// the reflection image was recreated at a new size.
     ///
     /// # Safety
-    /// No pending GPU work uses the descriptor set; `storage_view` is a live
+    /// No pending GPU work uses the descriptor sets; `storage_view` is a live
     /// view of an `rgba16f` image with `STORAGE` usage.
     pub(crate) unsafe fn bind_storage(&self, device: &ash::Device, storage_view: vk::ImageView) {
         let image_info = vk::DescriptorImageInfo::default()
             .image_view(storage_view)
             .image_layout(vk::ImageLayout::GENERAL);
         let image_infos = [image_info];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.objects.descriptor_set)
-            .dst_binding(1)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .image_info(&image_infos);
-        // SAFETY: The caller guarantees the view is live and the set unused.
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        let writes: Vec<_> = self
+            .objects
+            .descriptor_sets
+            .iter()
+            .map(|&set| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&image_infos)
+            })
+            .collect();
+        // SAFETY: The caller guarantees the view is live and the sets unused.
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
-    /// Record one ray-trace dispatch of `dispatch_w × dispatch_h` rays into
-    /// the bound storage image (smaller than the image for a sub-viewport
-    /// trace).
+    /// Record one ray-trace dispatch of `dispatch_w × dispatch_h` rays of
+    /// frame `frame` in flight into the bound storage image (smaller than the
+    /// image for a sub-viewport trace).
     ///
     /// # Safety
     /// `cb` is recording, outside a render pass; the storage image is in
     /// `GENERAL` layout; the dispatch, offset by the push constants' viewport
-    /// offset, lies within the storage image.
+    /// offset, lies within the storage image; `frame` indexes the tracers the
+    /// pipeline was created with, and [`Self::record_build`] for it recorded
+    /// before in `cb`.
     pub(crate) unsafe fn record_trace(
         &self,
         device: &ash::Device,
         cb: vk::CommandBuffer,
+        frame: usize,
         pc: &RtPushConstants,
         dispatch_w: u32,
         dispatch_h: u32,
@@ -1236,7 +1288,7 @@ impl RtPipeline {
                 vk::PipelineBindPoint::RAY_TRACING_KHR,
                 self.objects.pipeline_layout,
                 0,
-                &[self.objects.descriptor_set],
+                &[self.objects.descriptor_sets[frame]],
                 &[],
             );
 
@@ -1258,12 +1310,12 @@ impl RtPipeline {
     // ── Acceleration structures ──
 
     /// Build the structures of `geometries`, once, and the instances and
-    /// top-level structure over them and the tracer, replacing the ones
-    /// built before. Waits for the device to go idle first.
+    /// top-level structure over them and each frame's tracer, replacing the
+    /// ones built before. Waits for the device to go idle first.
     ///
     /// # Errors
     /// The wait or a build fails. The old structures are destroyed by then
-    /// and the descriptor set may name a destroyed top-level structure, so
+    /// and the descriptor sets may name a destroyed top-level structure, so
     /// the pipeline must not trace again; destroy it, which also frees what
     /// the failed build created.
     pub(crate) fn set_static_geometry(
@@ -1280,75 +1332,104 @@ impl RtPipeline {
             unsafe { old.destroy(&self.accel_loader, &gpu.device, &mut gpu.allocator) };
         }
         let scene = self.scene.insert(SceneAccel::default());
-        scene.build(&self.accel_loader, gpu, geometries, &self.tracer)?;
-        let Some(tlas) = &scene.tlas else {
-            return Ok(());
-        };
-        let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
-            .acceleration_structures(std::slice::from_ref(&tlas.accel.accel));
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.objects.descriptor_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-            .descriptor_count(1)
-            .push_next(&mut as_write_info);
-        // SAFETY: The device is idle, so no command buffer uses the set; the
-        // structure is live.
-        unsafe { gpu.device.update_descriptor_sets(&[write], &[]) };
-        // The new top-level structure is not built yet.
-        self.tracer_empty.set(false);
+        scene.build(&self.accel_loader, gpu, geometries, &self.tracers)?;
+        let accels: Vec<vk::AccelerationStructureKHR> =
+            scene.frames.iter().map(|f| f.tlas.accel.accel).collect();
+        let mut infos: Vec<_> = accels
+            .iter()
+            .map(|accel| {
+                vk::WriteDescriptorSetAccelerationStructureKHR::default()
+                    .acceleration_structures(std::slice::from_ref(accel))
+            })
+            .collect();
+        let writes: Vec<_> = infos
+            .iter_mut()
+            .zip(&self.objects.descriptor_sets)
+            .map(|(info, &set)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                    .descriptor_count(1)
+                    .push_next(info)
+            })
+            .collect();
+        // SAFETY: The device is idle, so no command buffer uses the sets; the
+        // structures are live.
+        unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
+        // The new top-level structures are not built yet.
+        for empty in &self.tracer_empty {
+            empty.set(false);
+        }
         Ok(())
     }
 
-    /// Point the descriptor set's bindings 2 and 3 at the frame buffers the
-    /// tracer's tube and centre line are read from.
+    /// Point bindings 2 and 3 of frame `i`'s descriptor set at the buffers
+    /// the tracer's tube and centre line of `buffers[i]` are read from.
     ///
     /// # Safety
-    /// No pending GPU work uses the descriptor set; the buffers are live and
-    /// outlive the pipeline's use of the set.
-    unsafe fn bind_tracer_buffers(&self, device: &ash::Device, buffers: &TracerBuffers) {
-        let tube = [vk::DescriptorBufferInfo::default()
-            .buffer(buffers.tube)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
-        let line = [vk::DescriptorBufferInfo::default()
-            .buffer(buffers.line)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.objects.descriptor_set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&tube),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.objects.descriptor_set)
-                .dst_binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&line),
-        ];
-        // SAFETY: The caller guarantees the set is unused and the buffers live.
+    /// No pending GPU work uses the descriptor sets; the buffers are live and
+    /// outlive the pipeline's use of the sets.
+    unsafe fn bind_tracer_buffers(&self, device: &ash::Device, buffers: &[TracerBuffers]) {
+        let infos: Vec<_> = buffers
+            .iter()
+            .map(|buffers| {
+                (
+                    [vk::DescriptorBufferInfo::default()
+                        .buffer(buffers.tube)
+                        .offset(0)
+                        .range(vk::WHOLE_SIZE)],
+                    [vk::DescriptorBufferInfo::default()
+                        .buffer(buffers.line)
+                        .offset(0)
+                        .range(vk::WHOLE_SIZE)],
+                )
+            })
+            .collect();
+        let writes: Vec<_> = infos
+            .iter()
+            .zip(&self.objects.descriptor_sets)
+            .flat_map(|((tube, line), &set)| {
+                [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(tube),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(3)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(line),
+                ]
+            })
+            .collect();
+        // SAFETY: The caller guarantees the sets are unused and the buffers live.
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
-    /// Record the rebuild of the tracer's structures from the first
+    /// Record the rebuild of frame `frame`'s tracer structures from the first
     /// `tube_vertices` vertices of the frame's glow buffer and the first
-    /// `line_vertices` of its line buffer, and of the top-level structure,
-    /// so the next trace sees them. Does nothing while the structures
-    /// already hold no tracer and there is still none.
+    /// `line_vertices` of its line buffer, and of its top-level structure, so
+    /// the next trace of `frame` sees them. Does nothing while the frame's
+    /// structures already hold no tracer and there is still none.
     ///
-    /// The builds are ordered after every earlier trace and build, so frames
-    /// in flight share the structures.
+    /// Nothing else uses what the builds write: the frame's own structures
+    /// and scratch buffers were last used by the frame that held `frame`
+    /// before, which its fence has finished.
     ///
     /// # Safety
-    /// `cb` is recording, outside a render pass. The frame buffers are live
-    /// and hold those vertices, and the line AABB buffer the segments' bounds
-    /// ([`line_aabbs`]). The command buffer is submitted before the next
-    /// call that skips the rebuild.
+    /// `cb` is recording, outside a render pass, and is the next submission
+    /// to use `frame`'s structures, after the fence of `frame`'s previous use
+    /// was waited on. `frame` indexes the tracers the pipeline was created
+    /// with. The frame buffers are live and hold those vertices, and the line
+    /// AABB buffer the segments' bounds ([`line_aabbs`]). The command buffer
+    /// is submitted before the next call for `frame` that skips the rebuild.
     pub(crate) unsafe fn record_build(
         &self,
         device: &ash::Device,
         cb: vk::CommandBuffer,
+        frame: usize,
         tube_vertices: u32,
         line_vertices: u32,
     ) {
@@ -1356,12 +1437,13 @@ impl RtPipeline {
         let Some(scene) = &self.scene else {
             return;
         };
-        let Some(tlas) = &scene.tlas else {
+        let Some(tlas) = scene.frames.get(frame).map(|f| &f.tlas) else {
             return;
         };
-        if empty && self.tracer_empty.get() {
+        if empty && self.tracer_empty[frame].get() {
             return;
         }
+        let tracer = &self.tracers[frame];
         let loader = &self.accel_loader;
         let build = vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR;
         let read = vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR;
@@ -1371,18 +1453,8 @@ impl RtPipeline {
         // buffers the builds read; the structures live in `self`, and the
         // barriers order each build after the work that used what it writes.
         unsafe {
-            // Earlier frames' traces read the structures and their builds
-            // wrote them and the scratch buffers.
-            memory_barrier(
-                device,
-                cb,
-                build | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-                read | write,
-                build,
-                read | write,
-            );
-            self.tracer.tube.record_build(loader, cb, tube_vertices / 3);
-            self.tracer.line.record_build(loader, cb, line_vertices / 2);
+            tracer.tube.record_build(loader, cb, tube_vertices / 3);
+            tracer.line.record_build(loader, cb, line_vertices / 2);
             // The top-level build reads the bottom-level structures.
             memory_barrier(device, cb, build, write, build, read);
             tlas.record_build(loader, cb, scene.instance_count);
@@ -1396,7 +1468,7 @@ impl RtPipeline {
                 read,
             );
         }
-        self.tracer_empty.set(empty);
+        self.tracer_empty[frame].set(empty);
     }
 
     /// Destroy acceleration structures and their backing resources.
@@ -1422,7 +1494,9 @@ impl RtPipeline {
         // SAFETY: No resource is in use (caller guarantees device idle).
         unsafe {
             self.destroy_accel_structures(device, allocator);
-            self.tracer.destroy(&self.accel_loader, device, allocator);
+            for tracer in self.tracers.drain(..) {
+                tracer.destroy(&self.accel_loader, device, allocator);
+            }
 
             // SBT
             self.sbt.destroy(device, allocator);

@@ -28,6 +28,13 @@ pub struct OffscreenRenderer {
 /// Offscreen image format (RGBA8 sRGB for correct gamma in PNG output).
 const OFFSCREEN_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
+/// `render` waits for its frame to finish, so one frame is in flight and the
+/// recorder needs one set of per-frame resources.
+const FRAMES_IN_FLIGHT: usize = 1;
+
+/// The frame in flight `render` records.
+const FRAME: usize = 0;
+
 impl OffscreenRenderer {
     /// Create a `width` × `height` renderer of the range `grid_config`, with
     /// the ball on the tee and no HUD.
@@ -56,6 +63,7 @@ impl OffscreenRenderer {
             vk::Extent2D { width, height },
             grid_config,
             rt,
+            FRAMES_IN_FLIGHT,
         )?;
 
         let target = match OffscreenTarget::new(
@@ -189,7 +197,7 @@ impl OffscreenRenderer {
 
             // Scene, reflections and HUD; leaves the image in TRANSFER_SRC_OPTIMAL.
             self.recorder
-                .record_frame(device, self.command_buffer, &frame_target, camera);
+                .record_frame(device, self.command_buffer, &frame_target, camera, FRAME);
 
             // Barrier: HUD pass output -> transfer read
             let barrier = vk::ImageMemoryBarrier::default()

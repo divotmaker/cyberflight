@@ -86,6 +86,9 @@ pub(crate) struct ReflectionFrame<'a> {
     pub(crate) overlay: vk::Framebuffer,
     /// Extent of the colour image.
     pub(crate) extent: vk::Extent2D,
+    /// The frame in flight: which of the ray tracer's per-frame structures
+    /// this frame builds and traces.
+    pub(crate) frame: usize,
     /// Trace the reflections (when a ray tracer is available) rather than
     /// mirror them.
     pub(crate) ray_traced: bool,
@@ -135,8 +138,9 @@ impl Reflections {
     /// Create the reflections for an `extent` frame of the floor of `grid`
     /// and the tee box of `tee`, showing the ball on the tee, composited onto
     /// a `color_format` target. The raster mirror is always there; given the
-    /// `tracer` buffers, so is the ray tracer, unless it fails to set up (it
-    /// says so on stderr and the mirror remains).
+    /// `tracers` buffers (one set per frame in flight, not empty), so is the
+    /// ray tracer, unless it fails to set up (it says so on stderr and the
+    /// mirror remains).
     ///
     /// # Errors
     /// The image, the composite or the mirror fails to create; what was
@@ -147,7 +151,7 @@ impl Reflections {
         extent: vk::Extent2D,
         grid: &GridConfig,
         tee: &TeeBox,
-        tracer: Option<&TracerBuffers>,
+        tracers: Option<&[TracerBuffers]>,
     ) -> Result<Self, RenderError> {
         let target = create_target(&gpu.device, &mut gpu.allocator, extent)?;
         let composite = match CompositePass::new(&gpu.device, color_format, target.view()) {
@@ -177,9 +181,9 @@ impl Reflections {
                 return Err(e);
             }
         };
-        let rt = tracer.and_then(|tracer| {
+        let rt = tracers.and_then(|tracers| {
             let geometries = build_scene_geometry(grid, tee);
-            match RtPipeline::new(gpu, target.view(), &geometries, tracer) {
+            match RtPipeline::new(gpu, target.view(), &geometries, tracers) {
                 Ok(rt) => Some(rt),
                 Err(e) => {
                     eprintln!("RT setup failed, using mirror reflections: {e}");
@@ -247,9 +251,10 @@ impl Reflections {
     /// # Safety
     /// `cb` is recording, outside a render pass; the buffers of
     /// `frame.tracer` are live and hold its vertices (and, with ray tracing,
-    /// the line AABBs of its centre line); the colour image
-    /// is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image extent equals
-    /// `frame.extent` and every view lies within it. Afterwards the
+    /// the line AABBs of its centre line); `frame.frame` is the frame in
+    /// flight that owns those buffers and whose fence was waited on; the
+    /// colour image is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image
+    /// extent equals `frame.extent` and every view lies within it. Afterwards the
     /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the colour
     /// image still in `COLOR_ATTACHMENT_OPTIMAL`.
     pub(crate) unsafe fn record(
@@ -263,7 +268,7 @@ impl Reflections {
         unsafe {
             match &self.rt {
                 Some(rt) if frame.ray_traced => {
-                    self.record_trace(rt, device, cb, frame.views, frame.tracer);
+                    self.record_trace(rt, device, cb, frame);
                 }
                 _ => self.mirror.record(
                     device,
@@ -290,8 +295,8 @@ impl Reflections {
         )
     }
 
-    /// Rebuild `rt`'s structures for `tracer`, then trace each of `views`
-    /// into the reflection image.
+    /// Rebuild `rt`'s structures of `frame.frame` for `frame.tracer`, then
+    /// trace each of `frame.views` into the reflection image.
     ///
     /// # Safety
     /// As [`Self::record`].
@@ -300,8 +305,7 @@ impl Reflections {
         rt: &RtPipeline,
         device: &ash::Device,
         cb: vk::CommandBuffer,
-        views: &[TraceView],
-        tracer: &MirrorTracer,
+        frame: &ReflectionFrame<'_>,
     ) {
         let storage = self.target.image();
         let subresource_range = vk::ImageSubresourceRange::default()
@@ -314,7 +318,13 @@ impl Reflections {
         // SAFETY: The caller guarantees the command buffer and image states
         // and the tracer's buffers.
         unsafe {
-            rt.record_build(device, cb, tracer.tube, tracer.line);
+            rt.record_build(
+                device,
+                cb,
+                frame.frame,
+                frame.tracer.tube,
+                frame.tracer.line,
+            );
 
             // Storage image: UNDEFINED → GENERAL. The transition is a write,
             // so it waits for what last used the image: the composite
@@ -337,7 +347,7 @@ impl Reflections {
                     .subresource_range(subresource_range)],
             );
 
-            for (i, view) in views.iter().enumerate() {
+            for (i, view) in frame.views.iter().enumerate() {
                 if i > 0 {
                     // The previous trace finishes writing before the next one.
                     device.cmd_pipeline_barrier(
@@ -353,7 +363,14 @@ impl Reflections {
                     );
                 }
                 let pc = self.rt_push_constants(view);
-                rt.record_trace(device, cb, &pc, view.extent.width, view.extent.height);
+                rt.record_trace(
+                    device,
+                    cb,
+                    frame.frame,
+                    &pc,
+                    view.extent.width,
+                    view.extent.height,
+                );
             }
 
             // Storage image: GENERAL → SHADER_READ_ONLY_OPTIMAL for the composite.
