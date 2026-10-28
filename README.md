@@ -54,9 +54,10 @@ On Linux, winit picks Wayland or X11; set `CYBERFLIGHT_X11=1` to force X11.
 
 ### Streaming
 
-`--stream` renders headless (no window, no ray tracing) and streams H.264 through
-[ffmpeg](https://ffmpeg.org/), which must be on `PATH`. It uses NVENC when a test encode
-succeeds and libx264 otherwise.
+`--stream` renders headless (no window) and streams H.264 through
+[ffmpeg](https://ffmpeg.org/), which must be on `PATH`. Like the window, it draws ray-traced
+floor reflections when the GPU supports Vulkan ray tracing and rasterizes otherwise. It uses
+NVENC when a test encode succeeds and libx264 otherwise.
 
 ```bash
 cyberflight --stream                                # UDP to 127.0.0.1:5004
@@ -87,8 +88,11 @@ Compiled SPIR-V shaders are checked in. After editing a shader in
 
 ### Screenshots
 
-The `screenshot` example renders a fixed set of views headless (needs a Vulkan GPU), and
-`cf-test` compares two sets, so a change can be checked for visual differences:
+The `screenshot` example renders a fixed set of views headless (needs a Vulkan GPU): the hero
+shot with chase camera and HUD, the empty range, a 7-iron from five views (one with the HUD),
+ray-traced versions of the range and four of the 7-iron views on GPUs that ray-trace, and
+two frames (in flight, then idle) through the calls `--stream` makes. `cf-test` compares two
+sets, so a change can be checked for visual differences:
 
 ```bash
 cargo run --release -p cyberflight --example screenshot -- --out before
