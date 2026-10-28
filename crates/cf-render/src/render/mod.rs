@@ -88,8 +88,14 @@ impl Renderer {
             Self::create_overlay_framebuffers(&gpu.device, &swapchain, pipeline.hud_pass)?;
 
         let tee = TeeBox::default();
-        let geometry =
-            SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid_config, &tee, None)?;
+        let geometry = SceneGeometry::new(
+            &gpu.device,
+            &mut gpu.allocator,
+            grid_config,
+            &tee,
+            None,
+            gpu.wide_lines,
+        )?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 

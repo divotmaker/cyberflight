@@ -45,11 +45,14 @@ pub(crate) struct SceneGeometry {
     green_edge: Option<GreenEdge>,
     /// The snapshot's trail core, when it has one.
     snapshot_trail_line: Option<(HostBuffer, u32)>,
+    /// Width of every trail core line: 2 px where wide lines work, else 1 px.
+    trail_line_width: f32,
 }
 
 impl SceneGeometry {
     /// Upload the grid of `grid`, the tee box of `tee` and its ball: the
-    /// ball on the tee, or `snapshot`'s ball and trail. No green.
+    /// ball on the tee, or `snapshot`'s ball and trail. No green. Trail
+    /// cores are drawn 2 px wide when `wide_lines` is enabled on the device.
     ///
     /// # Errors
     /// An upload fails; what was uploaded is freed first.
@@ -59,6 +62,7 @@ impl SceneGeometry {
         grid: &GridConfig,
         tee: &TeeBox,
         snapshot: Option<&Snapshot<'_>>,
+        wide_lines: bool,
     ) -> Result<Self, RenderError> {
         let grid_verts = generate_grid_vertices(grid);
         let tee_fill = generate_tee_fill(tee);
@@ -114,6 +118,7 @@ impl SceneGeometry {
             tee_glow_count: glow.len() as u32,
             green_edge: None,
             snapshot_trail_line: None,
+            trail_line_width: if wide_lines { 2.0 } else { 1.0 },
         };
         if !trail_line.is_empty() {
             match HostBuffer::with_data(
@@ -161,8 +166,8 @@ impl SceneGeometry {
     }
 
     /// Draw the scene: grid, green edge, tee box; then, with the ball on
-    /// the tee, the snapshot's trail core (`trail_line_width` px), the glow
-    /// and the ball; then `frame`'s flights.
+    /// the tee, the snapshot's trail core, the glow and the ball; then
+    /// `frame`'s flights.
     ///
     /// # Safety
     /// Inside a scene pass of `pipes`, with viewport and scissor set.
@@ -173,7 +178,6 @@ impl SceneGeometry {
         pipes: &ScenePipelines,
         frame: &FrameResources,
         view_proj: [[f32; 4]; 4],
-        trail_line_width: f32,
     ) {
         let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let pc_cyan = GridPushConstants {
@@ -218,7 +222,7 @@ impl SceneGeometry {
                 // Snapshot trail core (LINE_LIST, magenta)
                 if let Some((buffer, count)) = &self.snapshot_trail_line {
                     device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.line);
-                    device.cmd_set_line_width(cb, trail_line_width);
+                    device.cmd_set_line_width(cb, self.trail_line_width);
                     device.cmd_bind_vertex_buffers(cb, 0, &[buffer.handle()], &[0]);
                     push_constants(device, cb, pipes.layout, stages, &pc_magenta);
                     device.cmd_draw(cb, *count, 1, 0, 0);
@@ -245,7 +249,7 @@ impl SceneGeometry {
             }
 
             // In-flight trails, glows and balls (none while the ball is on the tee).
-            frame.draw_flights(device, cb, pipes, view_proj, trail_line_width);
+            frame.draw_flights(device, cb, pipes, view_proj, self.trail_line_width);
         }
     }
 

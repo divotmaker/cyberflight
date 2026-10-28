@@ -77,8 +77,14 @@ impl OffscreenRenderer {
         )?;
 
         let tee = TeeBox::default();
-        let geometry =
-            SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid_config, &tee, None)?;
+        let geometry = SceneGeometry::new(
+            &gpu.device,
+            &mut gpu.allocator,
+            grid_config,
+            &tee,
+            None,
+            gpu.wide_lines,
+        )?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
@@ -181,6 +187,7 @@ impl OffscreenRenderer {
             grid_config,
             &tee,
             Some(&snapshot),
+            gpu.wide_lines,
         )?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
@@ -294,8 +301,14 @@ impl OffscreenRenderer {
         )?;
 
         // Tee box + ball, on the tee or at the snapshot's flight position.
-        let geometry =
-            SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid_config, tee, snapshot)?;
+        let geometry = SceneGeometry::new(
+            &gpu.device,
+            &mut gpu.allocator,
+            grid_config,
+            tee,
+            snapshot,
+            gpu.wide_lines,
+        )?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
@@ -354,7 +367,6 @@ impl OffscreenRenderer {
                 &self.pipeline,
                 &self.frame,
                 view_proj,
-                1.0,
             );
         }
     }

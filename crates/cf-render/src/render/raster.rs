@@ -126,17 +126,10 @@ impl Renderer {
     /// # Safety
     /// Must be called within an active scene pass.
     unsafe fn draw_scene_geometry(&self, cb: vk::CommandBuffer, view_proj: [[f32; 4]; 4]) {
-        let trail_line_width = if self.gpu.wide_lines { 2.0 } else { 1.0 };
         // SAFETY: The caller guarantees an active scene pass.
         unsafe {
-            self.geometry.draw(
-                &self.gpu.device,
-                cb,
-                &self.pipeline,
-                &self.frame,
-                view_proj,
-                trail_line_width,
-            );
+            self.geometry
+                .draw(&self.gpu.device, cb, &self.pipeline, &self.frame, view_proj);
         }
     }
 }
