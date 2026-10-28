@@ -35,9 +35,21 @@ pub(crate) fn flight_trail_tube(flight: &FlightRenderData, tee: &TeeBox) -> Vec<
     )
 }
 
+/// The tracer's centre line of `flight` (LINE_LIST): the segments both the
+/// raster pass and the ray-traced reflections draw. Empty without at least
+/// two trail points.
+pub(crate) fn flight_trail_line(flight: &FlightRenderData) -> Vec<GridVertex> {
+    generate_trail_line(
+        &flight.trail_points,
+        flight.current_time,
+        DEFAULT_TRAIL_LIFETIME,
+    )
+}
+
 /// Build the raster geometry of `flights` into `out`'s flight vertices: per
 /// flight the ball and its glow, centred one ball radius above `ball_pos`,
-/// and the trail's tube ([`flight_trail_tube`]) and core line. With no
+/// and the trail's tube ([`flight_trail_tube`]) and centre line
+/// ([`flight_trail_line`]). With no
 /// flight, the ball is on the tee.
 pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &mut FrameContent) {
     let (rings, segments) = FLIGHT_BALL_MESH;
@@ -57,11 +69,7 @@ pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &
             segments,
         ));
         out.flight_glows.extend(flight_trail_tube(flight, tee));
-        out.flight_lines.extend(generate_trail_line(
-            &flight.trail_points,
-            flight.current_time,
-            DEFAULT_TRAIL_LIFETIME,
-        ));
+        out.flight_lines.extend(flight_trail_line(flight));
     }
 }
 

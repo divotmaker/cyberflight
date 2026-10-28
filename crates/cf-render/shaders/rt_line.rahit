@@ -1,0 +1,32 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Any-hit of the tracer's centre line (rt_line.rint): adds the line's light
+// to the payload, as rt_trail.rahit does for the tube, and ignores the hit.
+
+layout(set = 0, binding = 3, std430) readonly buffer LineVertices {
+    vec4 vertices[]; // xyz = position, w = fade
+} line;
+
+// rgb = summed light; a = summed light × world height.
+layout(location = 0) rayPayloadInEXT vec4 payload;
+
+// Written by rt_line.rint.
+struct LineHit {
+    float s;
+    float coverage;
+};
+hitAttributeEXT LineHit hit;
+
+const vec3 MAGENTA = vec3(1.0, 0.0, 1.0);
+
+void main() {
+    int i = 2 * gl_PrimitiveID;
+    float fade = mix(line.vertices[i].w, line.vertices[i + 1].w, hit.s);
+
+    // The raster fragment shader's alpha, (1 - fade)², under the line's edge.
+    float alpha = (1.0 - fade) * (1.0 - fade) * hit.coverage;
+    float height = gl_WorldRayOriginEXT.y + gl_HitTEXT * gl_WorldRayDirectionEXT.y;
+    payload += vec4(MAGENTA * alpha, alpha * height);
+    ignoreIntersectionEXT;
+}

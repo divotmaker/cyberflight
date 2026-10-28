@@ -12,7 +12,7 @@ use cf_scene::tee::{TEE_ELEVATION, TeeBox};
 use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::flight::{FlightRenderData, flight_trail_tube};
+use crate::flight::{FlightRenderData, flight_trail_line, flight_trail_tube};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::{RtGeometry, RtPipeline, RtPushConstants};
 
@@ -23,44 +23,52 @@ pub(crate) struct RtSceneState {
     ball_centre: Vec3,
     /// The tracer tube's triangles: those the raster pass draws.
     trail: Vec<GridVertex>,
+    /// The tracer's centre line segments: those the raster pass draws.
+    line: Vec<GridVertex>,
 }
 
 impl RtSceneState {
-    pub(crate) fn new(ball_centre: Vec3, trail: &[GridVertex]) -> Self {
+    pub(crate) fn new(ball_centre: Vec3, trail: &[GridVertex], line: &[GridVertex]) -> Self {
         Self {
             ball_centre,
             trail: trail.to_vec(),
+            line: line.to_vec(),
         }
     }
 
     /// The ball resting on `tee`'s tee box, no trail.
     pub(crate) fn on_tee(tee: &TeeBox) -> Self {
-        Self::new(Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0), &[])
+        Self::new(
+            Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0),
+            &[],
+            &[],
+        )
     }
 
     /// The newest of `flights` (the one the HUD and chase camera follow):
-    /// its ball, one radius above `ball_pos`, and its tracer tube. With no
+    /// its ball, one radius above `ball_pos`, and its tracer. With no
     /// flight, the ball on the tee.
     pub(crate) fn from_flights(flights: &[FlightRenderData], tee: &TeeBox) -> Self {
         match flights.last() {
             Some(flight) => Self::new(
                 flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0),
                 &flight_trail_tube(flight, tee),
+                &flight_trail_line(flight),
             ),
             None => Self::on_tee(tee),
         }
     }
 
     /// The acceleration-structure geometry: the floor of `grid`, the tee
-    /// box of `tee` and the tracer tube.
+    /// box of `tee` and the tracer.
     fn geometry(&self, grid: &GridConfig, tee: &TeeBox) -> Vec<RtGeometry> {
-        build_scene_geometry(grid, tee, &self.trail)
+        build_scene_geometry(grid, tee, &self.trail, &self.line)
     }
 
     /// Whether both states build the same acceleration structures: the same
-    /// tracer tube. The ball is a push constant, not geometry.
+    /// tracer. The ball is a push constant, not geometry.
     fn same_geometry(&self, other: &Self) -> bool {
-        self.trail == other.trail
+        self.trail == other.trail && self.line == other.line
     }
 
     /// Push constants for tracing `view`.
@@ -304,6 +312,7 @@ mod tests {
             Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0)
         );
         assert!(state.trail.is_empty());
+        assert!(state.line.is_empty());
     }
 
     #[test]
@@ -319,6 +328,7 @@ mod tests {
         );
         assert!(!state.trail.is_empty());
         assert_eq!(state.trail, flight_trail_tube(&newest, &tee));
+        assert_eq!(state.line, flight_trail_line(&newest));
     }
 
     #[test]
@@ -344,8 +354,8 @@ mod tests {
             ..GridConfig::default()
         };
         let built = state.geometry(&grid, &tee);
-        let expected = build_scene_geometry(&grid, &tee, &state.trail);
-        let default_floor = &build_scene_geometry(&GridConfig::default(), &tee, &[])[0];
+        let expected = build_scene_geometry(&grid, &tee, &state.trail, &state.line);
+        let default_floor = &build_scene_geometry(&GridConfig::default(), &tee, &[], &[])[0];
         assert_eq!(built.len(), expected.len());
         for (b, e) in built.iter().zip(&expected) {
             assert_eq!(b.positions, e.positions);
@@ -356,17 +366,19 @@ mod tests {
 
     #[test]
     fn only_the_tube_is_geometry() {
-        let a = RtSceneState::new(Vec3::Y, &tube(1.0));
-        let moved = RtSceneState::new(Vec3::X, &tube(1.0));
-        let other = RtSceneState::new(Vec3::Y, &tube(2.0));
+        let a = RtSceneState::new(Vec3::Y, &tube(1.0), &tube(1.0)[..2]);
+        let moved = RtSceneState::new(Vec3::X, &tube(1.0), &tube(1.0)[..2]);
+        let other_tube = RtSceneState::new(Vec3::Y, &tube(2.0), &tube(1.0)[..2]);
+        let other_line = RtSceneState::new(Vec3::Y, &tube(1.0), &tube(2.0)[..2]);
         assert!(a.same_geometry(&moved));
         assert_ne!(a, moved);
-        assert!(!a.same_geometry(&other));
+        assert!(!a.same_geometry(&other_tube));
+        assert!(!a.same_geometry(&other_line));
     }
 
     #[test]
     fn push_constants_follow_the_view() {
-        let state = RtSceneState::new(Vec3::new(1.0, 2.0, 3.0), &tube(1.0));
+        let state = RtSceneState::new(Vec3::new(1.0, 2.0, 3.0), &tube(1.0), &[]);
         let camera = Camera::driving_range();
         let view = TraceView {
             camera,

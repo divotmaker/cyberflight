@@ -17,6 +17,8 @@ pub struct RtPushConstants {
     pub inv_view_proj: [[f32; 4]; 4],
     /// Ball position (xyz), w = viewport Y offset in pixels.
     pub ball_pos: [f32; 4],
+    /// Size of one pixel per metre of ray path (the viewport's pixel angle).
+    pub pixel_size: f32,
 }
 
 impl RtPushConstants {
@@ -33,6 +35,9 @@ impl RtPushConstants {
     ) -> Self {
         let view = camera.view_matrix();
         let mut proj = camera.projection_matrix(viewport_size[0] / viewport_size[1]);
+        // y_axis.y = 1 / tan(fov_y / 2): the viewport spans 2 / y_axis.y per
+        // metre of distance over its height.
+        let pixel_size = 2.0 / (proj.y_axis.y * viewport_size[1]);
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
         let inv_view_proj = (proj * view).inverse();
 
@@ -50,6 +55,7 @@ impl RtPushConstants {
                 ball_center.z,
                 viewport_offset[1],
             ],
+            pixel_size,
         }
     }
 }
@@ -69,10 +75,18 @@ pub const GEOM_FLOOR: u32 = 0;
 pub const GEOM_TEE_BOX: u32 = 2;
 pub const GEOM_TRAIL: u32 = 3;
 pub const GEOM_TEE_BOX_BORDER: u32 = 4;
+pub const GEOM_TRAIL_LINE: u32 = 5;
+
+/// Largest radius of the tracer's centre line in metres, and the padding of
+/// each segment's AABB around its axis. Must equal `LINE_MAX_RADIUS` in
+/// `rt_line.rint`.
+pub const TRAIL_LINE_MAX_RADIUS: f32 = 1.0;
 
 /// Shader stages that read the push constants.
 const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
-    vk::ShaderStageFlags::RAYGEN_KHR.as_raw() | vk::ShaderStageFlags::CLOSEST_HIT_KHR.as_raw(),
+    vk::ShaderStageFlags::RAYGEN_KHR.as_raw()
+        | vk::ShaderStageFlags::CLOSEST_HIT_KHR.as_raw()
+        | vk::ShaderStageFlags::INTERSECTION_KHR.as_raw(),
 );
 
 /// Hit group of triangle geometry (`rt.rchit`), the SBT hit record offset of
@@ -80,6 +94,8 @@ const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
 const HIT_GROUP_TRIANGLES: u32 = 0;
 /// Hit group of the tracer tube's translucent triangles (`rt_trail.rahit`).
 const HIT_GROUP_GLOW: u32 = 1;
+/// Hit group of the tracer's centre line (`rt_line.rint` + `rt_line.rahit`).
+const HIT_GROUP_LINE: u32 = 2;
 
 /// A single acceleration structure (BLAS or TLAS) with its backing buffer.
 struct AccelStruct {
@@ -96,6 +112,8 @@ struct PipelineObjects {
     rmiss_module: vk::ShaderModule,
     rchit_module: vk::ShaderModule,
     trail_rahit_module: vk::ShaderModule,
+    line_rint_module: vk::ShaderModule,
+    line_rahit_module: vk::ShaderModule,
     descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -119,6 +137,10 @@ impl PipelineObjects {
         self.trail_rahit_module =
             load_shader(device, include_bytes!("../shaders/rt_trail.rahit.spv"))?;
 
+        self.line_rint_module = load_shader(device, include_bytes!("../shaders/rt_line.rint.spv"))?;
+        self.line_rahit_module =
+            load_shader(device, include_bytes!("../shaders/rt_line.rahit.spv"))?;
+
         // ── Descriptor set layout: TLAS, storage image, tracer vertices ──
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
@@ -138,6 +160,13 @@ impl PipelineObjects {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ANY_HIT_KHR),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(
+                    vk::ShaderStageFlags::INTERSECTION_KHR | vk::ShaderStageFlags::ANY_HIT_KHR,
+                ),
         ];
         let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
@@ -183,6 +212,14 @@ impl PipelineObjects {
                 .stage(vk::ShaderStageFlags::ANY_HIT_KHR)
                 .module(self.trail_rahit_module)
                 .name(entry_point),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::INTERSECTION_KHR)
+                .module(self.line_rint_module)
+                .name(entry_point),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::ANY_HIT_KHR)
+                .module(self.line_rahit_module)
+                .name(entry_point),
         ];
 
         let groups = [
@@ -215,6 +252,14 @@ impl PipelineObjects {
                 .closest_hit_shader(vk::SHADER_UNUSED_KHR)
                 .any_hit_shader(3)
                 .intersection_shader(vk::SHADER_UNUSED_KHR),
+            // Group 4: tracer centre line hit (HIT_GROUP_LINE): a procedural
+            // capsule per segment, any-hit only.
+            vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(vk::RayTracingShaderGroupTypeKHR::PROCEDURAL_HIT_GROUP)
+                .general_shader(vk::SHADER_UNUSED_KHR)
+                .closest_hit_shader(vk::SHADER_UNUSED_KHR)
+                .any_hit_shader(5)
+                .intersection_shader(4),
         ];
 
         let rt_create_info = vk::RayTracingPipelineCreateInfoKHR::default()
@@ -248,7 +293,7 @@ impl PipelineObjects {
                 .descriptor_count(1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1),
+                .descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
@@ -288,6 +333,8 @@ impl PipelineObjects {
             device.destroy_shader_module(self.rmiss_module, None);
             device.destroy_shader_module(self.rchit_module, None);
             device.destroy_shader_module(self.trail_rahit_module, None);
+            device.destroy_shader_module(self.line_rint_module, None);
+            device.destroy_shader_module(self.line_rahit_module, None);
         }
     }
 }
@@ -316,6 +363,9 @@ pub struct RtPipeline {
     // `rt_trail.rahit`, bound at binding 2; the BLAS is built from the same
     // buffer. One zero vertex without a trail.
     trail_vertices: Option<HostBuffer>,
+    // Tracer centre line vertices (segment pairs) read by `rt_line.rint` and
+    // `rt_line.rahit`, bound at binding 3. One zero vertex without a trail.
+    line_vertices: Option<HostBuffer>,
     // Instance buffer
     instance_buffer: Option<HostBuffer>,
 
@@ -337,12 +387,17 @@ pub enum RtPrimitive {
     /// and fade), the tracer tube. Rays pass through it; `rt_trail.rahit`
     /// adds the light of every triangle they cross.
     GlowTriangles,
+    /// Line segments as `GridVertex` pairs (packed f32x4: position and fade),
+    /// the tracer's centre line. Each segment is one AABB, padded by
+    /// [`TRAIL_LINE_MAX_RADIUS`], that `rt_line.rint` intersects as a
+    /// capsule and `rt_line.rahit` lights.
+    LineSegments,
 }
 
 /// Geometry for BLAS building.
 pub struct RtGeometry {
     /// Packed vertices: 3 floats each for [`RtPrimitive::Triangles`], 4 for
-    /// [`RtPrimitive::GlowTriangles`].
+    /// the other primitives.
     pub positions: Vec<f32>,
     /// How the positions form primitives.
     pub primitive: RtPrimitive,
@@ -354,15 +409,31 @@ pub struct RtGeometry {
 }
 
 impl RtGeometry {
-    /// Number of triangles.
+    /// Number of primitives: triangles or line segments.
     #[must_use]
     pub fn primitive_count(&self) -> u32 {
-        let floats_per_vertex = match self.primitive {
-            RtPrimitive::Triangles => 3,
-            RtPrimitive::GlowTriangles => 4,
+        let (floats_per_vertex, vertices_per_primitive) = match self.primitive {
+            RtPrimitive::Triangles => (3, 3),
+            RtPrimitive::GlowTriangles => (4, 3),
+            RtPrimitive::LineSegments => (4, 2),
         };
-        (self.positions.len() / floats_per_vertex / 3) as u32
+        (self.positions.len() / floats_per_vertex / vertices_per_primitive) as u32
     }
+}
+
+/// The AABB of each segment of `positions` (packed f32x4 vertex pairs,
+/// 8 floats per segment), its end points' bounds padded by `pad` on every
+/// side, as `VkAabbPositionsKHR` (min xyz, max xyz).
+fn line_aabbs(positions: &[f32], pad: f32) -> Vec<f32> {
+    let mut aabbs = Vec::with_capacity(positions.len() / 8 * 6);
+    for seg in positions.chunks_exact(8) {
+        let a = glam::Vec3::new(seg[0], seg[1], seg[2]);
+        let b = glam::Vec3::new(seg[4], seg[5], seg[6]);
+        let min = a.min(b) - glam::Vec3::splat(pad);
+        let max = a.max(b) + glam::Vec3::splat(pad);
+        aabbs.extend_from_slice(&[min.x, min.y, min.z, max.x, max.y, max.z]);
+    }
+    aabbs
 }
 
 impl RtPipeline {
@@ -429,6 +500,7 @@ impl RtPipeline {
             tlas: None,
             geometry_buffers: Vec::new(),
             trail_vertices: None,
+            line_vertices: None,
             instance_buffer: None,
             scratch_buffers: Vec::new(),
             storage,
@@ -447,11 +519,12 @@ impl RtPipeline {
         Ok(pipeline)
     }
 
-    /// The shader binding table of `pipeline`'s four groups (raygen, miss,
-    /// triangle hit, tracer hit), each handle at the start of a slot aligned as
-    /// `rt_props` requires, and the raygen, miss and hit regions. The hit
-    /// region holds both hit groups, indexed by the instances' SBT record
-    /// offset ([`HIT_GROUP_TRIANGLES`], [`HIT_GROUP_GLOW`]).
+    /// The shader binding table of `pipeline`'s five groups (raygen, miss,
+    /// triangle hit, tracer tube hit, tracer line hit), each handle at the
+    /// start of a slot aligned as `rt_props` requires, and the raygen, miss
+    /// and hit regions. The hit region holds the three hit groups, indexed by
+    /// the instances' SBT record offset ([`HIT_GROUP_TRIANGLES`],
+    /// [`HIT_GROUP_GLOW`], [`HIT_GROUP_LINE`]).
     fn create_sbt(
         gpu: &mut GpuContext,
         rt_loader: &ash::khr::ray_tracing_pipeline::Device,
@@ -464,7 +537,7 @@ impl RtPipeline {
         let aligned_handle_size = align_up(handle_size, handle_alignment);
         // Each SBT region's start address must be aligned to shaderGroupBaseAlignment.
         let region_stride = align_up(aligned_handle_size, base_alignment);
-        let group_count = 4u32;
+        let group_count = 5u32;
         let sbt_size = u64::from(region_stride) * u64::from(group_count);
 
         // SAFETY: Getting shader group handles.
@@ -510,7 +583,7 @@ impl RtPipeline {
         let hit_region = vk::StridedDeviceAddressRegionKHR {
             device_address: sbt_address + u64::from(region_stride) * 2,
             stride: u64::from(region_stride),
-            size: u64::from(region_stride) * 2,
+            size: u64::from(region_stride) * 3,
         };
         Ok((sbt, [raygen_region, miss_region, hit_region]))
     }
@@ -626,22 +699,17 @@ impl RtPipeline {
                 continue;
             }
 
-            // Triangle input buffer: the floor and tee box are opaque; the
-            // tracer's vertices double as the any-hit shader's storage buffer.
-            let (usage, stride, flags, name) = match geom.primitive {
-                RtPrimitive::Triangles => (
-                    vk::BufferUsageFlags::empty(),
-                    12, // 3 × f32, tightly packed
-                    vk::GeometryFlagsKHR::OPAQUE,
-                    "blas positions",
-                ),
-                RtPrimitive::GlowTriangles => (
+            // Input buffer: the floor and tee box are opaque triangles; the
+            // tracer's vertices (tube and centre line) double as the shaders'
+            // storage buffers.
+            let (usage, name) = match geom.primitive {
+                RtPrimitive::Triangles => (vk::BufferUsageFlags::empty(), "blas positions"),
+                RtPrimitive::GlowTriangles => {
+                    (vk::BufferUsageFlags::STORAGE_BUFFER, "rt tracer vertices")
+                }
+                RtPrimitive::LineSegments => (
                     vk::BufferUsageFlags::STORAGE_BUFFER,
-                    16, // GridVertex: 4 × f32
-                    // Each triangle's any-hit runs once, so each surface is
-                    // counted once.
-                    vk::GeometryFlagsKHR::NO_DUPLICATE_ANY_HIT_INVOCATION,
-                    "rt tracer vertices",
+                    "rt tracer line vertices",
                 ),
             };
             let vertex_buffer = HostBuffer::with_data(
@@ -654,27 +722,65 @@ impl RtPipeline {
                 name,
             )?;
             let vertex_addr = vertex_buffer.device_address(&gpu.device);
-            if geom.primitive == RtPrimitive::GlowTriangles {
-                if let Some(old) = self.trail_vertices.replace(vertex_buffer) {
-                    // SAFETY: Created by this build; no GPU work uses it.
-                    unsafe { old.destroy(&gpu.device, &mut gpu.allocator) };
+            let as_geometry = match geom.primitive {
+                RtPrimitive::Triangles | RtPrimitive::GlowTriangles => {
+                    let (stride, flags) = if geom.primitive == RtPrimitive::Triangles {
+                        (12, vk::GeometryFlagsKHR::OPAQUE) // 3 × f32, tightly packed
+                    } else {
+                        // GridVertex: 4 × f32. Each triangle's any-hit runs
+                        // once, so each surface is counted once.
+                        (16, vk::GeometryFlagsKHR::NO_DUPLICATE_ANY_HIT_INVOCATION)
+                    };
+                    let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                        .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                        .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: vertex_addr,
+                        })
+                        .vertex_stride(stride)
+                        .max_vertex(primitive_count * 3 - 1)
+                        .index_type(vk::IndexType::NONE_KHR);
+                    vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
+                        .flags(flags)
                 }
-            } else {
-                self.geometry_buffers.push(vertex_buffer);
+                RtPrimitive::LineSegments => {
+                    let aabb_buffer = HostBuffer::with_data(
+                        &gpu.device,
+                        &mut gpu.allocator,
+                        &line_aabbs(&geom.positions, TRAIL_LINE_MAX_RADIUS),
+                        vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                        "blas line aabbs",
+                    )?;
+                    let aabb_addr = aabb_buffer.device_address(&gpu.device);
+                    self.geometry_buffers.push(aabb_buffer);
+                    let aabbs = vk::AccelerationStructureGeometryAabbsDataKHR::default()
+                        .data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: aabb_addr,
+                        })
+                        .stride(24); // VkAabbPositionsKHR: 6 × f32
+                    vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::AABBS)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { aabbs })
+                        .flags(vk::GeometryFlagsKHR::NO_DUPLICATE_ANY_HIT_INVOCATION)
+                }
+            };
+            match geom.primitive {
+                RtPrimitive::Triangles => self.geometry_buffers.push(vertex_buffer),
+                RtPrimitive::GlowTriangles => {
+                    if let Some(old) = self.trail_vertices.replace(vertex_buffer) {
+                        // SAFETY: Created by this build; no GPU work uses it.
+                        unsafe { old.destroy(&gpu.device, &mut gpu.allocator) };
+                    }
+                }
+                RtPrimitive::LineSegments => {
+                    if let Some(old) = self.line_vertices.replace(vertex_buffer) {
+                        // SAFETY: Created by this build; no GPU work uses it.
+                        unsafe { old.destroy(&gpu.device, &mut gpu.allocator) };
+                    }
+                }
             }
-
-            let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
-                .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                    device_address: vertex_addr,
-                })
-                .vertex_stride(stride)
-                .max_vertex(primitive_count * 3 - 1)
-                .index_type(vk::IndexType::NONE_KHR);
-            let as_geometry = vk::AccelerationStructureGeometryKHR::default()
-                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
-                .flags(flags);
 
             let as_geometries = [as_geometry];
             let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
@@ -820,7 +926,8 @@ impl RtPipeline {
             //   Bit 0 (0x01): floor. Primary rays and trail continuation rays use
             //                 cull mask 0x01.
             //   Bit 1 (0x02): tee box border. No ray uses this bit.
-            //   Bit 2 (0x04): tracer. Floor reflection rays use cull mask 0x04.
+            //   Bit 2 (0x04): tracer tube and centre line. Floor reflection
+            //                 rays use cull mask 0x04.
             //   Bit 7 (0x80): tee box fill. No ray uses this bit.
             //
             // Tee box fill is excluded from all RT rays. At Y=0.001 it sits above
@@ -829,12 +936,13 @@ impl RtPipeline {
             let mask = match geom.geom_type {
                 GEOM_FLOOR => 0x01,
                 GEOM_TEE_BOX => 0x80, // invisible to all RT rays
-                GEOM_TRAIL => 0x04,
+                GEOM_TRAIL | GEOM_TRAIL_LINE => 0x04,
                 _ => 0x02, // tee box border
             };
             let hit_group = match geom.primitive {
                 RtPrimitive::Triangles => HIT_GROUP_TRIANGLES,
                 RtPrimitive::GlowTriangles => HIT_GROUP_GLOW,
+                RtPrimitive::LineSegments => HIT_GROUP_LINE,
             };
             instances.push(vk::AccelerationStructureInstanceKHR {
                 transform,
@@ -1027,8 +1135,8 @@ impl RtPipeline {
     }
 
     /// Build a BLAS per geometry and the TLAS over them, then point the
-    /// descriptor set's binding 0 at the TLAS and binding 2 at the tracer
-    /// vertices (one zero vertex without a trail). Each object is kept in `self`
+    /// descriptor set's binding 0 at the TLAS and bindings 2 and 3 at the
+    /// tracer's tube and line vertices (one zero vertex without a trail). Each object is kept in `self`
     /// as soon as it exists, so after a failure
     /// [`destroy_accel_structures`](Self::destroy_accel_structures) frees what
     /// was built.
@@ -1055,11 +1163,28 @@ impl RtPipeline {
                 self.trail_vertices.insert(vertices).handle()
             }
         };
+        let line_vertices = match &self.line_vertices {
+            Some(vertices) => vertices.handle(),
+            None => {
+                let vertices = HostBuffer::with_data(
+                    &gpu.device,
+                    &mut gpu.allocator,
+                    &[0.0f32; 4],
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    "rt tracer line vertices",
+                )?;
+                self.line_vertices.insert(vertices).handle()
+            }
+        };
 
         let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(std::slice::from_ref(&tlas_handle));
-        let buffer_infos = [vk::DescriptorBufferInfo::default()
+        let trail_infos = [vk::DescriptorBufferInfo::default()
             .buffer(trail_vertices)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let line_infos = [vk::DescriptorBufferInfo::default()
+            .buffer(line_vertices)
             .offset(0)
             .range(vk::WHOLE_SIZE)];
 
@@ -1074,7 +1199,12 @@ impl RtPipeline {
                 .dst_set(self.objects.descriptor_set)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&buffer_infos),
+                .buffer_info(&trail_infos),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.objects.descriptor_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&line_infos),
         ];
 
         // SAFETY: Updating descriptor set with the valid TLAS and vertex buffer.
@@ -1114,6 +1244,9 @@ impl RtPipeline {
                 buffer.destroy(device, allocator);
             }
             if let Some(buffer) = self.trail_vertices.take() {
+                buffer.destroy(device, allocator);
+            }
+            if let Some(buffer) = self.line_vertices.take() {
                 buffer.destroy(device, allocator);
             }
             for buffer in self.scratch_buffers.drain(..) {
@@ -1201,7 +1334,7 @@ mod tests {
     fn push_constants_size() {
         // The std430 push block in rt.rgen / rt.rchit, within the 128-byte
         // minimum guarantee.
-        assert_eq!(std::mem::size_of::<RtPushConstants>(), 96);
+        assert_eq!(std::mem::size_of::<RtPushConstants>(), 100);
     }
 
     #[test]
@@ -1229,6 +1362,14 @@ mod tests {
         assert_eq!(pc.ball_pos, [1.0, 2.0, 3.0, 34.0]);
     }
 
+    #[test]
+    fn pixel_size_is_the_pixel_angle() {
+        let camera = Camera::default();
+        let pc = RtPushConstants::new(&camera, [384.0, 1080.0], [0.0; 2], glam::Vec3::ZERO);
+        let expected = 2.0 * (camera.fov_y / 2.0).tan() / 1080.0;
+        assert!((pc.pixel_size - expected).abs() < 1e-9, "{}", pc.pixel_size);
+    }
+
     fn geometry(positions: &[f32], primitive: RtPrimitive) -> RtGeometry {
         RtGeometry {
             positions: positions.to_vec(),
@@ -1254,6 +1395,33 @@ mod tests {
             geometry(&[], RtPrimitive::GlowTriangles).primitive_count(),
             0
         );
+        assert_eq!(
+            geometry(&[0.0; 16], RtPrimitive::LineSegments).primitive_count(),
+            2
+        );
+        assert_eq!(
+            geometry(&[0.0; 4], RtPrimitive::LineSegments).primitive_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn line_aabbs_pad_each_segment() {
+        let aabbs = line_aabbs(
+            &[
+                0.0, 1.0, 2.0, 0.5, 3.0, -1.0, 2.0, 0.25, //
+                3.0, -1.0, 2.0, 0.25, 3.0, -1.0, 5.0, 0.0,
+            ],
+            0.5,
+        );
+        assert_eq!(
+            aabbs,
+            vec![
+                -0.5, -1.5, 1.5, 3.5, 1.5, 2.5, //
+                2.5, -1.5, 1.5, 3.5, -0.5, 5.5,
+            ]
+        );
+        assert!(line_aabbs(&[1.0, 2.0, 3.0, 0.0], 0.5).is_empty());
     }
 
     #[test]

@@ -1,0 +1,94 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Intersection of the tracer's centre line (cf-scene `generate_trail_line`):
+// a round capsule around each segment, never thinner on screen than the
+// raster line. Primitive i is the segment from line.vertices[2i] to
+// line.vertices[2i + 1], as the raster pass draws it.
+layout(set = 0, binding = 3, std430) readonly buffer LineVertices {
+    vec4 vertices[]; // xyz = position, w = fade
+} line;
+
+layout(push_constant) uniform PushConstants {
+    vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
+    mat4 inv_view_proj;
+    vec4 ball_pos;    // xyz = ball center, w = viewport Y offset (pixels)
+    float pixel_size; // size of one pixel per metre of ray path
+} pc;
+
+// What rt_line.rahit needs to colour the hit.
+struct LineHit {
+    float s;        // position along the segment, in [0, 1]
+    float coverage; // 1 at the axis, falling to 0 at the capsule's edge
+};
+hitAttributeEXT LineHit hit;
+
+// The line is two pixels wide: its radius is this many pixels (a pixel of
+// soft edge inside it, so the half-opacity width is two pixels).
+const float LINE_RADIUS_PX = 1.5;
+
+// Upper bound of the radius in metres. Must equal LINE_MAX_RADIUS in
+// rt_pipeline.rs: the segment AABBs are padded by it.
+const float LINE_MAX_RADIUS = 1.0;
+
+// Closest approach of the ray o + t·dir (dir unit length) to the segment
+// a → b: x = distance, y = ray parameter t, z = position s along the segment.
+vec3 closest_approach(vec3 o, vec3 dir, vec3 a, vec3 b) {
+    vec3 ab = b - a;
+    vec3 ao = o - a;
+    float len2 = dot(ab, ab);
+    float k = dot(ab, dir);
+    float denom = len2 - k * k; // |ab|² sin² of the angle to the ray
+    float s = denom > 1e-12 * len2 ? (dot(ab, ao) - k * dot(ao, dir)) / denom : 0.0;
+    s = clamp(s, 0.0, 1.0);
+    vec3 q = a + ab * s;
+    float t = dot(q - o, dir);
+    return vec3(length(o + dir * t - q), t, s);
+}
+
+// Ray-to-axis distance of segment i, or a large value if it does not exist.
+float segment_distance(int i, vec3 o, vec3 dir) {
+    if (i < 0 || 2 * i + 1 >= line.vertices.length()) {
+        return 1e30;
+    }
+    return closest_approach(o, dir, line.vertices[2 * i].xyz, line.vertices[2 * i + 1].xyz).x;
+}
+
+void main() {
+    int i = gl_PrimitiveID;
+    vec3 o = gl_ObjectRayOriginEXT;
+    vec3 dir = gl_ObjectRayDirectionEXT;
+
+    vec3 a = line.vertices[2 * i].xyz;
+    vec3 b = line.vertices[2 * i + 1].xyz;
+    vec3 dts = closest_approach(o, dir, a, b);
+    float d = dts.x;
+    float t_ray = dts.y;
+    if (t_ray < gl_RayTminEXT || t_ray > gl_RayTmaxEXT) {
+        return;
+    }
+
+    // Neighbouring segments' capsules overlap around the point they share.
+    // Only the segment the ray passes closest to reports a hit, so a bend
+    // is not counted twice.
+    if (i > 0 && line.vertices[2 * i - 1].xyz == a && d > segment_distance(i - 1, o, dir)) {
+        return;
+    }
+    if (2 * i + 2 < line.vertices.length() && line.vertices[2 * i + 2].xyz == b
+        && d > segment_distance(i + 1, o, dir)) {
+        return;
+    }
+
+    // A floor reflection's path from the camera is the camera-to-floor
+    // distance plus t_ray.
+    float pixel = pc.pixel_size * (distance(pc.camera_pos.xyz, o) + t_ray);
+    float radius = min(LINE_RADIUS_PX * pixel, LINE_MAX_RADIUS);
+    if (d >= radius) {
+        return;
+    }
+    float edge = clamp(pixel, 1e-6, radius);
+
+    hit.s = dts.z;
+    hit.coverage = 1.0 - smoothstep(radius - edge, radius, d);
+    reportIntersectionEXT(t_ray, 0u);
+}

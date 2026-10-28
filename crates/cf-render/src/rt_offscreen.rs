@@ -2,7 +2,8 @@ use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::{TeeBox, generate_tee_border, generate_tee_fill};
 
 use crate::rt_pipeline::{
-    GEOM_FLOOR, GEOM_TEE_BOX, GEOM_TEE_BOX_BORDER, GEOM_TRAIL, RtGeometry, RtPrimitive,
+    GEOM_FLOOR, GEOM_TEE_BOX, GEOM_TEE_BOX_BORDER, GEOM_TRAIL, GEOM_TRAIL_LINE, RtGeometry,
+    RtPrimitive,
 };
 
 // ── Scene geometry builders ──
@@ -21,12 +22,14 @@ pub fn grid_verts_to_positions(verts: &[cf_scene::grid::GridVertex]) -> Vec<f32>
 /// Build the full RT scene geometry from the driving range config.
 ///
 /// Ball reflections are computed analytically in the floor closest-hit shader
-/// (no ball geometry in the TLAS). The trail is `trail_tube`, the triangles
-/// the raster pass draws as the tracer (`generate_trail_tube`).
+/// (no ball geometry in the TLAS). The tracer is `trail_tube`, the triangles
+/// the raster pass draws (`generate_trail_tube`), and `trail_line`, the
+/// segments it draws as the centre line (`generate_trail_line`).
 pub fn build_scene_geometry(
     grid_config: &GridConfig,
     tee: &TeeBox,
     trail_tube: &[GridVertex],
+    trail_line: &[GridVertex],
 ) -> Vec<RtGeometry> {
     let mut geometries = Vec::new();
 
@@ -58,18 +61,30 @@ pub fn build_scene_geometry(
         transform: tee_box_transform,
     });
 
-    // Trail: the tracer tube, vertex for vertex (position and fade).
+    // The tracer, vertex for vertex (position and fade): the tube, and its
+    // centre line.
+    let packed = |verts: &[GridVertex]| -> Vec<f32> {
+        verts
+            .iter()
+            .flat_map(|v| {
+                let [x, y, z] = v.position;
+                [x, y, z, v.fade]
+            })
+            .collect()
+    };
     if !trail_tube.is_empty() {
         geometries.push(RtGeometry {
-            positions: trail_tube
-                .iter()
-                .flat_map(|v| {
-                    let [x, y, z] = v.position;
-                    [x, y, z, v.fade]
-                })
-                .collect(),
+            positions: packed(trail_tube),
             primitive: RtPrimitive::GlowTriangles,
             geom_type: GEOM_TRAIL,
+            transform: glam::Mat4::IDENTITY,
+        });
+    }
+    if !trail_line.is_empty() {
+        geometries.push(RtGeometry {
+            positions: packed(trail_line),
+            primitive: RtPrimitive::LineSegments,
+            geom_type: GEOM_TRAIL_LINE,
             transform: glam::Mat4::IDENTITY,
         });
     }
@@ -93,7 +108,7 @@ mod tests {
     fn trail_is_the_tube_vertex_for_vertex() {
         let grid = GridConfig::default();
         let tee = TeeBox::default();
-        let geometries = build_scene_geometry(&grid, &tee, &tube());
+        let geometries = build_scene_geometry(&grid, &tee, &tube(), &[]);
         let trail = geometries.last().unwrap();
         assert_eq!(trail.geom_type, GEOM_TRAIL);
         assert_eq!(trail.primitive, RtPrimitive::GlowTriangles);
@@ -106,7 +121,19 @@ mod tests {
             ]
         );
         assert_eq!(trail.primitive_count(), 1);
-        let without = build_scene_geometry(&grid, &tee, &[]);
+        let without = build_scene_geometry(&grid, &tee, &[], &[]);
         assert!(without.iter().all(|g| g.geom_type != GEOM_TRAIL));
+    }
+
+    #[test]
+    fn centre_line_is_the_segments_vertex_for_vertex() {
+        let grid = GridConfig::default();
+        let tee = TeeBox::default();
+        let geometries = build_scene_geometry(&grid, &tee, &[], &tube()[..2]);
+        let line = geometries.last().unwrap();
+        assert_eq!(line.geom_type, GEOM_TRAIL_LINE);
+        assert_eq!(line.primitive, RtPrimitive::LineSegments);
+        assert_eq!(line.positions, vec![0.0, 2.0, 3.0, 0.1, 1.0, 2.0, 3.0, 0.2]);
+        assert_eq!(line.primitive_count(), 1);
     }
 }
