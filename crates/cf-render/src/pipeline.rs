@@ -3,7 +3,7 @@ use ash::vk;
 use crate::error::RenderError;
 use crate::gpu::load_shader;
 
-/// Push constants for the grid pipeline.
+/// Push constants of the scene and HUD pipelines.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GridPushConstants {
@@ -13,91 +13,143 @@ pub struct GridPushConstants {
     pub color: [f32; 4],
 }
 
-/// Rasterization pipelines for the neon scene.
+/// The raster render passes and pipelines of the neon scene.
 ///
-/// Contains a LINE_LIST pipeline (grid) and two TRIANGLE_LIST pipelines
-/// (alpha-blended fills like the tee box and ball, and additive glow). All
-/// share the same render pass, layout, shaders, and vertex format.
-pub struct GridPipeline {
-    pub render_pass: vk::RenderPass,
-    pub pipeline_layout: vk::PipelineLayout,
-    /// LINE_LIST pipeline for grid lines.
-    pub pipeline: vk::Pipeline,
-    /// TRIANGLE_LIST pipeline for filled geometry (alpha blend).
-    pub fill_pipeline: vk::Pipeline,
-    /// TRIANGLE_LIST pipeline for glow effects (additive blend).
-    pub glow_pipeline: vk::Pipeline,
-    vert_module: vk::ShaderModule,
-    frag_module: vk::ShaderModule,
+/// The scene pass clears colour and depth and ends in
+/// `COLOR_ATTACHMENT_OPTIMAL`. The HUD pass loads the colour image, has no
+/// depth, and ends in the renderer's output layout. The scene pipelines
+/// (lines, alpha-blended fills, additive glow) belong to the scene pass;
+/// the depth-less HUD fill and line pipelines to the HUD pass. All share one
+/// layout, shaders and vertex format.
+pub struct ScenePipelines {
+    /// Colour CLEAR, `UNDEFINED` → `COLOR_ATTACHMENT_OPTIMAL`; depth CLEAR.
+    pub(crate) scene_pass: vk::RenderPass,
+    /// Colour LOAD, `COLOR_ATTACHMENT_OPTIMAL` → output layout; no depth.
+    pub(crate) hud_pass: vk::RenderPass,
+    /// [`GridPushConstants`] for the vertex and fragment stages.
+    pub(crate) layout: vk::PipelineLayout,
+    /// LINE_LIST, depth-tested (scene pass).
+    pub(crate) line: vk::Pipeline,
+    /// TRIANGLE_LIST, alpha blend, depth test + write (scene pass).
+    pub(crate) fill: vk::Pipeline,
+    /// TRIANGLE_LIST, additive blend, depth test (scene pass).
+    pub(crate) glow: vk::Pipeline,
+    /// TRIANGLE_LIST, alpha blend, no depth (HUD pass).
+    pub(crate) hud_fill: vk::Pipeline,
+    /// LINE_LIST, no depth (HUD pass).
+    pub(crate) hud_line: vk::Pipeline,
 }
 
-impl GridPipeline {
-    /// Create the grid rendering pipeline.
+impl ScenePipelines {
+    /// Create both passes and all five pipelines. `output_layout` is the
+    /// layout the HUD pass leaves the colour image in: `PRESENT_SRC_KHR`
+    /// for a swapchain, `TRANSFER_SRC_OPTIMAL` for readback.
     ///
-    /// `final_layout` controls the image layout after the render pass:
-    /// - `PRESENT_SRC_KHR` for windowed rendering
-    /// - `TRANSFER_SRC_OPTIMAL` for offscreen readback
+    /// # Errors
+    /// Any Vulkan object fails to create; what was created is destroyed first.
     pub fn new(
         device: &ash::Device,
         color_format: vk::Format,
         depth_format: vk::Format,
-        final_layout: vk::ImageLayout,
+        output_layout: vk::ImageLayout,
     ) -> Result<Self, RenderError> {
-        let render_pass =
-            Self::create_render_pass(device, color_format, depth_format, final_layout)?;
-        let vert_module = load_shader(device, include_bytes!("../shaders/grid.vert.spv"))?;
-        let frag_module = load_shader(device, include_bytes!("../shaders/grid.frag.spv"))?;
-        let pipeline_layout = Self::create_pipeline_layout(device)?;
-        let pipeline = Self::create_pipeline(
-            device,
-            render_pass,
-            pipeline_layout,
-            vert_module,
-            frag_module,
-            vk::PrimitiveTopology::LINE_LIST,
-            false,
-            false,
-            false,
-        )?;
-        let fill_pipeline = Self::create_pipeline(
-            device,
-            render_pass,
-            pipeline_layout,
-            vert_module,
-            frag_module,
-            vk::PrimitiveTopology::TRIANGLE_LIST,
-            false,
-            true,
-            true,
-        )?;
-        let glow_pipeline = Self::create_pipeline(
-            device,
-            render_pass,
-            pipeline_layout,
-            vert_module,
-            frag_module,
-            vk::PrimitiveTopology::TRIANGLE_LIST,
-            true,
-            true,
-            false,
-        )?;
+        let vert = load_shader(device, include_bytes!("../shaders/grid.vert.spv"))?;
+        let frag = match load_shader(device, include_bytes!("../shaders/grid.frag.spv")) {
+            Ok(frag) => frag,
+            Err(e) => {
+                // SAFETY: `vert` was just created and is unused.
+                unsafe { device.destroy_shader_module(vert, None) };
+                return Err(e);
+            }
+        };
 
-        Ok(Self {
-            render_pass,
-            pipeline_layout,
-            pipeline,
-            fill_pipeline,
-            glow_pipeline,
-            vert_module,
-            frag_module,
-        })
+        let mut pipes = Self {
+            scene_pass: vk::RenderPass::null(),
+            hud_pass: vk::RenderPass::null(),
+            layout: vk::PipelineLayout::null(),
+            line: vk::Pipeline::null(),
+            fill: vk::Pipeline::null(),
+            glow: vk::Pipeline::null(),
+            hud_fill: vk::Pipeline::null(),
+            hud_line: vk::Pipeline::null(),
+        };
+        let created = pipes.create(
+            device,
+            color_format,
+            depth_format,
+            output_layout,
+            vert,
+            frag,
+        );
+
+        // SAFETY: The pipelines keep what they need; the modules are unused.
+        unsafe {
+            device.destroy_shader_module(vert, None);
+            device.destroy_shader_module(frag, None);
+        }
+
+        match created {
+            Ok(()) => Ok(pipes),
+            Err(e) => {
+                // SAFETY: Nothing created here has been used; null handles
+                // are ignored by the destroy calls.
+                unsafe { pipes.destroy(device) };
+                Err(e)
+            }
+        }
     }
 
-    fn create_render_pass(
+    /// Fill in every handle, stopping at the first error.
+    fn create(
+        &mut self,
         device: &ash::Device,
         color_format: vk::Format,
         depth_format: vk::Format,
-        final_layout: vk::ImageLayout,
+        output_layout: vk::ImageLayout,
+        vert: vk::ShaderModule,
+        frag: vk::ShaderModule,
+    ) -> Result<(), RenderError> {
+        self.scene_pass = Self::create_scene_pass(device, color_format, depth_format)?;
+        self.hud_pass = overlay_render_pass(device, color_format, output_layout)?;
+        self.layout = Self::create_pipeline_layout(device)?;
+        let scene = |topology, additive_blend, depth_test, depth_write| {
+            Self::create_pipeline(
+                device,
+                self.scene_pass,
+                self.layout,
+                vert,
+                frag,
+                topology,
+                additive_blend,
+                depth_test,
+                depth_write,
+            )
+        };
+        self.line = scene(vk::PrimitiveTopology::LINE_LIST, false, false, false)?;
+        self.fill = scene(vk::PrimitiveTopology::TRIANGLE_LIST, false, true, true)?;
+        self.glow = scene(vk::PrimitiveTopology::TRIANGLE_LIST, true, true, false)?;
+        let hud = |topology| {
+            Self::create_pipeline(
+                device,
+                self.hud_pass,
+                self.layout,
+                vert,
+                frag,
+                topology,
+                false,
+                false,
+                false,
+            )
+        };
+        self.hud_fill = hud(vk::PrimitiveTopology::TRIANGLE_LIST)?;
+        self.hud_line = hud(vk::PrimitiveTopology::LINE_LIST)?;
+        Ok(())
+    }
+
+    fn create_scene_pass(
+        device: &ash::Device,
+        color_format: vk::Format,
+        depth_format: vk::Format,
     ) -> Result<vk::RenderPass, RenderError> {
         let color_attachment = vk::AttachmentDescription::default()
             .format(color_format)
@@ -107,7 +159,7 @@ impl GridPipeline {
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(final_layout);
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
         let depth_attachment = vk::AttachmentDescription::default()
             .format(depth_format)
@@ -321,107 +373,74 @@ impl GridPipeline {
         Ok(pipelines[0])
     }
 
-    /// Create fill and line pipelines compatible with a given render pass.
-    ///
-    /// Returns `(fill_pipeline, line_pipeline)`. Used for HUD pipelines bound to
-    /// the HUD render pass (which has no depth/stencil).
-    pub fn create_hud_pipelines(
-        &self,
-        device: &ash::Device,
-        render_pass: vk::RenderPass,
-    ) -> Result<(vk::Pipeline, vk::Pipeline), RenderError> {
-        let fill = Self::create_pipeline(
-            device,
-            render_pass,
-            self.pipeline_layout,
-            self.vert_module,
-            self.frag_module,
-            vk::PrimitiveTopology::TRIANGLE_LIST,
-            false,
-            false,
-            false,
-        )?;
-        let line = Self::create_pipeline(
-            device,
-            render_pass,
-            self.pipeline_layout,
-            self.vert_module,
-            self.frag_module,
-            vk::PrimitiveTopology::LINE_LIST,
-            false,
-            false,
-            false,
-        )?;
-        Ok((fill, line))
-    }
-
-    /// Create a color-only render pass for HUD overlay.
-    ///
-    /// Uses `load_op = LOAD` to preserve the scene, `final_layout` for the post-HUD transition.
-    pub fn create_hud_render_pass(
-        device: &ash::Device,
-        color_format: vk::Format,
-        final_layout: vk::ImageLayout,
-    ) -> Result<vk::RenderPass, RenderError> {
-        let color_attachment = vk::AttachmentDescription::default()
-            .format(color_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::LOAD)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .final_layout(final_layout);
-
-        let color_ref = vk::AttachmentReference::default()
-            .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-        let color_refs = [color_ref];
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_refs);
-
-        let dependency = vk::SubpassDependency::default()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .dst_subpass(0)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-
-        let attachments = [color_attachment];
-        let subpasses = [subpass];
-        let dependencies = [dependency];
-
-        let create_info = vk::RenderPassCreateInfo::default()
-            .attachments(&attachments)
-            .subpasses(&subpasses)
-            .dependencies(&dependencies);
-
-        // SAFETY: Creating render pass with valid configuration.
-        unsafe {
-            device
-                .create_render_pass(&create_info, None)
-                .map_err(RenderError::Vulkan)
-        }
-    }
-
-    /// Clean up Vulkan resources.
+    /// Destroy both passes, the layout and the pipelines.
     ///
     /// # Safety
-    /// Must be called before destroying the device.
-    pub unsafe fn destroy(&self, device: &ash::Device) {
-        // SAFETY: Pipeline resources are no longer in use (caller guarantees device idle).
+    /// No pending GPU work uses them; `device` is the one they were created on.
+    pub unsafe fn destroy(self, device: &ash::Device) {
+        // SAFETY: The caller guarantees nothing uses them.
         unsafe {
-            device.destroy_pipeline(self.glow_pipeline, None);
-            device.destroy_pipeline(self.fill_pipeline, None);
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_render_pass(self.render_pass, None);
-            device.destroy_shader_module(self.vert_module, None);
-            device.destroy_shader_module(self.frag_module, None);
+            device.destroy_pipeline(self.hud_line, None);
+            device.destroy_pipeline(self.hud_fill, None);
+            device.destroy_pipeline(self.glow, None);
+            device.destroy_pipeline(self.fill, None);
+            device.destroy_pipeline(self.line, None);
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_render_pass(self.hud_pass, None);
+            device.destroy_render_pass(self.scene_pass, None);
         }
+    }
+}
+
+/// A colour-only render pass that loads the image in
+/// `COLOR_ATTACHMENT_OPTIMAL`, stores it, and leaves it in `final_layout`:
+/// the HUD pass and the reflection composite pass.
+pub(crate) fn overlay_render_pass(
+    device: &ash::Device,
+    color_format: vk::Format,
+    final_layout: vk::ImageLayout,
+) -> Result<vk::RenderPass, RenderError> {
+    let color_attachment = vk::AttachmentDescription::default()
+        .format(color_format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::LOAD)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .final_layout(final_layout);
+
+    let color_ref = vk::AttachmentReference::default()
+        .attachment(0)
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+    let color_refs = [color_ref];
+    let subpass = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&color_refs);
+
+    let dependency = vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
+    let attachments = [color_attachment];
+    let subpasses = [subpass];
+    let dependencies = [dependency];
+
+    let create_info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&dependencies);
+
+    // SAFETY: Creating render pass with valid configuration.
+    unsafe {
+        device
+            .create_render_pass(&create_info, None)
+            .map_err(RenderError::Vulkan)
     }
 }
 

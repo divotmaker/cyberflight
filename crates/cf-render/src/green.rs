@@ -11,7 +11,7 @@ use cf_scene::grid::{GridConfig, GridVertex};
 
 use crate::error::RenderError;
 use crate::gpu::{HostBuffer, push_constants};
-use crate::pipeline::{GridPipeline, GridPushConstants};
+use crate::pipeline::{GridPushConstants, ScenePipelines};
 
 /// Edge vertices of `green`: one ring, or none when there is no green.
 fn edge_vertices(green: Option<&GreenConfig>, grid: &GridConfig) -> Vec<GridVertex> {
@@ -51,16 +51,16 @@ impl GreenEdge {
     }
 
     /// Record the edge draw: 1 px lines in [`color::GREEN_EDGE`]. Binds
-    /// `pipeline` itself, so any pipeline may be bound before the call.
+    /// the line pipeline itself, so any pipeline may be bound before the call.
     ///
     /// # Safety
-    /// Must be called within an active render pass compatible with
-    /// `pipeline`, with viewport and scissor set.
+    /// Must be called within an active scene pass of `pipes`, with viewport
+    /// and scissor set.
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,
         cb: vk::CommandBuffer,
-        pipeline: &GridPipeline,
+        pipes: &ScenePipelines,
         view_proj: [[f32; 4]; 4],
     ) {
         let pc = GridPushConstants {
@@ -70,12 +70,12 @@ impl GreenEdge {
         // SAFETY: Caller guarantees an active render pass; the buffer lives
         // until `destroy`, and the push constants match the pipeline layout.
         unsafe {
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.line);
             device.cmd_set_line_width(cb, 1.0);
             push_constants(
                 device,
                 cb,
-                pipeline.pipeline_layout,
+                pipes.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc,
             );

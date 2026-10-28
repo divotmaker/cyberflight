@@ -18,7 +18,7 @@ use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
 use crate::gpu::{HostBuffer, load_shader, push_constants};
 use crate::green::GreenEdge;
-use crate::pipeline::{GridPipeline, GridPushConstants};
+use crate::pipeline::{GridPushConstants, ScenePipelines, overlay_render_pass};
 use crate::readback::FrameBuffers;
 use crate::recorder::{ChaseViewport, view_proj};
 use crate::render::FlightRenderData;
@@ -28,7 +28,7 @@ use crate::rt_pipeline::{RtPipeline, RtPushConstants};
 /// Offscreen renderer for headless PNG generation.
 pub struct OffscreenRenderer {
     gpu: GpuContext,
-    pipeline: GridPipeline,
+    pipeline: ManuallyDrop<ScenePipelines>,
     target: Option<OffscreenTarget>,
     vertex_buffer: ManuallyDrop<HostBuffer>,
     vertex_count: u32,
@@ -99,19 +99,11 @@ impl OffscreenRenderer {
         let mut gpu = GpuContext::new_headless(config)?;
         let rt_available = gpu.rt_supported;
 
-        // When RT is available, raster pass leaves image in COLOR_ATTACHMENT_OPTIMAL
-        // so the composite pass can follow. Otherwise go straight to TRANSFER_SRC.
-        let raster_final_layout = if rt_available {
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-        } else {
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-        };
-
-        let pipeline = GridPipeline::new(
+        let pipeline = ScenePipelines::new(
             &gpu.device,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
-            raster_final_layout,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         )?;
 
         let target = OffscreenTarget::new(
@@ -121,7 +113,8 @@ impl OffscreenRenderer {
             height,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
-            pipeline.render_pass,
+            pipeline.scene_pass,
+            pipeline.hud_pass,
         )?;
 
         let grid_verts = generate_grid_vertices(grid_config);
@@ -220,7 +213,7 @@ impl OffscreenRenderer {
 
         Ok(Self {
             gpu,
-            pipeline,
+            pipeline: ManuallyDrop::new(pipeline),
             target: Some(target),
             vertex_buffer: ManuallyDrop::new(vertex_buffer),
             vertex_count,
@@ -289,7 +282,7 @@ impl OffscreenRenderer {
 
         let mut gpu = GpuContext::new_headless(config)?;
 
-        let pipeline = GridPipeline::new(
+        let pipeline = ScenePipelines::new(
             &gpu.device,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
@@ -303,7 +296,8 @@ impl OffscreenRenderer {
             height,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
-            pipeline.render_pass,
+            pipeline.scene_pass,
+            pipeline.hud_pass,
         )?;
 
         // Grid (same as default)
@@ -383,7 +377,7 @@ impl OffscreenRenderer {
 
         Ok(Self {
             gpu,
-            pipeline,
+            pipeline: ManuallyDrop::new(pipeline),
             target: Some(target),
             vertex_buffer: ManuallyDrop::new(vertex_buffer),
             vertex_count,
@@ -503,18 +497,11 @@ impl OffscreenRenderer {
         // Determine if RT is actually available.
         let rt_available = gpu.rt_supported;
 
-        // Choose raster final_layout based on whether RT composite follows.
-        let raster_final_layout = if rt_available {
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-        } else {
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-        };
-
-        let pipeline = GridPipeline::new(
+        let pipeline = ScenePipelines::new(
             &gpu.device,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
-            raster_final_layout,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         )?;
 
         let target = OffscreenTarget::new(
@@ -524,7 +511,8 @@ impl OffscreenRenderer {
             height,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
-            pipeline.render_pass,
+            pipeline.scene_pass,
+            pipeline.hud_pass,
         )?;
 
         // Grid vertices
@@ -686,7 +674,7 @@ impl OffscreenRenderer {
 
         Ok(Self {
             gpu,
-            pipeline,
+            pipeline: ManuallyDrop::new(pipeline),
             target: Some(target),
             vertex_buffer: ManuallyDrop::new(vertex_buffer),
             vertex_count,
@@ -760,12 +748,12 @@ impl OffscreenRenderer {
             };
 
             // Grid lines (LINE_LIST, cyan)
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.line);
             device.cmd_set_line_width(cb, 1.0);
             push_constants(
                 device,
                 cb,
-                self.pipeline.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_cyan,
             );
@@ -778,16 +766,12 @@ impl OffscreenRenderer {
             }
 
             // Tee box fill (black)
-            device.cmd_bind_pipeline(
-                cb,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.fill_pipeline,
-            );
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
             device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
             push_constants(
                 device,
                 cb,
-                self.pipeline.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_black,
             );
@@ -797,7 +781,7 @@ impl OffscreenRenderer {
             push_constants(
                 device,
                 cb,
-                self.pipeline.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_cyan,
             );
@@ -809,45 +793,37 @@ impl OffscreenRenderer {
                     device.cmd_bind_pipeline(
                         cb,
                         vk::PipelineBindPoint::GRAPHICS,
-                        self.pipeline.pipeline,
+                        self.pipeline.line,
                     );
                     device.cmd_set_line_width(cb, 1.0);
                     device.cmd_bind_vertex_buffers(cb, 0, &[trail_buf.handle()], &[0]);
                     push_constants(
                         device,
                         cb,
-                        self.pipeline.pipeline_layout,
+                        self.pipeline.layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         &pc_magenta,
                     );
                     device.cmd_draw(cb, self.trail_line_count, 1, 0, 0);
                 }
 
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.glow_pipeline,
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_magenta,
                 );
                 device.cmd_draw(cb, self.glow_count, 1, 0, 0);
 
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.fill_pipeline,
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_black,
                 );
@@ -865,14 +841,14 @@ impl OffscreenRenderer {
                         device.cmd_bind_pipeline(
                             cb,
                             vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.pipeline,
+                            self.pipeline.line,
                         );
                         device.cmd_set_line_width(cb, 1.0);
                         device.cmd_bind_vertex_buffers(cb, 0, &[flight_line_buf.handle()], &[0]);
                         push_constants(
                             device,
                             cb,
-                            self.pipeline.pipeline_layout,
+                            self.pipeline.layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             &pc_magenta,
                         );
@@ -884,13 +860,13 @@ impl OffscreenRenderer {
                         device.cmd_bind_pipeline(
                             cb,
                             vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.glow_pipeline,
+                            self.pipeline.glow,
                         );
                         device.cmd_bind_vertex_buffers(cb, 0, &[flight_glow_buf.handle()], &[0]);
                         push_constants(
                             device,
                             cb,
-                            self.pipeline.pipeline_layout,
+                            self.pipeline.layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             &pc_magenta,
                         );
@@ -902,13 +878,13 @@ impl OffscreenRenderer {
                         device.cmd_bind_pipeline(
                             cb,
                             vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.fill_pipeline,
+                            self.pipeline.fill,
                         );
                         device.cmd_bind_vertex_buffers(cb, 0, &[flight_fill_buf.handle()], &[0]);
                         push_constants(
                             device,
                             cb,
-                            self.pipeline.pipeline_layout,
+                            self.pipeline.layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             &pc_black,
                         );
@@ -1159,8 +1135,8 @@ impl OffscreenRenderer {
             ];
 
             let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(self.pipeline.render_pass)
-                .framebuffer(target.framebuffer)
+                .render_pass(self.pipeline.scene_pass)
+                .framebuffer(target.scene)
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent,
@@ -1176,7 +1152,7 @@ impl OffscreenRenderer {
             device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.pipeline,
+                self.pipeline.line,
             );
             device.cmd_set_line_width(self.command_buffer, 1.0);
 
@@ -1266,7 +1242,7 @@ impl OffscreenRenderer {
                         device.cmd_bind_pipeline(
                             self.command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.fill_pipeline,
+                            self.pipeline.fill,
                         );
                         device.cmd_bind_vertex_buffers(
                             self.command_buffer,
@@ -1277,7 +1253,7 @@ impl OffscreenRenderer {
                         push_constants(
                             device,
                             self.command_buffer,
-                            self.pipeline.pipeline_layout,
+                            self.pipeline.layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             &pc_hud_bg,
                         );
@@ -1294,7 +1270,7 @@ impl OffscreenRenderer {
                         device.cmd_bind_pipeline(
                             self.command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.pipeline,
+                            self.pipeline.line,
                         );
                         device.cmd_set_line_width(self.command_buffer, 1.0);
                         device.cmd_bind_vertex_buffers(
@@ -1306,7 +1282,7 @@ impl OffscreenRenderer {
                         push_constants(
                             device,
                             self.command_buffer,
-                            self.pipeline.pipeline_layout,
+                            self.pipeline.layout,
                             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                             &pc_hud_text,
                         );
@@ -1322,9 +1298,23 @@ impl OffscreenRenderer {
                 self.record_rt_composite(camera, width, height, extent);
             }
 
-            // Barrier: render pass output -> transfer read
-            // When RT is active the composite pass ends at TRANSFER_SRC_OPTIMAL.
-            // When raster-only the main render pass ends at TRANSFER_SRC_OPTIMAL.
+            // The HUD pass ends the frame and leaves the image in
+            // TRANSFER_SRC_OPTIMAL. The HUD itself is drawn in the scene pass.
+            let hud_pass_info = vk::RenderPassBeginInfo::default()
+                .render_pass(self.pipeline.hud_pass)
+                .framebuffer(target.overlay)
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent,
+                });
+            device.cmd_begin_render_pass(
+                self.command_buffer,
+                &hud_pass_info,
+                vk::SubpassContents::INLINE,
+            );
+            device.cmd_end_render_pass(self.command_buffer);
+
+            // Barrier: HUD pass output -> transfer read
             let barrier = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
@@ -1421,7 +1411,7 @@ impl OffscreenRenderer {
     /// 1. Transition RT storage image: UNDEFINED -> GENERAL
     /// 2. Trace RT reflection rays
     /// 3. Transition RT storage image: GENERAL -> SHADER_READ_ONLY_OPTIMAL
-    /// 4. Composite render pass (LOAD, additive blend, final_layout = TRANSFER_SRC_OPTIMAL)
+    /// 4. Composite render pass (LOAD, additive blend, final_layout = COLOR_ATTACHMENT_OPTIMAL)
     ///
     /// # Safety
     /// The command buffer must be in the recording state, outside any render pass.
@@ -1586,12 +1576,9 @@ impl OffscreenRenderer {
         ),
         RenderError,
     > {
-        // Render pass: color-only, LOAD existing content, final_layout = TRANSFER_SRC_OPTIMAL.
-        let render_pass = GridPipeline::create_hud_render_pass(
-            device,
-            format,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        )?;
+        // Render pass: color-only, LOAD existing content, final_layout = COLOR_ATTACHMENT_OPTIMAL.
+        let render_pass =
+            overlay_render_pass(device, format, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)?;
 
         // Framebuffer wrapping the offscreen target's color image view.
         let fb_attachments = [color_view];
@@ -1872,7 +1859,8 @@ impl Drop for OffscreenRenderer {
                 target.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
-            self.pipeline.destroy(&self.gpu.device);
+            // SAFETY: Taken once, here in `Drop`, and never used after.
+            ManuallyDrop::take(&mut self.pipeline).destroy(&self.gpu.device);
         }
     }
 }

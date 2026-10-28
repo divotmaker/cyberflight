@@ -12,13 +12,18 @@ pub struct OffscreenTarget {
     pub format: vk::Format,
     pub(crate) color: Image2d,
     pub(crate) depth: Image2d,
-    pub framebuffer: vk::Framebuffer,
+    /// Colour + depth, for the scene pass.
+    pub(crate) scene: vk::Framebuffer,
+    /// Colour only, for the HUD and composite passes.
+    pub(crate) overlay: vk::Framebuffer,
     /// Readback buffer: `width * height * 4` bytes of RGBA8.
     pub(crate) staging: HostBuffer,
 }
 
 impl OffscreenTarget {
-    /// Create an offscreen render target with staging buffer for readback.
+    /// Create an offscreen render target with staging buffer for readback,
+    /// and its framebuffers for `scene_pass` and `hud_pass`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
@@ -26,7 +31,8 @@ impl OffscreenTarget {
         height: u32,
         format: vk::Format,
         depth_format: vk::Format,
-        render_pass: vk::RenderPass,
+        scene_pass: vk::RenderPass,
+        hud_pass: vk::RenderPass,
     ) -> Result<Self, RenderError> {
         let extent = vk::Extent2D { width, height };
         let color = Image2d::new(
@@ -54,21 +60,8 @@ impl OffscreenTarget {
             },
         )?;
 
-        // Create framebuffer (color + depth)
-        let attachments = [color.view(), depth.view()];
-        let fb_info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .attachments(&attachments)
-            .width(width)
-            .height(height)
-            .layers(1);
-
-        // SAFETY: Creating framebuffer.
-        let framebuffer = unsafe {
-            device
-                .create_framebuffer(&fb_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
+        let scene = create_framebuffer(device, scene_pass, &[color.view(), depth.view()], extent)?;
+        let overlay = create_framebuffer(device, hud_pass, &[color.view()], extent)?;
 
         // Staging buffer for readback (4 bytes per pixel)
         let staging = HostBuffer::new(
@@ -86,7 +79,8 @@ impl OffscreenTarget {
             format,
             color,
             depth,
-            framebuffer,
+            scene,
+            overlay,
             staging,
         })
     }
@@ -99,10 +93,32 @@ impl OffscreenTarget {
     pub unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: Resources are no longer in use (caller guarantees device idle).
         unsafe {
-            device.destroy_framebuffer(self.framebuffer, None);
+            device.destroy_framebuffer(self.overlay, None);
+            device.destroy_framebuffer(self.scene, None);
             self.color.destroy(device, allocator);
             self.depth.destroy(device, allocator);
             self.staging.destroy(device, allocator);
         }
+    }
+}
+
+/// A framebuffer of `extent` over `attachments` for `render_pass`.
+fn create_framebuffer(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    attachments: &[vk::ImageView],
+    extent: vk::Extent2D,
+) -> Result<vk::Framebuffer, RenderError> {
+    let fb_info = vk::FramebufferCreateInfo::default()
+        .render_pass(render_pass)
+        .attachments(attachments)
+        .width(extent.width)
+        .height(extent.height)
+        .layers(1);
+    // SAFETY: The attachments are live views of `extent` that match the pass.
+    unsafe {
+        device
+            .create_framebuffer(&fb_info, None)
+            .map_err(RenderError::Vulkan)
     }
 }

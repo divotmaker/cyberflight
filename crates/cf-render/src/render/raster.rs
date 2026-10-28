@@ -48,7 +48,7 @@ impl Renderer {
             ];
 
             let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(self.pipeline.render_pass)
+                .render_pass(self.pipeline.scene_pass)
                 .framebuffer(self.framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
@@ -136,7 +136,7 @@ impl Renderer {
         // SAFETY: Drawing within an active render pass.
         unsafe {
             // Grid lines (LINE_LIST, cyan, 1px)
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.line);
             device.cmd_set_line_width(cb, 1.0);
 
             let pc_cyan = GridPushConstants {
@@ -146,7 +146,7 @@ impl Renderer {
             push_constants(
                 device,
                 cb,
-                self.pipeline.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_cyan,
             );
@@ -163,16 +163,12 @@ impl Renderer {
                 view_proj,
                 color: [0.0, 0.0, 0.0, 1.0],
             };
-            device.cmd_bind_pipeline(
-                cb,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.fill_pipeline,
-            );
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
             device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
             push_constants(
                 device,
                 cb,
-                self.pipeline.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_black,
             );
@@ -182,7 +178,7 @@ impl Renderer {
             push_constants(
                 device,
                 cb,
-                self.pipeline.pipeline_layout,
+                self.pipeline.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 &pc_cyan,
             );
@@ -197,32 +193,24 @@ impl Renderer {
             // Static ball on tee box (hidden when a flight is active)
             if self.ball_on_tee_box {
                 // Ball glow (additive blend, magenta — draw before ball so ball occludes center)
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.glow_pipeline,
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_magenta,
                 );
                 device.cmd_draw(cb, self.glow_count, 1, 0, 0);
 
                 // Ball (black sphere — occludes glow center, revealing outline)
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.fill_pipeline,
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_black,
                 );
@@ -237,17 +225,13 @@ impl Renderer {
 
             // In-flight trail wireframe core (LINE_LIST, magenta — 2px when supported)
             if self.flight_line_count > 0 {
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.pipeline, // LINE_LIST grid pipeline
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.line);
                 device.cmd_set_line_width(cb, if self.gpu.wide_lines { 2.0 } else { 1.0 });
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_line_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_magenta,
                 );
@@ -256,16 +240,12 @@ impl Renderer {
 
             // In-flight ball glow + trail glow (additive, magenta)
             if self.flight_glow_count > 0 {
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.glow_pipeline,
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_glow_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_magenta,
                 );
@@ -274,16 +254,12 @@ impl Renderer {
 
             // In-flight ball fill (black sphere — occludes glow center)
             if self.flight_fill_count > 0 {
-                device.cmd_bind_pipeline(
-                    cb,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline.fill_pipeline,
-                );
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_fill_buffer.handle()], &[0]);
                 push_constants(
                     device,
                     cb,
-                    self.pipeline.pipeline_layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     &pc_black,
                 );

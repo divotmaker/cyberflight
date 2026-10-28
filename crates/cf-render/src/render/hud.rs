@@ -26,8 +26,8 @@ impl Renderer {
         // Image is in COLOR_ATTACHMENT_OPTIMAL (guaranteed by scene pass or RT barrier).
         unsafe {
             let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(self.hud_render_pass)
-                .framebuffer(self.hud_framebuffers[image_index as usize])
+                .render_pass(self.pipeline.hud_pass)
+                .framebuffer(self.overlay_framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent,
@@ -64,13 +64,13 @@ impl Renderer {
                     device.cmd_bind_pipeline(
                         cb,
                         vk::PipelineBindPoint::GRAPHICS,
-                        self.hud_fill_pipeline,
+                        self.pipeline.hud_fill,
                     );
                     device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_fill_buffer.handle()], &[0]);
                     push_constants(
                         device,
                         cb,
-                        self.pipeline.pipeline_layout,
+                        self.pipeline.layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         &pc_hud_bg,
                     );
@@ -85,14 +85,14 @@ impl Renderer {
                     device.cmd_bind_pipeline(
                         cb,
                         vk::PipelineBindPoint::GRAPHICS,
-                        self.hud_line_pipeline,
+                        self.pipeline.hud_line,
                     );
                     device.cmd_set_line_width(cb, 1.0);
                     device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_line_buffer.handle()], &[0]);
                     push_constants(
                         device,
                         cb,
-                        self.pipeline.pipeline_layout,
+                        self.pipeline.layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         &pc_hud_text,
                     );

@@ -27,7 +27,7 @@ use crate::error::RenderError;
 use crate::gpu::{HostBuffer, Image2d, Image2dDesc, load_shader};
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
-use crate::pipeline::GridPipeline;
+use crate::pipeline::{ScenePipelines, overlay_render_pass};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::window::Swapchain;
@@ -51,7 +51,7 @@ pub(super) struct CompositePass {
 pub struct Renderer {
     pub gpu: GpuContext,
     pub swapchain: Swapchain,
-    pub pipeline: GridPipeline,
+    pub pipeline: ManuallyDrop<ScenePipelines>,
     pub(super) framebuffers: Vec<vk::Framebuffer>,
     pub(super) vertex_buffer: ManuallyDrop<HostBuffer>,
     pub(super) vertex_count: u32,
@@ -86,11 +86,8 @@ pub struct Renderer {
     window_extent: vk::Extent2D,
     /// Swapchain must be rebuilt before the next acquire (out of date or suboptimal).
     swapchain_stale: bool,
-    // HUD overlay pass (color-only, no depth/stencil).
-    pub(super) hud_render_pass: vk::RenderPass,
-    pub(super) hud_framebuffers: Vec<vk::Framebuffer>,
-    pub(super) hud_fill_pipeline: vk::Pipeline,
-    pub(super) hud_line_pipeline: vk::Pipeline,
+    // Colour-only framebuffers of the HUD pass, one per swapchain image.
+    pub(super) overlay_framebuffers: Vec<vk::Framebuffer>,
     // Ray tracing (optional, only when hardware supports it).
     pub render_mode: RenderMode,
     pub(super) rt_pipeline: Option<RtPipeline>,
@@ -115,12 +112,12 @@ impl Renderer {
         swapchain: Swapchain,
         grid_config: &GridConfig,
     ) -> Result<Self, RenderError> {
-        // Scene render pass ends at COLOR_ATTACHMENT_OPTIMAL — HUD pass handles final transition.
-        let pipeline = GridPipeline::new(
+        // The HUD pass ends every frame and leaves the image ready to present.
+        let pipeline = ScenePipelines::new(
             &gpu.device,
             swapchain.format,
             gpu.depth_format,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::PRESENT_SRC_KHR,
         )?;
 
         let depth = Self::create_depth(
@@ -131,18 +128,9 @@ impl Renderer {
         )?;
 
         let framebuffers =
-            Self::create_framebuffers(&gpu.device, &swapchain, pipeline.render_pass, depth.view())?;
-
-        // HUD render pass: color-only overlay, preserves scene content, transitions to PRESENT_SRC.
-        let hud_render_pass = GridPipeline::create_hud_render_pass(
-            &gpu.device,
-            swapchain.format,
-            vk::ImageLayout::PRESENT_SRC_KHR,
-        )?;
-        let hud_framebuffers =
-            Self::create_hud_framebuffers(&gpu.device, &swapchain, hud_render_pass)?;
-        let (hud_fill_pipeline, hud_line_pipeline) =
-            pipeline.create_hud_pipelines(&gpu.device, hud_render_pass)?;
+            Self::create_framebuffers(&gpu.device, &swapchain, pipeline.scene_pass, depth.view())?;
+        let overlay_framebuffers =
+            Self::create_overlay_framebuffers(&gpu.device, &swapchain, pipeline.hud_pass)?;
 
         let grid_verts = generate_grid_vertices(grid_config);
         let vertex_count = grid_verts.len() as u32;
@@ -275,7 +263,7 @@ impl Renderer {
         Ok(Self {
             gpu,
             swapchain,
-            pipeline,
+            pipeline: ManuallyDrop::new(pipeline),
             framebuffers,
             vertex_buffer: ManuallyDrop::new(vertex_buffer),
             vertex_count,
@@ -297,10 +285,7 @@ impl Renderer {
             hud_fill_buffer: ManuallyDrop::new(hud_fill_buffer),
             hud_fill_count: 0,
             depth: Some(depth),
-            hud_render_pass,
-            hud_framebuffers,
-            hud_fill_pipeline,
-            hud_line_pipeline,
+            overlay_framebuffers,
             command_buffers,
             image_available,
             render_finished,
@@ -534,13 +519,13 @@ impl Renderer {
                 .map_err(RenderError::Vulkan)?;
         }
 
-        // Destroy old framebuffers (scene + HUD) and depth
+        // Destroy old framebuffers (scene + overlay) and depth
         for fb in self.framebuffers.drain(..) {
             // SAFETY: Framebuffers are no longer in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
         }
-        for fb in self.hud_framebuffers.drain(..) {
-            // SAFETY: HUD framebuffers are no longer in use (waited idle above).
+        for fb in self.overlay_framebuffers.drain(..) {
+            // SAFETY: Overlay framebuffers are no longer in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
         }
         if let Some(depth) = self.depth.take() {
@@ -573,11 +558,14 @@ impl Renderer {
         self.framebuffers = Self::create_framebuffers(
             &self.gpu.device,
             &self.swapchain,
-            self.pipeline.render_pass,
+            self.pipeline.scene_pass,
             depth_view,
         )?;
-        self.hud_framebuffers =
-            Self::create_hud_framebuffers(&self.gpu.device, &self.swapchain, self.hud_render_pass)?;
+        self.overlay_framebuffers = Self::create_overlay_framebuffers(
+            &self.gpu.device,
+            &self.swapchain,
+            self.pipeline.hud_pass,
+        )?;
         // Resize RT storage image and update composite descriptor to match.
         if let Some(ref mut rtp) = self.rt_pipeline {
             rtp.resize_storage(
@@ -592,7 +580,7 @@ impl Renderer {
                 // SAFETY: Composite framebuffers no longer in use (waited idle above).
                 unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
             }
-            composite.framebuffers = Self::create_hud_framebuffers(
+            composite.framebuffers = Self::create_overlay_framebuffers(
                 &self.gpu.device,
                 &self.swapchain,
                 composite.render_pass,
@@ -800,10 +788,12 @@ impl Renderer {
             .collect()
     }
 
-    fn create_hud_framebuffers(
+    /// Colour-only framebuffers over the swapchain images for `render_pass`
+    /// (the HUD pass or the composite pass).
+    fn create_overlay_framebuffers(
         device: &ash::Device,
         swapchain: &Swapchain,
-        hud_render_pass: vk::RenderPass,
+        render_pass: vk::RenderPass,
     ) -> Result<Vec<vk::Framebuffer>, RenderError> {
         swapchain
             .image_views
@@ -811,7 +801,7 @@ impl Renderer {
             .map(|&view| {
                 let attachments = [view];
                 let fb_info = vk::FramebufferCreateInfo::default()
-                    .render_pass(hud_render_pass)
+                    .render_pass(render_pass)
                     .attachments(&attachments)
                     .width(swapchain.extent.width)
                     .height(swapchain.extent.height)
@@ -853,13 +843,13 @@ impl Renderer {
         rt_storage_view: vk::ImageView,
     ) -> Result<CompositePass, RenderError> {
         // Render pass: color-only, LOAD, stays at COLOR_ATTACHMENT_OPTIMAL.
-        let render_pass = GridPipeline::create_hud_render_pass(
+        let render_pass = overlay_render_pass(
             device,
             swapchain.format,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         )?;
 
-        let framebuffers = Self::create_hud_framebuffers(device, swapchain, render_pass)?;
+        let framebuffers = Self::create_overlay_framebuffers(device, swapchain, render_pass)?;
 
         // Sampler for the RT storage image (nearest — 1:1 pixel mapping).
         let sampler_info = vk::SamplerCreateInfo::default()
@@ -1100,18 +1090,9 @@ impl Drop for Renderer {
             for fb in &self.framebuffers {
                 self.gpu.device.destroy_framebuffer(*fb, None);
             }
-            for fb in &self.hud_framebuffers {
+            for fb in &self.overlay_framebuffers {
                 self.gpu.device.destroy_framebuffer(*fb, None);
             }
-            self.gpu
-                .device
-                .destroy_pipeline(self.hud_fill_pipeline, None);
-            self.gpu
-                .device
-                .destroy_pipeline(self.hud_line_pipeline, None);
-            self.gpu
-                .device
-                .destroy_render_pass(self.hud_render_pass, None);
             // SAFETY: Each `ManuallyDrop` buffer is taken once, here in `Drop`,
             // and never used after.
             for buffer in [
@@ -1160,7 +1141,8 @@ impl Drop for Renderer {
                 rtp.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
-            self.pipeline.destroy(&self.gpu.device);
+            // SAFETY: Taken once, here in `Drop`, and never used after.
+            ManuallyDrop::take(&mut self.pipeline).destroy(&self.gpu.device);
             self.swapchain.destroy(&self.gpu.device);
         }
     }
