@@ -26,7 +26,7 @@ current set and each device's status.
 ### Setup
 
 1. Start flighthook and connect to your launch monitor
-2. Start cyberflight — it connects to flighthook at `ws://localhost:5880/frp`; for
+2. Start cyberflight — it connects to flighthook at `ws://127.0.0.1:5880/frp`; for
    flighthook on another machine, pass `--frp ws://<host>:5880/frp`. While
    flighthook is not running, cyberflight retries every 5 s. If something
    accepts the connection but never answers, cyberflight keeps waiting and

@@ -335,8 +335,15 @@ pub const RECONNECT_INTERVAL_S: f64 = 5.0;
 /// How often a connect that has not finished is reported (seconds).
 pub const DIAL_WARN_INTERVAL_S: f64 = 30.0;
 
+/// The FRP device dialled without `--frp`: flighthook on this machine.
+///
+/// An IPv4 address rather than `localhost`: flighthook listens on IPv4
+/// only, and where `localhost` resolves to `::1` first (Windows), every dial
+/// waits for the refused IPv6 attempt (about 2 s) before trying IPv4.
+pub const DEFAULT_FRP_URL: &str = "ws://127.0.0.1:5880/frp";
+
 /// The FRP device URL: the value after `--frp` in `args`, or
-/// [`flightrelay::DEFAULT_URL`] without the flag.
+/// [`DEFAULT_FRP_URL`] without the flag.
 ///
 /// # Errors
 ///
@@ -344,7 +351,7 @@ pub const DIAL_WARN_INTERVAL_S: f64 = 30.0;
 /// `ws://` or `wss://` URL.
 pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
     let Some(i) = args.iter().position(|a| a == "--frp") else {
-        return Ok(flightrelay::DEFAULT_URL.to_owned());
+        return Ok(DEFAULT_FRP_URL.to_owned());
     };
     let url = args
         .get(i + 1)
@@ -785,7 +792,7 @@ mod tests {
         let args = |a: &[&str]| a.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
         assert_eq!(
             frp_url(&args(&["cyberflight"])).expect("default"),
-            flightrelay::DEFAULT_URL
+            DEFAULT_FRP_URL
         );
         assert_eq!(
             frp_url(&args(&[
@@ -801,6 +808,16 @@ mod tests {
             frp_url(&args(&["cyberflight", "--frp", "wss://pc/frp"])).expect("wss"),
             "wss://pc/frp"
         );
+    }
+
+    #[test]
+    fn the_default_device_is_dialled_over_ipv4() {
+        assert!(DEFAULT_FRP_URL.starts_with("ws://127.0.0.1:"));
+        assert!(DEFAULT_FRP_URL.ends_with(&format!(
+            ":{}{}",
+            flightrelay::DEFAULT_PORT,
+            flightrelay::DEFAULT_PATH
+        )));
     }
 
     #[test]
