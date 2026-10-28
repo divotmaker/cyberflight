@@ -41,16 +41,21 @@ deploy: build-windows
 	scp target/$(WIN_TARGET)/release/cyberflight.exe "$(host):$(dir)/"
 
 test:
-	cargo test --lib
-
-test-gpu:
-	cargo test --features gpu-tests
+	cargo test --workspace
 
 clippy:
-	cargo clippy --workspace -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
+out ?= screenshots
+
+# Render every screenshot into $(out)/ (needs a Vulkan GPU).
 screenshots:
-	cargo run -p cyberflight --example screenshot
+	cargo run -p cyberflight --example screenshot -- --out $(out)
+
+# Compare two screenshot directories, e.g. before and after a change:
+#   make compare base=screenshots-before new=screenshots
+compare:
+	cargo run --release -p cf-test -- compare $(base) $(new)
 
 clean:
 	cargo clean
@@ -80,4 +85,4 @@ buildtools:
 	@which cargo > /dev/null 2>&1 || (echo "cargo not found — install Rust toolchain" && exit 1)
 	@echo "All build tools present."
 
-.PHONY: run stream stream-hls build build-release build-windows deploy test test-gpu clippy clean shaders screenshots buildtools
+.PHONY: run stream stream-hls build build-release build-windows deploy test clippy clean shaders screenshots compare buildtools

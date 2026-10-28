@@ -17,7 +17,6 @@ repository = "https://github.com/divotmaker/cyberflight"
 glam = "0.32"
 thiserror = "2"
 anyhow = "1"
-serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ash = "0.38"
 gpu-allocator = { version = "0.28", features = ["vulkan"] }
@@ -28,6 +27,5 @@ raw-window-handle = "0.6"
 dimple = "0.0.7"
 cf-scene = { path = "crates/cf-scene" }
 cf-render = { path = "crates/cf-render" }
-cf-test = { path = "crates/cf-test" }
 flightrelay = { version = "0.3.1", features = ["transport", "controller"] }
 tiny_http = "0.12"

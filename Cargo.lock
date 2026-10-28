@@ -258,12 +258,8 @@ dependencies = [
 name = "cf-test"
 version = "0.0.6"
 dependencies = [
- "cf-render",
- "cf-scene",
- "glam",
  "image",
  "image-compare",
- "serde_json",
  "thiserror 2.0.18",
 ]
 

@@ -6,9 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-gpu-tests = []
-
 [dependencies]
 cf-scene.workspace = true
 ash.workspace = true
