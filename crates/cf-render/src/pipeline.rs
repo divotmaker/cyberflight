@@ -425,7 +425,10 @@ pub(crate) fn overlay_render_pass(
         .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
         .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
         .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+        // The load and blending read the attachment; drawing writes it.
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        );
 
     let attachments = [color_attachment];
     let subpasses = [subpass];
