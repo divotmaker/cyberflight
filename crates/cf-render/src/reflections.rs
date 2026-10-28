@@ -50,8 +50,8 @@ impl RtTracer {
     /// The newest flight's tracer in `content`: no tracer without a flight.
     pub(crate) fn from_content(content: &FrameContent) -> Self {
         Self {
-            trail: content.flight_glows[content.newest_tube.clone()].to_vec(),
-            line: content.flight_lines[content.newest_line.clone()].to_vec(),
+            trail: content.flight_glows[..content.newest_tube].to_vec(),
+            line: content.flight_lines[..content.newest_line].to_vec(),
         }
     }
 
@@ -327,7 +327,7 @@ impl Reflections {
     ///
     /// # Safety
     /// `cb` is recording, outside a render pass; the buffers of
-    /// `frame.tracer` are live and hold its vertex ranges; the colour image
+    /// `frame.tracer` are live and hold its vertices; the colour image
     /// is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image extent equals
     /// `frame.extent` and every view lies within it. Afterwards the
     /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the colour

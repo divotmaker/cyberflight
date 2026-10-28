@@ -31,8 +31,6 @@
 //! ray tracer's floor geometry (`generate_floor_quad`) and the range
 //! terrain are. The camera is above the floor.
 
-use std::ops::Range;
-
 use ash::vk;
 use glam::Vec3;
 use gpu_allocator::vulkan::Allocator;
@@ -50,12 +48,12 @@ use crate::reflections::{REFLECTION_FORMAT, TraceView};
 pub(crate) struct MirrorTracer {
     /// Vertex buffer holding the tube's triangles.
     pub(crate) tube_buffer: vk::Buffer,
-    /// The tube's vertices in `tube_buffer`.
-    pub(crate) tube: Range<u32>,
+    /// The tube's vertices: the first ones of `tube_buffer`.
+    pub(crate) tube: u32,
     /// Vertex buffer holding the centre line's segments.
     pub(crate) line_buffer: vk::Buffer,
-    /// The centre line's vertices in `line_buffer`.
-    pub(crate) line: Range<u32>,
+    /// The centre line's vertices: the first ones of `line_buffer`.
+    pub(crate) line: u32,
 }
 
 /// Push constants of the tracer pass (`mirror.vert`).
@@ -732,9 +730,8 @@ impl Mirror {
     /// # Safety
     /// `cb` is recording, outside a render pass; no pending GPU work for a
     /// previous frame writes the images; the buffers of `tracer` are live and
-    /// hold its vertex ranges; the reflection
-    /// image has the extent `extent` that the mirror was created or
-    /// resized with, and every view lies within it.
+    /// hold its vertices; the reflection image has the extent `extent` that
+    /// the mirror was created or resized with, and every view lies within it.
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,
@@ -774,7 +771,7 @@ impl Mirror {
                 let pc = TracerPushConstants {
                     view_proj: view_proj(&view.camera, view.aspect()),
                 };
-                if !tracer.tube.is_empty() {
+                if tracer.tube > 0 {
                     device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, passes.tube);
                     device.cmd_bind_vertex_buffers(cb, 0, &[tracer.tube_buffer], &[0]);
                     push_constants(
@@ -784,9 +781,9 @@ impl Mirror {
                         vk::ShaderStageFlags::VERTEX,
                         &pc,
                     );
-                    device.cmd_draw(cb, tracer.tube.len() as u32, 1, tracer.tube.start, 0);
+                    device.cmd_draw(cb, tracer.tube, 1, 0, 0);
                 }
-                if !tracer.line.is_empty() {
+                if tracer.line > 0 {
                     device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, passes.line);
                     device.cmd_set_line_width(cb, self.line_width);
                     device.cmd_bind_vertex_buffers(cb, 0, &[tracer.line_buffer], &[0]);
@@ -797,7 +794,7 @@ impl Mirror {
                         vk::ShaderStageFlags::VERTEX,
                         &pc,
                     );
-                    device.cmd_draw(cb, tracer.line.len() as u32, 1, tracer.line.start, 0);
+                    device.cmd_draw(cb, tracer.line, 1, 0, 0);
                 }
             }
             device.cmd_end_render_pass(cb);
