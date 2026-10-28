@@ -38,6 +38,9 @@ deploy: build-windows
 	ssh "$(host)" "mkdir $(dir) 2>nul & echo ok"
 	scp target/$(WIN_TARGET)/release/cyberflight.exe "$(host):$(dir)/"
 
+stop:
+	@pkill -x cyberflight 2>/dev/null && echo "stopped" || echo "nothing running"
+
 test:
 	cargo test --workspace
 
@@ -83,4 +86,4 @@ buildtools:
 	@which cargo > /dev/null 2>&1 || (echo "cargo not found — install Rust toolchain" && exit 1)
 	@echo "All build tools present."
 
-.PHONY: run stream stream-hls build build-release build-windows deploy test clippy clean shaders screenshots compare buildtools
+.PHONY: run stream stream-hls build build-release build-windows deploy stop test clippy clean shaders screenshots compare buildtools
