@@ -7,7 +7,7 @@ layout(set = 0, binding = 1, rgba16f) uniform image2D outputImage;
 layout(push_constant) uniform PushConstants {
     vec4 camera_pos;        // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;     // screen->world transform
-    vec4 params;            // x = trail tail fade value, yz = unused, w = viewport Y offset (pixels)
+    vec4 params;            // x = trail tail fade value, y = pixel size per metre of ray path, z = unused, w = viewport Y offset (pixels)
     vec4 ball_pos;          // xyz = ball center, w = trail fade distance (meters)
 } pc;
 

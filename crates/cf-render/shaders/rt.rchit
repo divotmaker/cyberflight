@@ -6,7 +6,7 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(push_constant) uniform PushConstants {
     vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;
-    vec4 params;      // x = trail tail fade value, yz = unused, w = viewport Y offset (pixels)
+    vec4 params;      // x = trail tail fade value, y = pixel size per metre of ray path, z = unused, w = viewport Y offset (pixels)
     vec4 ball_pos;    // xyz = ball center, w = trail fade distance (meters)
 } pc;
 
@@ -18,8 +18,10 @@ hitAttributeEXT vec2 attribs;
 // Geometry types (gl_InstanceCustomIndexEXT):
 //   0 = floor (reflective glass surface)
 //   2 = tee box fill (dark surface)
-//   3 = trail ribbon (emissive magenta)
 //   4 = tee box border (cyan)
+//
+// The trail (3) is a procedural tube with its own hit group (rt.rint +
+// rt_trail.rchit).
 //
 // The tee box instances (2, 4) are in the TLAS, but no ray's cull mask
 // includes theirs, so their branches below are never reached.
@@ -146,23 +148,6 @@ void main() {
     } else if (geom_type == 2) {
         // Tee box fill: dark surface.
         payload = vec4(TEE_COLOR, 1.0);
-
-    } else if (geom_type == 3) {
-        // Trail: emissive magenta with the raster tracer's fade. The tracer
-        // fade value t runs from 1 at the ball to params.x at the trail's
-        // oldest point, interpolated by distance from the ball over the
-        // trail's arc length (ball_pos.w).
-        float fade_dist = pc.ball_pos.w > 0.0 ? pc.ball_pos.w : 50.0;
-        float u = clamp(distance(hit_pos, pc.ball_pos.xyz) / fade_dist, 0.0, 1.0);
-        float t = 1.0 - u * (1.0 - pc.params.x);
-        // Raster core alpha (1 - 0.7 (1 - t))^2, times its tip taper over t < 0.15.
-        float core = 1.0 - 0.7 * (1.0 - t);
-        float alpha = core * core * min(t / 0.15, 1.0);
-
-        // Only floor reflection rays reach the trail (mask 0x04), so this
-        // runs at the pipeline's maximum recursion depth and traces nothing.
-        // Alpha carries the hit's world height for the floor's height fade.
-        payload = vec4(MAGENTA * alpha, hit_pos.y);
 
     } else if (geom_type == 4) {
         // Tee box border: bright cyan.

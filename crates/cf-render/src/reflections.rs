@@ -73,7 +73,7 @@ impl RtSceneState {
     fn push_constants(&self, view: &TraceView) -> RtPushConstants {
         RtPushConstants::new(
             &view.camera,
-            view.extent.width as f32 / view.extent.height as f32,
+            [view.extent.width as f32, view.extent.height as f32],
             [view.offset[0] as f32, view.offset[1] as f32],
             self.ball_centre,
             self.trail.fade_dist,
@@ -387,7 +387,7 @@ mod tests {
         let pc = state.push_constants(&view);
         let expected = RtPushConstants::new(
             &camera,
-            384.0 / 1080.0,
+            [384.0, 1080.0],
             [1536.0, 0.0],
             Vec3::new(1.0, 2.0, 3.0),
             4.0,

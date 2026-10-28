@@ -15,8 +15,9 @@ pub struct RtPushConstants {
     pub camera_pos: [f32; 4],
     /// Inverse view-projection matrix (screen → world).
     pub inv_view_proj: [[f32; 4]; 4],
-    /// x = tracer fade value at the trail's oldest point, y/z = unused (0),
-    /// w = viewport Y offset in pixels.
+    /// x = tracer fade value at the trail's oldest point, y = size of one
+    /// pixel per metre of ray path (the viewport's pixel angle), z = unused
+    /// (0), w = viewport Y offset in pixels.
     pub params: [f32; 4],
     /// Ball position (xyz), w = trail fade distance in meters.
     pub ball_pos: [f32; 4],
@@ -25,22 +26,25 @@ pub struct RtPushConstants {
 impl RtPushConstants {
     /// Pack push constants for one trace dispatch.
     ///
-    /// `aspect` is the dispatch viewport's width / height and `viewport_offset`
-    /// its top-left corner in storage-image pixels. `trail_fade_dist` is the
-    /// trail reflection fade distance in meters (0 selects the shader default)
-    /// and `trail_tail_t` the tracer fade value at the trail's oldest point
-    /// (see [`RtTrail`](crate::rt_offscreen::RtTrail)).
+    /// `viewport_size` is the dispatch viewport's width and height and
+    /// `viewport_offset` its top-left corner, both in storage-image pixels.
+    /// `trail_fade_dist` is the trail reflection fade distance in meters (0
+    /// selects the shader default) and `trail_tail_t` the tracer fade value at
+    /// the trail's oldest point (see [`RtTrail`](crate::rt_offscreen::RtTrail)).
     #[must_use]
     pub fn new(
         camera: &Camera,
-        aspect: f32,
+        viewport_size: [f32; 2],
         viewport_offset: [f32; 2],
         ball_center: glam::Vec3,
         trail_fade_dist: f32,
         trail_tail_t: f32,
     ) -> Self {
         let view = camera.view_matrix();
-        let mut proj = camera.projection_matrix(aspect);
+        let mut proj = camera.projection_matrix(viewport_size[0] / viewport_size[1]);
+        // y_axis.y = 1 / tan(fov_y / 2): the viewport spans 2 / y_axis.y per
+        // metre of distance over its height.
+        let pixel_size = 2.0 / (proj.y_axis.y * viewport_size[1]);
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
         let inv_view_proj = (proj * view).inverse();
 
@@ -52,7 +56,7 @@ impl RtPushConstants {
                 viewport_offset[0],
             ],
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            params: [trail_tail_t, 0.0, 0.0, viewport_offset[1]],
+            params: [trail_tail_t, pixel_size, 0.0, viewport_offset[1]],
             ball_pos: [ball_center.x, ball_center.y, ball_center.z, trail_fade_dist],
         }
     }
@@ -74,6 +78,23 @@ pub const GEOM_TEE_BOX: u32 = 2;
 pub const GEOM_TRAIL: u32 = 3;
 pub const GEOM_TEE_BOX_BORDER: u32 = 4;
 
+/// Largest radius of the trail tube in metres, and the padding of each
+/// segment's AABB around its axis. Must equal `TUBE_MAX_RADIUS` in `rt.rint`.
+pub const TRAIL_TUBE_MAX_RADIUS: f32 = 1.0;
+
+/// Shader stages that read the push constants.
+const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
+    vk::ShaderStageFlags::RAYGEN_KHR.as_raw()
+        | vk::ShaderStageFlags::CLOSEST_HIT_KHR.as_raw()
+        | vk::ShaderStageFlags::INTERSECTION_KHR.as_raw(),
+);
+
+/// Hit group of triangle geometry (`rt.rchit`), the SBT hit record offset of
+/// its instances.
+const HIT_GROUP_TRIANGLES: u32 = 0;
+/// Hit group of the trail tube (`rt.rint` + `rt_trail.rchit`).
+const HIT_GROUP_TUBE: u32 = 1;
+
 /// A single acceleration structure (BLAS or TLAS) with its backing buffer.
 struct AccelStruct {
     accel: vk::AccelerationStructureKHR,
@@ -88,6 +109,8 @@ struct PipelineObjects {
     rgen_module: vk::ShaderModule,
     rmiss_module: vk::ShaderModule,
     rchit_module: vk::ShaderModule,
+    rint_module: vk::ShaderModule,
+    trail_rchit_module: vk::ShaderModule,
     descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -96,9 +119,9 @@ struct PipelineObjects {
 }
 
 impl PipelineObjects {
-    /// Create the shader modules, the descriptor set layout (TLAS + storage
-    /// image), the pipeline layout (push constants + set) and the pipeline,
-    /// stopping at the first error.
+    /// Create the shader modules, the descriptor set layout (TLAS, storage
+    /// image, trail points), the pipeline layout (push constants + set) and
+    /// the pipeline, stopping at the first error.
     fn create_pipeline(
         &mut self,
         device: &ash::Device,
@@ -108,8 +131,11 @@ impl PipelineObjects {
         self.rgen_module = load_shader(device, include_bytes!("../shaders/rt.rgen.spv"))?;
         self.rmiss_module = load_shader(device, include_bytes!("../shaders/rt.rmiss.spv"))?;
         self.rchit_module = load_shader(device, include_bytes!("../shaders/rt.rchit.spv"))?;
+        self.rint_module = load_shader(device, include_bytes!("../shaders/rt.rint.spv"))?;
+        self.trail_rchit_module =
+            load_shader(device, include_bytes!("../shaders/rt_trail.rchit.spv"))?;
 
-        // ── Descriptor set layout: TLAS + storage image ──
+        // ── Descriptor set layout: TLAS, storage image, trail points ──
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -123,6 +149,11 @@ impl PipelineObjects {
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::INTERSECTION_KHR),
         ];
         let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
@@ -134,7 +165,7 @@ impl PipelineObjects {
 
         // ── Pipeline layout (push constants + descriptor set) ──
         let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR)
+            .stage_flags(PUSH_STAGES)
             .offset(0)
             .size(std::mem::size_of::<RtPushConstants>() as u32);
         let push_ranges = [push_range];
@@ -164,6 +195,14 @@ impl PipelineObjects {
                 .stage(vk::ShaderStageFlags::CLOSEST_HIT_KHR)
                 .module(self.rchit_module)
                 .name(entry_point),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::INTERSECTION_KHR)
+                .module(self.rint_module)
+                .name(entry_point),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::CLOSEST_HIT_KHR)
+                .module(self.trail_rchit_module)
+                .name(entry_point),
         ];
 
         let groups = [
@@ -181,13 +220,20 @@ impl PipelineObjects {
                 .closest_hit_shader(vk::SHADER_UNUSED_KHR)
                 .any_hit_shader(vk::SHADER_UNUSED_KHR)
                 .intersection_shader(vk::SHADER_UNUSED_KHR),
-            // Group 2: closest hit
+            // Group 2: triangle hit (HIT_GROUP_TRIANGLES)
             vk::RayTracingShaderGroupCreateInfoKHR::default()
                 .ty(vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
                 .general_shader(vk::SHADER_UNUSED_KHR)
                 .closest_hit_shader(2)
                 .any_hit_shader(vk::SHADER_UNUSED_KHR)
                 .intersection_shader(vk::SHADER_UNUSED_KHR),
+            // Group 3: trail tube hit (HIT_GROUP_TUBE)
+            vk::RayTracingShaderGroupCreateInfoKHR::default()
+                .ty(vk::RayTracingShaderGroupTypeKHR::PROCEDURAL_HIT_GROUP)
+                .general_shader(vk::SHADER_UNUSED_KHR)
+                .closest_hit_shader(4)
+                .any_hit_shader(vk::SHADER_UNUSED_KHR)
+                .intersection_shader(3),
         ];
 
         let rt_create_info = vk::RayTracingPipelineCreateInfoKHR::default()
@@ -218,6 +264,9 @@ impl PipelineObjects {
                 .descriptor_count(1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -257,6 +306,8 @@ impl PipelineObjects {
             device.destroy_shader_module(self.rgen_module, None);
             device.destroy_shader_module(self.rmiss_module, None);
             device.destroy_shader_module(self.rchit_module, None);
+            device.destroy_shader_module(self.rint_module, None);
+            device.destroy_shader_module(self.trail_rchit_module, None);
         }
     }
 }
@@ -281,6 +332,9 @@ pub struct RtPipeline {
 
     // Geometry buffers (kept alive for AS references)
     geometry_buffers: Vec<HostBuffer>,
+    // Trail tube axis points read by `rt.rint` (one zero point without a
+    // trail), bound at binding 2.
+    trail_points: Option<HostBuffer>,
     // Instance buffer
     instance_buffer: Option<HostBuffer>,
 
@@ -292,15 +346,66 @@ pub struct RtPipeline {
     pub(crate) storage: Image2d,
 }
 
-/// Triangle geometry for BLAS building.
+/// What an [`RtGeometry`]'s positions describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtPrimitive {
+    /// A triangle list: 3 vertices per triangle.
+    Triangles,
+    /// The axis of the trail tube: a polyline, one vertex per point. Each
+    /// segment is one AABB, padded by [`TRAIL_TUBE_MAX_RADIUS`], that
+    /// `rt.rint` intersects.
+    Tube,
+}
+
+/// Geometry for BLAS building.
 pub struct RtGeometry {
-    /// Packed f32x3 positions (3 floats per vertex, 3 vertices per triangle).
+    /// Packed f32x3 positions (3 floats per vertex).
     pub positions: Vec<f32>,
+    /// How the positions form primitives.
+    pub primitive: RtPrimitive,
     /// Geometry type ID (GEOM_FLOOR, GEOM_TEE_BOX, etc.).
     pub geom_type: u32,
     /// Instance transform (identity if not set); converted to the 3×4
     /// row-major `VkTransformMatrixKHR` when the TLAS is built.
     pub transform: glam::Mat4,
+}
+
+impl RtGeometry {
+    /// Number of primitives: triangles, or tube segments.
+    #[must_use]
+    pub fn primitive_count(&self) -> u32 {
+        let vertices = self.positions.len() / 3;
+        match self.primitive {
+            RtPrimitive::Triangles => (vertices / 3) as u32,
+            RtPrimitive::Tube => vertices.saturating_sub(1) as u32,
+        }
+    }
+}
+
+/// The AABB of each segment of the polyline `positions` (packed f32x3), its
+/// end points' bounds padded by `pad` on every side, as `VkAabbPositionsKHR`
+/// (min xyz, max xyz).
+fn tube_aabbs(positions: &[f32], pad: f32) -> Vec<f32> {
+    let points: Vec<glam::Vec3> = positions
+        .chunks_exact(3)
+        .map(glam::Vec3::from_slice)
+        .collect();
+    let mut aabbs = Vec::with_capacity(points.len().saturating_sub(1) * 6);
+    for w in points.windows(2) {
+        let min = w[0].min(w[1]) - glam::Vec3::splat(pad);
+        let max = w[0].max(w[1]) + glam::Vec3::splat(pad);
+        aabbs.extend_from_slice(&[min.x, min.y, min.z, max.x, max.y, max.z]);
+    }
+    aabbs
+}
+
+/// The polyline `positions` (packed f32x3) as `vec4` points (w = 0), the
+/// layout of `rt.rint`'s trail point buffer.
+fn tube_points(positions: &[f32]) -> Vec<f32> {
+    positions
+        .chunks_exact(3)
+        .flat_map(|p| [p[0], p[1], p[2], 0.0])
+        .collect()
 }
 
 impl RtPipeline {
@@ -366,6 +471,7 @@ impl RtPipeline {
             blas_list: Vec::new(),
             tlas: None,
             geometry_buffers: Vec::new(),
+            trail_points: None,
             instance_buffer: None,
             scratch_buffers: Vec::new(),
             storage,
@@ -384,9 +490,11 @@ impl RtPipeline {
         Ok(pipeline)
     }
 
-    /// The shader binding table of `pipeline`'s three groups (raygen, miss,
-    /// closest hit), each handle at the start of its own region aligned as
-    /// `rt_props` requires, and the three regions.
+    /// The shader binding table of `pipeline`'s four groups (raygen, miss,
+    /// triangle hit, tube hit), each handle at the start of a slot aligned as
+    /// `rt_props` requires, and the raygen, miss and hit regions. The hit
+    /// region holds both hit groups, indexed by the instances' SBT record
+    /// offset ([`HIT_GROUP_TRIANGLES`], [`HIT_GROUP_TUBE`]).
     fn create_sbt(
         gpu: &mut GpuContext,
         rt_loader: &ash::khr::ray_tracing_pipeline::Device,
@@ -399,7 +507,7 @@ impl RtPipeline {
         let aligned_handle_size = align_up(handle_size, handle_alignment);
         // Each SBT region's start address must be aligned to shaderGroupBaseAlignment.
         let region_stride = align_up(aligned_handle_size, base_alignment);
-        let group_count = 3u32;
+        let group_count = 4u32;
         let sbt_size = u64::from(region_stride) * u64::from(group_count);
 
         // SAFETY: Getting shader group handles.
@@ -445,7 +553,7 @@ impl RtPipeline {
         let hit_region = vk::StridedDeviceAddressRegionKHR {
             device_address: sbt_address + u64::from(region_stride) * 2,
             stride: u64::from(region_stride),
-            size: u64::from(region_stride),
+            size: u64::from(region_stride) * 2,
         };
         Ok((sbt, [raygen_region, miss_region, hit_region]))
     }
@@ -529,13 +637,7 @@ impl RtPipeline {
                 &[],
             );
 
-            push_constants(
-                device,
-                cb,
-                self.objects.pipeline_layout,
-                vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-                pc,
-            );
+            push_constants(device, cb, self.objects.pipeline_layout, PUSH_STAGES, pc);
 
             self.rt_loader.cmd_trace_rays(
                 cb,
@@ -552,9 +654,9 @@ impl RtPipeline {
 
     // ── BLAS building ──
 
-    /// Build one BLAS per non-empty geometry into `blas_list`, with its
-    /// position buffer in `geometry_buffers` and its scratch buffer in
-    /// `scratch_buffers`.
+    /// Build one BLAS per geometry with primitives into `blas_list`, with its
+    /// input buffers in `geometry_buffers` (and the tube's points in
+    /// `trail_points`) and its scratch buffer in `scratch_buffers`.
     fn build_all_blas(
         &mut self,
         gpu: &mut GpuContext,
@@ -562,36 +664,73 @@ impl RtPipeline {
     ) -> Result<(), RenderError> {
         let accel_loader = &self.accel_loader;
         for geom in geometries {
-            let tri_count = geom.positions.len() as u32 / 9; // 3 verts × 3 floats
-            if tri_count == 0 {
+            let primitive_count = geom.primitive_count();
+            if primitive_count == 0 {
                 continue;
             }
 
-            // Upload positions to a device-address-able buffer
-            let pos_buffer = HostBuffer::with_data(
-                &gpu.device,
-                &mut gpu.allocator,
-                &geom.positions,
-                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                "blas positions",
-            )?;
-            let pos_addr = pos_buffer.device_address(&gpu.device);
-            self.geometry_buffers.push(pos_buffer);
+            let as_geometry = match geom.primitive {
+                RtPrimitive::Triangles => {
+                    // Upload positions to a device-address-able buffer
+                    let pos_buffer = HostBuffer::with_data(
+                        &gpu.device,
+                        &mut gpu.allocator,
+                        &geom.positions,
+                        vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                        "blas positions",
+                    )?;
+                    let pos_addr = pos_buffer.device_address(&gpu.device);
+                    self.geometry_buffers.push(pos_buffer);
 
-            let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
-                .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                    device_address: pos_addr,
-                })
-                .vertex_stride(12) // 3 × f32, tightly packed
-                .max_vertex(tri_count * 3 - 1)
-                .index_type(vk::IndexType::NONE_KHR);
+                    let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                        .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                        .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: pos_addr,
+                        })
+                        .vertex_stride(12) // 3 × f32, tightly packed
+                        .max_vertex(primitive_count * 3 - 1)
+                        .index_type(vk::IndexType::NONE_KHR);
+                    vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
+                        .flags(vk::GeometryFlagsKHR::OPAQUE)
+                }
+                RtPrimitive::Tube => {
+                    let aabb_buffer = HostBuffer::with_data(
+                        &gpu.device,
+                        &mut gpu.allocator,
+                        &tube_aabbs(&geom.positions, TRAIL_TUBE_MAX_RADIUS),
+                        vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                        "blas tube aabbs",
+                    )?;
+                    let aabb_addr = aabb_buffer.device_address(&gpu.device);
+                    self.geometry_buffers.push(aabb_buffer);
 
-            let as_geometry = vk::AccelerationStructureGeometryKHR::default()
-                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                .geometry(vk::AccelerationStructureGeometryDataKHR { triangles })
-                .flags(vk::GeometryFlagsKHR::OPAQUE);
+                    let points = HostBuffer::with_data(
+                        &gpu.device,
+                        &mut gpu.allocator,
+                        &tube_points(&geom.positions),
+                        vk::BufferUsageFlags::STORAGE_BUFFER,
+                        "rt trail points",
+                    )?;
+                    if let Some(old) = self.trail_points.replace(points) {
+                        // SAFETY: Created by this build; no GPU work uses it.
+                        unsafe { old.destroy(&gpu.device, &mut gpu.allocator) };
+                    }
+
+                    let aabbs = vk::AccelerationStructureGeometryAabbsDataKHR::default()
+                        .data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: aabb_addr,
+                        })
+                        .stride(24); // VkAabbPositionsKHR: 6 × f32
+                    vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::AABBS)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { aabbs })
+                        .flags(vk::GeometryFlagsKHR::OPAQUE)
+                }
+            };
 
             let as_geometries = [as_geometry];
             let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
@@ -600,14 +739,14 @@ impl RtPipeline {
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .geometries(&as_geometries);
 
-            let tri_counts = [tri_count];
+            let primitive_counts = [primitive_count];
             let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
             // SAFETY: Querying build sizes.
             unsafe {
                 accel_loader.get_acceleration_structure_build_sizes(
                     vk::AccelerationStructureBuildTypeKHR::DEVICE,
                     &build_info,
-                    &tri_counts,
+                    &primitive_counts,
                     &mut sizes,
                 );
             }
@@ -666,7 +805,7 @@ impl RtPipeline {
                 });
 
             let range_info = vk::AccelerationStructureBuildRangeInfoKHR::default()
-                .primitive_count(tri_count)
+                .primitive_count(primitive_count)
                 .primitive_offset(0)
                 .first_vertex(0)
                 .transform_offset(0);
@@ -713,11 +852,8 @@ impl RtPipeline {
         let accel_loader = &self.accel_loader;
         let mut instances: Vec<vk::AccelerationStructureInstanceKHR> = Vec::new();
 
-        for (geom, blas) in geometries.iter().zip(self.blas_list.iter()) {
-            if geom.positions.is_empty() {
-                continue;
-            }
-
+        let built = geometries.iter().filter(|g| g.primitive_count() > 0);
+        for (geom, blas) in built.zip(self.blas_list.iter()) {
             let blas_addr = unsafe {
                 accel_loader.get_acceleration_structure_device_address(
                     &vk::AccelerationStructureDeviceAddressInfoKHR::default()
@@ -752,11 +888,15 @@ impl RtPipeline {
                 GEOM_TRAIL => 0x04,
                 _ => 0x02, // tee box border
             };
+            let hit_group = match geom.primitive {
+                RtPrimitive::Triangles => HIT_GROUP_TRIANGLES,
+                RtPrimitive::Tube => HIT_GROUP_TUBE,
+            };
             instances.push(vk::AccelerationStructureInstanceKHR {
                 transform,
                 instance_custom_index_and_mask: vk::Packed24_8::new(geom.geom_type, mask),
                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                    0,
+                    hit_group,
                     vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
                 ),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
@@ -943,7 +1083,8 @@ impl RtPipeline {
     }
 
     /// Build a BLAS per geometry and the TLAS over them, then point the
-    /// descriptor set's binding 0 at the TLAS. Each object is kept in `self`
+    /// descriptor set's binding 0 at the TLAS and binding 2 at the trail
+    /// points (one zero point without a trail). Each object is kept in `self`
     /// as soon as it exists, so after a failure
     /// [`destroy_accel_structures`](Self::destroy_accel_structures) frees what
     /// was built.
@@ -957,20 +1098,44 @@ impl RtPipeline {
     ) -> Result<(), RenderError> {
         self.build_all_blas(gpu, geometries)?;
         let tlas_handle = self.build_tlas(gpu, geometries)?;
+        let trail_points = match &self.trail_points {
+            Some(points) => points.handle(),
+            None => {
+                let points = HostBuffer::with_data(
+                    &gpu.device,
+                    &mut gpu.allocator,
+                    &[0.0f32; 4],
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    "rt trail points",
+                )?;
+                self.trail_points.insert(points).handle()
+            }
+        };
 
         let mut as_write_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(std::slice::from_ref(&tlas_handle));
+        let buffer_infos = [vk::DescriptorBufferInfo::default()
+            .buffer(trail_points)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
 
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.objects.descriptor_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-            .descriptor_count(1)
-            .push_next(&mut as_write_info);
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.objects.descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .descriptor_count(1)
+                .push_next(&mut as_write_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.objects.descriptor_set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&buffer_infos),
+        ];
 
-        // SAFETY: Updating descriptor set with valid TLAS.
+        // SAFETY: Updating descriptor set with the valid TLAS and point buffer.
         unsafe {
-            gpu.device.update_descriptor_sets(&[write], &[]);
+            gpu.device.update_descriptor_sets(&writes, &[]);
         }
 
         Ok(())
@@ -1002,6 +1167,9 @@ impl RtPipeline {
             }
 
             for buffer in self.geometry_buffers.drain(..) {
+                buffer.destroy(device, allocator);
+            }
+            if let Some(buffer) = self.trail_points.take() {
                 buffer.destroy(device, allocator);
             }
             for buffer in self.scratch_buffers.drain(..) {
@@ -1097,7 +1265,7 @@ mod tests {
         let camera = Camera::default();
         let pc = RtPushConstants::new(
             &camera,
-            16.0 / 9.0,
+            [1920.0, 1080.0],
             [12.0, 34.0],
             glam::Vec3::new(1.0, 2.0, 3.0),
             56.0,
@@ -1116,8 +1284,63 @@ mod tests {
         proj.y_axis.y *= -1.0;
         let inv_view_proj = (proj * camera.view_matrix()).inverse();
         assert_eq!(pc.inv_view_proj, inv_view_proj.to_cols_array_2d());
-        assert_eq!(pc.params, [0.25, 0.0, 0.0, 34.0]);
+        assert_eq!(pc.params[0], 0.25);
+        assert_eq!(pc.params[2..], [0.0, 34.0]);
         assert_eq!(pc.ball_pos, [1.0, 2.0, 3.0, 56.0]);
+    }
+
+    #[test]
+    fn pixel_size_is_the_pixel_angle() {
+        let camera = Camera::default();
+        let pc = RtPushConstants::new(
+            &camera,
+            [384.0, 1080.0],
+            [0.0; 2],
+            glam::Vec3::ZERO,
+            0.0,
+            0.0,
+        );
+        let expected = 2.0 * (camera.fov_y / 2.0).tan() / 1080.0;
+        assert!((pc.params[1] - expected).abs() < 1e-9, "{}", pc.params[1]);
+    }
+
+    fn geometry(positions: &[f32], primitive: RtPrimitive) -> RtGeometry {
+        RtGeometry {
+            positions: positions.to_vec(),
+            primitive,
+            geom_type: GEOM_TRAIL,
+            transform: glam::Mat4::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn primitive_counts() {
+        let nine = [0.0; 9];
+        assert_eq!(geometry(&nine, RtPrimitive::Triangles).primitive_count(), 1);
+        assert_eq!(geometry(&nine, RtPrimitive::Tube).primitive_count(), 2);
+        assert_eq!(geometry(&nine[..3], RtPrimitive::Tube).primitive_count(), 0);
+        assert_eq!(geometry(&[], RtPrimitive::Tube).primitive_count(), 0);
+    }
+
+    #[test]
+    fn tube_aabbs_pad_each_segment() {
+        let aabbs = tube_aabbs(&[0.0, 1.0, 2.0, 3.0, -1.0, 2.0, 3.0, -1.0, 5.0], 0.5);
+        assert_eq!(
+            aabbs,
+            vec![
+                -0.5, -1.5, 1.5, 3.5, 1.5, 2.5, //
+                2.5, -1.5, 1.5, 3.5, -0.5, 5.5,
+            ]
+        );
+        assert!(tube_aabbs(&[1.0, 2.0, 3.0], 0.5).is_empty());
+    }
+
+    #[test]
+    fn tube_points_are_vec4() {
+        assert_eq!(
+            tube_points(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec![1.0, 2.0, 3.0, 0.0, 4.0, 5.0, 6.0, 0.0]
+        );
     }
 
     #[test]
