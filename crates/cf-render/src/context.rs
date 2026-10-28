@@ -385,6 +385,15 @@ impl GpuContext {
         Ok((device, wide_lines))
     }
 
+    /// Print every allocation still live in the allocator. Called at drop,
+    /// after every owner has freed its memory, so any line is a leak.
+    #[cfg(debug_assertions)]
+    fn report_leaks(&self) {
+        for leak in self.allocator.generate_report().allocations {
+            eprintln!("WARN: GPU allocation leaked: {} {}", leak.name, leak.size);
+        }
+    }
+
     fn create_command_pool(
         device: &ash::Device,
         queue_family_index: u32,
@@ -408,6 +417,8 @@ impl Drop for GpuContext {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().ok();
+            #[cfg(debug_assertions)]
+            self.report_leaks();
             // SAFETY: Dropping allocator before device.
             ManuallyDrop::drop(&mut self.allocator);
             self.device.destroy_command_pool(self.command_pool, None);
