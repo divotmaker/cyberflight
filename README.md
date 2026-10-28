@@ -19,5 +19,8 @@ cyberflight receives live shot data from [flighthook](https://github.com/divotma
 
 1. Start flighthook and connect to your launch monitor
 2. Start cyberflight — it connects to flighthook at `ws://localhost:5880/frp`; for
-   flighthook on another machine, pass `--frp ws://<host>:5880/frp`
+   flighthook on another machine, pass `--frp ws://<host>:5880/frp`. While
+   flighthook is not running, cyberflight retries every 5 s. If something
+   accepts the connection but never answers, cyberflight keeps waiting and
+   logs a warning every 30 s; restart cyberflight to reconnect.
 3. Send it

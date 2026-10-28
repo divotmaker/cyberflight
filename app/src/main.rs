@@ -103,9 +103,9 @@ impl App {
         Ok(())
     }
 
-    /// Stop the event loop because the app cannot run; `main` returns `err`.
+    /// Stop the event loop because the app cannot run; `main` returns `err`,
+    /// which prints it.
     fn fail(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
-        eprintln!("ERROR: {err:#}");
         self.fatal = Some(err);
         event_loop.exit();
     }
@@ -276,7 +276,7 @@ impl ApplicationHandler for App {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let frp_url = flight::frp_url(&args);
+    let frp_url = flight::frp_url(&args)?;
     if args.iter().any(|a| a == "--stream") {
         return stream::run_stream(&frp_url);
     }
