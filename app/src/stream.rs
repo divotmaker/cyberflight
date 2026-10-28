@@ -172,9 +172,7 @@ pub fn run_stream() -> Result<()> {
 
         // Chase camera: follow the most recent active ball.
         let chase_camera = fm.chase_camera(now);
-        if let Some(cam) = chase_camera {
-            renderer.set_chase_camera(cam);
-        }
+        renderer.set_chase_camera(chase_camera);
 
         // Build and update HUD.
         let hud = fm.build_hud(

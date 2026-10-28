@@ -931,12 +931,14 @@ impl OffscreenRenderer {
         self.rt_pipeline.is_some()
     }
 
-    /// Add HUD overlay geometry (call before `render()`).
-    /// Set the chase camera for the right 20% split viewport.
-    pub fn set_chase_camera(&mut self, camera: Camera) {
-        self.chase_camera = Some(camera);
+    /// Set or clear the chase camera for the right 20% split viewport.
+    ///
+    /// Pass `Some(camera)` while a ball is being followed, `None` otherwise.
+    pub fn set_chase_camera(&mut self, camera: Option<Camera>) {
+        self.chase_camera = camera;
     }
 
+    /// Add HUD overlay geometry (call before `render()`).
     pub fn set_hud(
         &mut self,
         lines: &[GridVertex],

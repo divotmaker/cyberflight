@@ -459,7 +459,7 @@ fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     )
     .context("failed to create hero renderer")?;
 
-    renderer.set_chase_camera(chase);
+    renderer.set_chase_camera(Some(chase));
     renderer
         .set_hud(&hud.lines, &hud.fills)
         .context("failed to set HUD")?;
