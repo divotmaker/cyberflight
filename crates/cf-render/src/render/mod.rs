@@ -413,9 +413,6 @@ impl Renderer {
     ///
     /// Falls back to `Rasterized` if RT is requested but not available.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
-        // SAFETY: Waiting for the device to go idle, so no frame in flight
-        // reads what the switch rewrites.
-        unsafe { self.gpu.device.device_wait_idle().ok() };
         self.recorder.set_mode(mode);
     }
 
