@@ -1,11 +1,9 @@
 SHADER_DIR := crates/cf-render/shaders
 
-mode ?= raster
-
 preset ?= quality
 
 run:
-	CF_RENDER_MODE=$(mode) cargo run -p cyberflight --bin cyberflight -- --windowed
+	cargo run -p cyberflight --bin cyberflight -- --windowed
 
 stream:
 	cargo run --release -p cyberflight --bin cyberflight -- --stream --preset $(preset)
