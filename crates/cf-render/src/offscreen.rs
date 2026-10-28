@@ -450,7 +450,8 @@ impl OffscreenRenderer {
     /// Render the grid and read back the result as RGBA8 pixels.
     ///
     /// When RT is enabled, renders the raster scene, traces RT reflection
-    /// rays, and composites them onto the rasterized output.
+    /// rays, and composites them onto the rasterized output. The HUD is
+    /// drawn last, over the scene and its reflections.
     pub fn render(&mut self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
         self.frame.upload(&self.content);
         let target = &self.target;
@@ -580,21 +581,7 @@ impl OffscreenRenderer {
                 device.cmd_set_scissor(self.command_buffer, 0, &[chase_vp.rect(height)]);
 
                 self.draw_scene_geometry(view_proj(chase, chase_vp.aspect(height)));
-
-                // Restore full viewport for HUD
-                device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
-                device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
             }
-
-            // HUD overlay (2D, pixel coordinates)
-            self.frame.draw_hud(
-                device,
-                self.command_buffer,
-                self.pipeline.fill,
-                self.pipeline.line,
-                self.pipeline.layout,
-                extent,
-            );
 
             device.cmd_end_render_pass(self.command_buffer);
 
@@ -608,8 +595,8 @@ impl OffscreenRenderer {
                 reflections.record(device, self.command_buffer, &[main], target.overlay, extent);
             }
 
-            // The HUD pass ends the frame and leaves the image in
-            // TRANSFER_SRC_OPTIMAL. The HUD itself is drawn in the scene pass.
+            // HUD overlay (2D, pixel coordinates) over the scene and its
+            // reflections. The HUD pass leaves the image in TRANSFER_SRC_OPTIMAL.
             let hud_pass_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.pipeline.hud_pass)
                 .framebuffer(target.overlay)
@@ -621,6 +608,16 @@ impl OffscreenRenderer {
                 self.command_buffer,
                 &hud_pass_info,
                 vk::SubpassContents::INLINE,
+            );
+            device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+            device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+            self.frame.draw_hud(
+                device,
+                self.command_buffer,
+                self.pipeline.hud_fill,
+                self.pipeline.hud_line,
+                self.pipeline.layout,
+                extent,
             );
             device.cmd_end_render_pass(self.command_buffer);
 
