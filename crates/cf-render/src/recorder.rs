@@ -397,22 +397,29 @@ impl SceneRecorder {
             if self.mode == RenderMode::RayTraced
                 && let Some(reflections) = &self.reflections
             {
-                let mut views = vec![TraceView {
+                let main_view = TraceView {
                     camera: *camera,
                     offset: [0, 0],
                     extent,
-                }];
-                if let Some((chase_camera, chase_vp)) = chase {
-                    views.push(TraceView {
-                        camera: chase_camera,
-                        offset: [chase_vp.x, 0],
-                        extent: vk::Extent2D {
-                            width: chase_vp.width,
-                            height: extent.height,
-                        },
-                    });
+                };
+                match chase {
+                    Some((chase_camera, chase_vp)) => {
+                        let chase_view = TraceView {
+                            camera: chase_camera,
+                            offset: [chase_vp.x, 0],
+                            extent: vk::Extent2D {
+                                width: chase_vp.width,
+                                height: extent.height,
+                            },
+                        };
+                        let views = [main_view, chase_view];
+                        reflections.record(device, cb, &views, target.overlay, extent);
+                    }
+                    None => {
+                        let views = [main_view];
+                        reflections.record(device, cb, &views, target.overlay, extent);
+                    }
                 }
-                reflections.record(device, cb, &views, target.overlay, extent);
             }
 
             // HUD pass: the HUD over everything; ends in the output layout.
