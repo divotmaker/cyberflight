@@ -134,7 +134,7 @@ impl Reflections {
     /// composite at it.
     ///
     /// # Safety
-    /// The device is idle; framebuffers of the old extent are no longer used.
+    /// The device is idle; framebuffers of the old extent are not in use.
     pub(crate) unsafe fn resize(
         &mut self,
         device: &ash::Device,

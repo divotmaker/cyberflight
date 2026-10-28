@@ -87,7 +87,7 @@ impl GreenEdge {
     /// Free the buffer.
     ///
     /// # Safety
-    /// The GPU must no longer use the buffer (wait idle first).
+    /// The GPU must not be using the buffer (wait idle first).
     pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: Caller guarantees the buffer is idle.
         unsafe { self.buffer.destroy(device, allocator) };

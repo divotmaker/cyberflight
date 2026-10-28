@@ -381,15 +381,15 @@ impl Renderer {
 
         // Destroy old framebuffers (scene + overlay) and depth
         for fb in self.framebuffers.drain(..) {
-            // SAFETY: Framebuffers are no longer in use (waited idle above).
+            // SAFETY: Framebuffers are not in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
         }
         for fb in self.overlay_framebuffers.drain(..) {
-            // SAFETY: Overlay framebuffers are no longer in use (waited idle above).
+            // SAFETY: Overlay framebuffers are not in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
         }
         if let Some(depth) = self.depth.take() {
-            // SAFETY: Depth no longer in use (waited idle above).
+            // SAFETY: Depth is not in use (waited idle above).
             unsafe { depth.destroy(&self.gpu.device, &mut self.gpu.allocator) };
         }
 

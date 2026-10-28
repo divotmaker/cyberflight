@@ -184,6 +184,7 @@ pub(crate) struct HostBuffer {
 impl HostBuffer {
     /// A mapped buffer of `size` bytes at `location` (`CpuToGpu` or
     /// `GpuToCpu`, both host-coherent, so writes and reads need no flush).
+    /// `size` must be greater than 0: Vulkan has no empty buffers.
     ///
     /// # Errors
     /// Buffer creation or allocation fails, or the memory is not mapped.
@@ -195,6 +196,7 @@ impl HostBuffer {
         location: MemoryLocation,
         name: &'static str,
     ) -> Result<Self, RenderError> {
+        debug_assert!(size > 0, "{name}: a buffer needs at least one byte");
         let (buffer, allocation) = create_buffer(device, allocator, size, usage, location, name)?;
         if allocation.mapped_ptr().is_none() {
             // SAFETY: `buffer` is unused.

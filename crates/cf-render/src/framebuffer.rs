@@ -91,7 +91,7 @@ impl OffscreenTarget {
     /// Must be called before destroying the device, with the device idle and the
     /// allocator the target was created with.
     pub unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
-        // SAFETY: Resources are no longer in use (caller guarantees device idle).
+        // SAFETY: Resources are not in use (caller guarantees device idle).
         unsafe {
             device.destroy_framebuffer(self.overlay, None);
             device.destroy_framebuffer(self.scene, None);

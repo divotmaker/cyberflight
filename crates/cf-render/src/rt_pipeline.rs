@@ -5,7 +5,7 @@ use cf_scene::camera::Camera;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::{DeviceBuffer, HostBuffer, Image2d, Image2dDesc, load_shader};
+use crate::gpu::{DeviceBuffer, HostBuffer, Image2d, Image2dDesc, load_shader, push_constants};
 
 /// Push constants for the ray tracing pipeline.
 #[repr(C)]
@@ -455,7 +455,7 @@ impl RtPipeline {
         &self,
         device: &ash::Device,
         cb: vk::CommandBuffer,
-        push_constants: &RtPushConstants,
+        pc: &RtPushConstants,
         dispatch_w: u32,
         dispatch_h: u32,
     ) {
@@ -474,12 +474,12 @@ impl RtPipeline {
                 &[],
             );
 
-            crate::gpu::push_constants(
+            push_constants(
                 device,
                 cb,
                 self.pipeline_layout,
                 vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-                push_constants,
+                pc,
             );
 
             self.rt_loader.cmd_trace_rays(
@@ -944,7 +944,7 @@ impl RtPipeline {
     /// # Safety
     /// Must be called before destroying the device. Device must be idle.
     pub unsafe fn destroy(mut self, device: &ash::Device, allocator: &mut Allocator) {
-        // SAFETY: All resources are no longer in use (caller guarantees device idle).
+        // SAFETY: No resource is in use (caller guarantees device idle).
         unsafe {
             self.destroy_accel_structures(device, allocator);
 

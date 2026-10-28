@@ -2,6 +2,9 @@ use dimple::units::Unit;
 use glam::Vec3;
 
 /// Vertex for grid line rendering.
+///
+/// The renderer uploads it byte-for-byte: keep it `repr(C)`, all `f32`,
+/// with no padding.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GridVertex {

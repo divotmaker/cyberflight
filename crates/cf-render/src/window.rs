@@ -270,7 +270,7 @@ impl Swapchain {
     /// # Safety
     /// Must be called before destroying the device.
     pub unsafe fn destroy(&self, device: &ash::Device) {
-        // SAFETY: Swapchain resources are no longer in use (caller guarantees device idle).
+        // SAFETY: Swapchain resources are not in use (caller guarantees device idle).
         unsafe {
             for &view in &self.image_views {
                 device.destroy_image_view(view, None);
