@@ -3,8 +3,6 @@ use ash::vk;
 use cf_scene::camera::Camera;
 use cf_scene::color;
 
-use crate::gpu::push_constants;
-use crate::pipeline::GridPushConstants;
 use crate::recorder::{ChaseViewport, view_proj};
 
 use super::Renderer;
@@ -122,114 +120,22 @@ impl Renderer {
         }
     }
 
-    /// Draw all scene geometry with the given view-projection matrix.
-    ///
-    /// Assumes viewport and scissor are already set. Binds pipelines, sets
-    /// push constants, and issues draw calls for grid, green edge, tee
-    /// box, ball, and in-flight geometry.
+    /// Draw the scene geometry and flights with `view_proj`; viewport and
+    /// scissor must already be set.
     ///
     /// # Safety
-    /// Must be called within an active render pass.
+    /// Must be called within an active scene pass.
     unsafe fn draw_scene_geometry(&self, cb: vk::CommandBuffer, view_proj: [[f32; 4]; 4]) {
-        let device = &self.gpu.device;
-
-        // SAFETY: Drawing within an active render pass.
+        let trail_line_width = if self.gpu.wide_lines { 2.0 } else { 1.0 };
+        // SAFETY: The caller guarantees an active scene pass.
         unsafe {
-            // Grid lines (LINE_LIST, cyan, 1px)
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.line);
-            device.cmd_set_line_width(cb, 1.0);
-
-            let pc_cyan = GridPushConstants {
-                view_proj,
-                color: color::CYAN.into(),
-            };
-            push_constants(
-                device,
-                cb,
-                self.pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                &pc_cyan,
-            );
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer.handle()], &[0]);
-            device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
-
-            // Green edge (LINE_LIST, neon green, 1px)
-            if let Some(edge) = &self.green_edge {
-                edge.record(device, cb, &self.pipeline, view_proj);
-            }
-
-            // Tee box fill (black quad — masks grid lines under the tee box)
-            let pc_black = GridPushConstants {
-                view_proj,
-                color: [0.0, 0.0, 0.0, 1.0],
-            };
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
-            push_constants(
-                device,
-                cb,
-                self.pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                &pc_black,
-            );
-            device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
-
-            // Tee box border (cyan filled quads)
-            push_constants(
-                device,
-                cb,
-                self.pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                &pc_cyan,
-            );
-            device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
-
-            // Magenta push constants (shared by ball + flight geometry)
-            let pc_magenta = GridPushConstants {
-                view_proj,
-                color: color::MAGENTA.into(),
-            };
-
-            // Static ball on tee box (hidden when a flight is active)
-            if self.frame.ball_on_tee() {
-                // Ball glow (additive blend, magenta — draw before ball so ball occludes center)
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_magenta,
-                );
-                device.cmd_draw(cb, self.glow_count, 1, 0, 0);
-
-                // Ball (black sphere — occludes glow center, revealing outline)
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_black,
-                );
-                device.cmd_draw(
-                    cb,
-                    self.ball_count,
-                    1,
-                    self.tee_fill_count + self.tee_border_count,
-                    0,
-                );
-            }
-
-            // In-flight trails, glows and balls (trail core 2 px when supported).
-            self.frame.draw_flights(
-                device,
+            self.geometry.draw(
+                &self.gpu.device,
                 cb,
                 &self.pipeline,
+                &self.frame,
                 view_proj,
-                if self.gpu.wide_lines { 2.0 } else { 1.0 },
+                trail_line_width,
             );
         }
     }

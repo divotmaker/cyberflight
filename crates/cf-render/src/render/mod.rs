@@ -9,10 +9,8 @@ use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
-use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
-use cf_scene::tee::{
-    TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill,
-};
+use cf_scene::grid::{GridConfig, GridVertex};
+use cf_scene::tee::TeeBox;
 
 pub use crate::flight::FlightRenderData;
 
@@ -21,12 +19,12 @@ use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::flight::flight_vertices;
 use crate::frame::{FrameContent, FrameResources};
-use crate::gpu::{HostBuffer, Image2d, Image2dDesc};
-use crate::green::GreenEdge;
+use crate::gpu::{Image2d, Image2dDesc};
 use crate::mode::RenderMode;
 use crate::pipeline::ScenePipelines;
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
+use crate::scene::SceneGeometry;
 use crate::window::Swapchain;
 
 /// Complete renderer: owns GPU resources and draws frames.
@@ -35,14 +33,8 @@ pub struct Renderer {
     pub swapchain: Swapchain,
     pub pipeline: ManuallyDrop<ScenePipelines>,
     pub(super) framebuffers: Vec<vk::Framebuffer>,
-    pub(super) vertex_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) vertex_count: u32,
-    pub(super) fill_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) tee_fill_count: u32,
-    pub(super) tee_border_count: u32,
-    pub(super) ball_count: u32,
-    pub(super) glow_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) glow_count: u32,
+    // Grid, green edge, tee box and the ball on the tee.
+    pub(super) geometry: ManuallyDrop<SceneGeometry>,
     // Next frame's flights and HUD, uploaded into `frame` when it is recorded.
     content: FrameContent,
     // Per-frame flight and HUD buffers.
@@ -74,8 +66,6 @@ pub struct Renderer {
     rt_needs_update: bool,
     /// Optional chase camera for the right 20% viewport (set per-frame).
     pub(super) chase_camera: Option<Camera>,
-    /// Edge of the range's green, if any (see [`Renderer::set_green`]).
-    pub(super) green_edge: Option<GreenEdge>,
 }
 
 impl Renderer {
@@ -105,44 +95,9 @@ impl Renderer {
         let overlay_framebuffers =
             Self::create_overlay_framebuffers(&gpu.device, &swapchain, pipeline.hud_pass)?;
 
-        let grid_verts = generate_grid_vertices(grid_config);
-        let vertex_count = grid_verts.len() as u32;
-        let vertex_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &grid_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "grid",
-        )?;
-
         let tee = TeeBox::default();
-        let tee_fill_verts = generate_tee_fill(&tee);
-        let tee_border_verts = generate_tee_border(&tee);
-        let ball_verts = generate_ball(&tee, 12, 24);
-        let tee_fill_count = tee_fill_verts.len() as u32;
-        let tee_border_count = tee_border_verts.len() as u32;
-        let ball_count = ball_verts.len() as u32;
-
-        let mut fill_verts = tee_fill_verts;
-        fill_verts.extend(tee_border_verts);
-        fill_verts.extend(ball_verts);
-        let fill_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &fill_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "tee and ball",
-        )?;
-
-        let glow_verts = generate_ball_glow(&tee, 16, 32);
-        let glow_count = glow_verts.len() as u32;
-        let glow_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &glow_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "ball glow",
-        )?;
+        let geometry =
+            SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid_config, &tee, None)?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
@@ -191,14 +146,7 @@ impl Renderer {
             swapchain,
             pipeline: ManuallyDrop::new(pipeline),
             framebuffers,
-            vertex_buffer: ManuallyDrop::new(vertex_buffer),
-            vertex_count,
-            fill_buffer: ManuallyDrop::new(fill_buffer),
-            tee_fill_count,
-            tee_border_count,
-            ball_count,
-            glow_buffer: ManuallyDrop::new(glow_buffer),
-            glow_count,
+            geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             depth: Some(depth),
@@ -223,7 +171,6 @@ impl Renderer {
             rt_trail_tail_t: 0.0,
             rt_needs_update: false,
             chase_camera: None,
-            green_edge: None,
         })
     }
 
@@ -532,18 +479,8 @@ impl Renderer {
         green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<(), RenderError> {
-        if let Some(old) = self.green_edge.take() {
-            // SAFETY: Waiting idle so the old edge buffer is no longer in use.
-            unsafe {
-                self.gpu
-                    .device
-                    .device_wait_idle()
-                    .map_err(RenderError::Vulkan)?;
-                old.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-        }
-        self.green_edge = GreenEdge::new(&self.gpu.device, &mut self.gpu.allocator, green, grid)?;
-        Ok(())
+        self.geometry
+            .set_green(&self.gpu.device, &mut self.gpu.allocator, green, grid)
     }
 
     /// Set or clear the chase camera for the right 20% viewport.
@@ -752,10 +689,6 @@ impl Drop for Renderer {
         unsafe {
             self.gpu.device.device_wait_idle().ok();
 
-            if let Some(edge) = self.green_edge.take() {
-                edge.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-
             for &sem in &self.image_available {
                 self.gpu.device.destroy_semaphore(sem, None);
             }
@@ -774,13 +707,8 @@ impl Drop for Renderer {
             }
             // SAFETY: Each `ManuallyDrop` buffer is taken once, here in `Drop`,
             // and never used after.
-            for buffer in [
-                &mut self.vertex_buffer,
-                &mut self.fill_buffer,
-                &mut self.glow_buffer,
-            ] {
-                ManuallyDrop::take(buffer).destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
+            ManuallyDrop::take(&mut self.geometry)
+                .destroy(&self.gpu.device, &mut self.gpu.allocator);
             ManuallyDrop::take(&mut self.frame).destroy(&self.gpu.device, &mut self.gpu.allocator);
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.gpu.device, &mut self.gpu.allocator);

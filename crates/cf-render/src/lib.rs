@@ -14,5 +14,6 @@ mod recorder;
 pub mod render;
 pub mod rt_offscreen;
 pub mod rt_pipeline;
+mod scene;
 pub mod stream;
 pub mod window;

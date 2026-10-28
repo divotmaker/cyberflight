@@ -5,12 +5,9 @@ use ash::vk;
 use cf_scene::camera::Camera;
 use cf_scene::color;
 use cf_scene::green::GreenConfig;
-use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
-use cf_scene::tee::{
-    TeeBox, generate_ball, generate_ball_at, generate_ball_glow, generate_ball_glow_at,
-    generate_tee_border, generate_tee_fill,
-};
-use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
+use cf_scene::grid::{GridConfig, GridVertex};
+use cf_scene::tee::TeeBox;
+use cf_scene::trail::TrailPoint;
 
 use crate::composite::CompositePass;
 use crate::context::{GpuConfig, GpuContext};
@@ -18,32 +15,22 @@ use crate::error::RenderError;
 use crate::flight::flight_vertices;
 use crate::frame::{FrameContent, FrameResources};
 use crate::framebuffer::OffscreenTarget;
-use crate::gpu::{HostBuffer, push_constants};
-use crate::green::GreenEdge;
-use crate::pipeline::{GridPushConstants, ScenePipelines};
+use crate::pipeline::ScenePipelines;
 use crate::readback::FrameBuffers;
 use crate::recorder::{ChaseViewport, view_proj};
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::{RtTrail, build_scene_geometry};
 use crate::rt_pipeline::{RtPipeline, RtPushConstants};
+use crate::scene::{SceneGeometry, Snapshot};
 
 /// Offscreen renderer for headless PNG generation.
 pub struct OffscreenRenderer {
     gpu: GpuContext,
     pipeline: ManuallyDrop<ScenePipelines>,
     target: Option<OffscreenTarget>,
-    vertex_buffer: ManuallyDrop<HostBuffer>,
-    vertex_count: u32,
-    /// Filled geometry: tee box fill + tee box border + ball.
-    fill_buffer: ManuallyDrop<HostBuffer>,
-    tee_fill_count: u32,
-    tee_border_count: u32,
-    ball_count: u32,
-    glow_buffer: ManuallyDrop<HostBuffer>,
-    glow_count: u32,
-    /// Trail centerline (LINE_LIST, always visible regardless of viewing angle).
-    trail_line_buffer: Option<HostBuffer>,
-    trail_line_count: u32,
+    /// Grid, green edge, tee box and the ball on the tee (or a snapshot's
+    /// ball in flight).
+    geometry: ManuallyDrop<SceneGeometry>,
     /// Next frame's flights and HUD, uploaded into `frame` by `render`.
     content: FrameContent,
     /// Per-frame flight and HUD buffers.
@@ -62,9 +49,6 @@ pub struct OffscreenRenderer {
     rt_trail_tail_t: f32,
     /// Optional chase camera for split viewport (right 20%).
     chase_camera: Option<Camera>,
-
-    /// Edge of the range's green, if any (see [`OffscreenRenderer::set_green`]).
-    green_edge: Option<GreenEdge>,
 }
 
 /// Offscreen image format (RGBA8 sRGB for correct gamma in PNG output).
@@ -100,45 +84,9 @@ impl OffscreenRenderer {
             pipeline.hud_pass,
         )?;
 
-        let grid_verts = generate_grid_vertices(grid_config);
-        let vertex_count = grid_verts.len() as u32;
-        let vertex_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &grid_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "grid",
-        )?;
-
-        // Tee box + ball geometry (all TRIANGLE_LIST, packed into one buffer)
         let tee = TeeBox::default();
-        let tee_fill_verts = generate_tee_fill(&tee);
-        let tee_border_verts = generate_tee_border(&tee);
-        let ball_verts = generate_ball(&tee, 12, 24);
-        let tee_fill_count = tee_fill_verts.len() as u32;
-        let tee_border_count = tee_border_verts.len() as u32;
-        let ball_count = ball_verts.len() as u32;
-
-        let mut fill_verts = tee_fill_verts;
-        fill_verts.extend(tee_border_verts);
-        fill_verts.extend(ball_verts);
-        let fill_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &fill_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "tee and ball",
-        )?;
-
-        let glow_verts = generate_ball_glow(&tee, 16, 32);
-        let glow_count = glow_verts.len() as u32;
-        let glow_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &glow_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "ball glow",
-        )?;
+        let geometry =
+            SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid_config, &tee, None)?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
@@ -167,16 +115,7 @@ impl OffscreenRenderer {
             gpu,
             pipeline: ManuallyDrop::new(pipeline),
             target: Some(target),
-            vertex_buffer: ManuallyDrop::new(vertex_buffer),
-            vertex_count,
-            fill_buffer: ManuallyDrop::new(fill_buffer),
-            tee_fill_count,
-            tee_border_count,
-            ball_count,
-            glow_buffer: ManuallyDrop::new(glow_buffer),
-            glow_count,
-            trail_line_buffer: None,
-            trail_line_count: 0,
+            geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             command_buffer,
@@ -188,8 +127,6 @@ impl OffscreenRenderer {
             rt_trail_fade_dist: 0.0,
             rt_trail_tail_t: 0.0,
             chase_camera: None,
-
-            green_edge: None,
         })
     }
 
@@ -234,70 +171,23 @@ impl OffscreenRenderer {
             pipeline.hud_pass,
         )?;
 
-        // Grid (same as default)
-        let grid_verts = generate_grid_vertices(grid_config);
-        let vertex_count = grid_verts.len() as u32;
-        let vertex_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &grid_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "grid",
-        )?;
-
-        // Tee box + ball at flight position
+        // Tee box + ball at flight position, trail glow and core.
         let tee = TeeBox::default();
-        let tee_fill_verts = generate_tee_fill(&tee);
-        let tee_border_verts = generate_tee_border(&tee);
         let ball_center = ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-        let ball_verts = generate_ball_at(ball_center, tee.ball_radius, 12, 24);
-        let tee_fill_count = tee_fill_verts.len() as u32;
-        let tee_border_count = tee_border_verts.len() as u32;
-        let ball_count = ball_verts.len() as u32;
-
-        let mut fill_verts = tee_fill_verts;
-        fill_verts.extend(tee_border_verts);
-        fill_verts.extend(ball_verts);
-        let fill_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &fill_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "tee and ball",
-        )?;
-
-        // Ball glow sphere + trail glow ribbon (with endcap to bridge the junction).
-        let mut glow_verts = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
-        glow_verts.extend(generate_trail_glow(
+        let snapshot = Snapshot {
+            ball_pos,
             trail_points,
             current_time,
             max_lifetime,
-            camera.position,
-            tee.ball_radius,
-        ));
-        let glow_count = glow_verts.len() as u32;
-        let glow_buffer = HostBuffer::with_data(
+            camera_pos: camera.position,
+        };
+        let geometry = SceneGeometry::new(
             &gpu.device,
             &mut gpu.allocator,
-            &glow_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "ball glow",
+            grid_config,
+            &tee,
+            Some(&snapshot),
         )?;
-
-        // Trail centerline (LINE_LIST — always visible regardless of viewing angle).
-        let trail_line_verts = generate_trail_line(trail_points, current_time, max_lifetime);
-        let (trail_line_buffer, trail_line_count) = if trail_line_verts.is_empty() {
-            (None, 0)
-        } else {
-            let buffer = HostBuffer::with_data(
-                &gpu.device,
-                &mut gpu.allocator,
-                &trail_line_verts,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "trail line",
-            )?;
-            (Some(buffer), trail_line_verts.len() as u32)
-        };
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
@@ -315,16 +205,7 @@ impl OffscreenRenderer {
             gpu,
             pipeline: ManuallyDrop::new(pipeline),
             target: Some(target),
-            vertex_buffer: ManuallyDrop::new(vertex_buffer),
-            vertex_count,
-            fill_buffer: ManuallyDrop::new(fill_buffer),
-            tee_fill_count,
-            tee_border_count,
-            ball_count,
-            glow_buffer: ManuallyDrop::new(glow_buffer),
-            glow_count,
-            trail_line_buffer,
-            trail_line_count,
+            geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             command_buffer,
@@ -336,8 +217,6 @@ impl OffscreenRenderer {
             rt_trail_fade_dist: 0.0,
             rt_trail_tail_t: 0.0,
             chase_camera: None,
-
-            green_edge: None,
         })
     }
 
@@ -380,6 +259,13 @@ impl OffscreenRenderer {
         // Reflect the part of the trail the raster tracer draws.
         let trail = RtTrail::new(trail_points, current_time, max_lifetime);
         let geometries = build_scene_geometry(grid_config, &tee, &trail.points);
+        let snapshot = Snapshot {
+            ball_pos,
+            trail_points,
+            current_time,
+            max_lifetime,
+            camera_pos: camera.position,
+        };
 
         Self::create_rt(
             width,
@@ -388,7 +274,7 @@ impl OffscreenRenderer {
             &tee,
             ball_center,
             &geometries,
-            Some((trail_points, current_time, max_lifetime, camera)),
+            Some(&snapshot),
             &trail,
         )
     }
@@ -402,7 +288,7 @@ impl OffscreenRenderer {
         tee: &TeeBox,
         ball_center: glam::Vec3,
         geometries: &[crate::rt_pipeline::RtGeometry],
-        flight: Option<(&[TrailPoint], f64, f64, &Camera)>,
+        snapshot: Option<&Snapshot<'_>>,
         trail: &RtTrail,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
@@ -433,108 +319,9 @@ impl OffscreenRenderer {
             pipeline.hud_pass,
         )?;
 
-        // Grid vertices
-        let grid_verts = generate_grid_vertices(grid_config);
-        let vertex_count = grid_verts.len() as u32;
-        let vertex_buffer = HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            &grid_verts,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "grid",
-        )?;
-
-        // Tee box + ball geometry
-        let (
-            tee_fill_count,
-            tee_border_count,
-            ball_count,
-            fill_buffer,
-            glow_count,
-            glow_buffer,
-            trail_line_buffer,
-            trail_line_count,
-        ) = if let Some((trail_points, current_time, max_lifetime, camera)) = flight {
-            let tee_fill_verts = generate_tee_fill(tee);
-            let tee_border_verts = generate_tee_border(tee);
-            let ball_verts = generate_ball_at(ball_center, tee.ball_radius, 12, 24);
-            let tfc = tee_fill_verts.len() as u32;
-            let tbc = tee_border_verts.len() as u32;
-            let bc = ball_verts.len() as u32;
-            let mut fv = tee_fill_verts;
-            fv.extend(tee_border_verts);
-            fv.extend(ball_verts);
-            let fb = HostBuffer::with_data(
-                &gpu.device,
-                &mut gpu.allocator,
-                &fv,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "tee and ball",
-            )?;
-
-            let mut gv = generate_ball_glow_at(ball_center, tee.ball_radius, 16, 32);
-            gv.extend(generate_trail_glow(
-                trail_points,
-                current_time,
-                max_lifetime,
-                camera.position,
-                tee.ball_radius,
-            ));
-            let gc = gv.len() as u32;
-            let gb = HostBuffer::with_data(
-                &gpu.device,
-                &mut gpu.allocator,
-                &gv,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "ball glow",
-            )?;
-
-            // Trail centerline (LINE_LIST).
-            let tlv = generate_trail_line(trail_points, current_time, max_lifetime);
-            let (tlb, tlc) = if tlv.is_empty() {
-                (None, 0u32)
-            } else {
-                let b = HostBuffer::with_data(
-                    &gpu.device,
-                    &mut gpu.allocator,
-                    &tlv,
-                    vk::BufferUsageFlags::VERTEX_BUFFER,
-                    "trail line",
-                )?;
-                (Some(b), tlv.len() as u32)
-            };
-
-            (tfc, tbc, bc, fb, gc, gb, tlb, tlc)
-        } else {
-            let tee_fill_verts = generate_tee_fill(tee);
-            let tee_border_verts = generate_tee_border(tee);
-            let ball_verts = generate_ball(tee, 12, 24);
-            let tfc = tee_fill_verts.len() as u32;
-            let tbc = tee_border_verts.len() as u32;
-            let bc = ball_verts.len() as u32;
-            let mut fv = tee_fill_verts;
-            fv.extend(tee_border_verts);
-            fv.extend(ball_verts);
-            let fb = HostBuffer::with_data(
-                &gpu.device,
-                &mut gpu.allocator,
-                &fv,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "tee and ball",
-            )?;
-
-            let gv = generate_ball_glow(tee, 16, 32);
-            let gc = gv.len() as u32;
-            let gb = HostBuffer::with_data(
-                &gpu.device,
-                &mut gpu.allocator,
-                &gv,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "ball glow",
-            )?;
-
-            (tfc, tbc, bc, fb, gc, gb, None, 0u32)
-        };
+        // Tee box + ball, on the tee or at the snapshot's flight position.
+        let geometry =
+            SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid_config, tee, snapshot)?;
 
         let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
@@ -561,16 +348,7 @@ impl OffscreenRenderer {
             gpu,
             pipeline: ManuallyDrop::new(pipeline),
             target: Some(target),
-            vertex_buffer: ManuallyDrop::new(vertex_buffer),
-            vertex_count,
-            fill_buffer: ManuallyDrop::new(fill_buffer),
-            tee_fill_count,
-            tee_border_count,
-            ball_count,
-            glow_buffer: ManuallyDrop::new(glow_buffer),
-            glow_count,
-            trail_line_buffer,
-            trail_line_count,
+            geometry: ManuallyDrop::new(geometry),
             content: FrameContent::default(),
             frame: ManuallyDrop::new(frame),
             command_buffer,
@@ -582,8 +360,6 @@ impl OffscreenRenderer {
             rt_trail_fade_dist: trail.fade_dist,
             rt_trail_tail_t: trail.tail_t,
             chase_camera: None,
-
-            green_edge: None,
         })
     }
 
@@ -595,118 +371,17 @@ impl OffscreenRenderer {
     /// # Safety
     /// Must be called within an active render pass.
     unsafe fn draw_scene_geometry(&self, view_proj: [[f32; 4]; 4]) {
-        // SAFETY: Caller guarantees we're inside an active render pass with valid
-        // command buffer. All buffers and pipelines are created during construction.
+        // SAFETY: The caller guarantees an active scene pass.
         unsafe {
-            let device = &self.gpu.device;
-            let cb = self.command_buffer;
-
-            let pc_cyan = GridPushConstants {
+            self.geometry.draw(
+                &self.gpu.device,
+                self.command_buffer,
+                &self.pipeline,
+                &self.frame,
                 view_proj,
-                color: color::CYAN.into(),
-            };
-            let pc_black = GridPushConstants {
-                view_proj,
-                color: [0.0, 0.0, 0.0, 1.0],
-            };
-            let pc_magenta = GridPushConstants {
-                view_proj,
-                color: color::MAGENTA.into(),
-            };
-
-            // Grid lines (LINE_LIST, cyan)
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.line);
-            device.cmd_set_line_width(cb, 1.0);
-            push_constants(
-                device,
-                cb,
-                self.pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                &pc_cyan,
+                1.0,
             );
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer.handle()], &[0]);
-            device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
-
-            // Green edge (LINE_LIST, neon green)
-            if let Some(edge) = &self.green_edge {
-                edge.record(device, cb, &self.pipeline, view_proj);
-            }
-
-            // Tee box fill (black)
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
-            push_constants(
-                device,
-                cb,
-                self.pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                &pc_black,
-            );
-            device.cmd_draw(cb, self.tee_fill_count, 1, 0, 0);
-
-            // Tee box border (cyan)
-            push_constants(
-                device,
-                cb,
-                self.pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                &pc_cyan,
-            );
-            device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
-
-            if self.frame.ball_on_tee() {
-                // Static ball: trail + glow + ball from construction-time buffers.
-                if let Some(trail_buf) = &self.trail_line_buffer {
-                    device.cmd_bind_pipeline(
-                        cb,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.pipeline.line,
-                    );
-                    device.cmd_set_line_width(cb, 1.0);
-                    device.cmd_bind_vertex_buffers(cb, 0, &[trail_buf.handle()], &[0]);
-                    push_constants(
-                        device,
-                        cb,
-                        self.pipeline.layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        &pc_magenta,
-                    );
-                    device.cmd_draw(cb, self.trail_line_count, 1, 0, 0);
-                }
-
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_magenta,
-                );
-                device.cmd_draw(cb, self.glow_count, 1, 0, 0);
-
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.fill_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_black,
-                );
-                device.cmd_draw(
-                    cb,
-                    self.ball_count,
-                    1,
-                    self.tee_fill_count + self.tee_border_count,
-                    0,
-                );
-            } else {
-                // In-flight trails, glows and balls.
-                self.frame
-                    .draw_flights(device, cb, &self.pipeline, view_proj, 1.0);
-            }
-        } // unsafe
+        }
     }
 
     /// Whether this renderer has RT reflection compositing enabled.
@@ -722,18 +397,8 @@ impl OffscreenRenderer {
         green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<(), RenderError> {
-        if let Some(old) = self.green_edge.take() {
-            // SAFETY: Waiting idle so the old edge buffer is no longer in use.
-            unsafe {
-                self.gpu
-                    .device
-                    .device_wait_idle()
-                    .map_err(RenderError::Vulkan)?;
-                old.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-        }
-        self.green_edge = GreenEdge::new(&self.gpu.device, &mut self.gpu.allocator, green, grid)?;
-        Ok(())
+        self.geometry
+            .set_green(&self.gpu.device, &mut self.gpu.allocator, green, grid)
     }
 
     /// Set or clear the chase camera for the right 20% split viewport.
@@ -1183,22 +848,13 @@ impl Drop for OffscreenRenderer {
         unsafe {
             self.gpu.device.device_wait_idle().ok();
 
-            if let Some(edge) = self.green_edge.take() {
-                edge.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-
             self.gpu.device.destroy_fence(self.fence, None);
 
             let device = &self.gpu.device;
             let allocator = &mut self.gpu.allocator;
             // SAFETY: Each `ManuallyDrop` buffer is taken once, here in `Drop`,
             // and never used after.
-            ManuallyDrop::take(&mut self.vertex_buffer).destroy(device, allocator);
-            ManuallyDrop::take(&mut self.fill_buffer).destroy(device, allocator);
-            ManuallyDrop::take(&mut self.glow_buffer).destroy(device, allocator);
-            if let Some(buffer) = self.trail_line_buffer.take() {
-                buffer.destroy(device, allocator);
-            }
+            ManuallyDrop::take(&mut self.geometry).destroy(device, allocator);
             ManuallyDrop::take(&mut self.frame).destroy(device, allocator);
 
             if let Some(composite) = self.composite.take() {
