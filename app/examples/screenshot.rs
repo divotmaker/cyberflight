@@ -37,7 +37,6 @@ use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::Frame;
 use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
-use cf_scene::grid::GridConfig;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::range::Range;
 use cf_scene::trail::{TrailPoint, tracer_tail};
@@ -250,7 +249,7 @@ fn range_shots(snap: &FlightSnapshot) -> (Vec<Shot>, Vec<Shot>) {
             .collect()
     };
     let raster = table(&[
-        ("driving_range", tee, Auto, false, false),
+        ("driving_range", tee, Off, false, false),
         ("flight", side, Off, true, false),
         ("flight_tee", tee, Off, true, false),
         ("flight_wide", wide, Off, true, false),
@@ -268,10 +267,15 @@ fn range_shots(snap: &FlightSnapshot) -> (Vec<Shot>, Vec<Shot>) {
 }
 
 /// Render `shot` of `snap` (or of the empty range) on its own renderer.
-fn render_shot(range: &Range, snap: &FlightSnapshot, shot: &Shot) -> Result<()> {
+/// Returns `false`, without rendering, when the shot asks for ray tracing
+/// and the renderer does not ray-trace.
+fn render_shot(range: &Range, snap: &FlightSnapshot, shot: &Shot) -> Result<bool> {
     eprintln!("Rendering {}...", shot.name);
     let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, shot.rt)
         .context("failed to create renderer")?;
+    if shot.rt == RtMode::Auto && renderer.render_mode() != RenderMode::RayTraced {
+        return Ok(false);
+    }
     if shot.flight {
         renderer.update_flight(&[snap.render_data()], &shot.camera);
     }
@@ -292,7 +296,8 @@ fn render_shot(range: &Range, snap: &FlightSnapshot, shot: &Shot) -> Result<()> 
         renderer.update_hud(&hud.lines, &hud.fills);
     }
     let frame = renderer.render(&shot.camera).context("render failed")?;
-    save_png(&frame, &out_path(&format!("{}.png", shot.name)))
+    save_png(&frame, &out_path(&format!("{}.png", shot.name)))?;
+    Ok(true)
 }
 
 /// Chase camera of the hero shot: behind and above the ball, looking toward the landing zone.
@@ -395,13 +400,6 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     Ok(())
 }
 
-/// Check if RT rendering is available by attempting to create an RT context.
-fn rt_available() -> bool {
-    OffscreenRenderer::new(64, 64, &GridConfig::default(), RtMode::Auto)
-        .map(|r| r.render_mode() == RenderMode::RayTraced)
-        .unwrap_or(false)
-}
-
 /// Render the hero shot, then the idle range, through the streaming calls on
 /// one renderer set up exactly like `--stream`.
 fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -474,12 +472,15 @@ fn main() -> Result<()> {
         render_shot(&range, &snap, shot)?;
     }
 
-    // ── Ray-traced screenshots (if hardware supports it) ──
-    eprintln!("Checking ray tracing support...");
-    if rt_available() {
+    // ── Ray-traced screenshots, when the first one's renderer ray-traces ──
+    let mut ray_traced = ray_traced.iter();
+    let first = ray_traced.next().context("no ray-traced screenshots")?;
+    if render_shot(&range, &snap, first)? {
         eprintln!("Ray tracing supported — generating RT screenshots");
-        for shot in &ray_traced {
-            render_shot(&range, &snap, shot)?;
+        for shot in ray_traced {
+            if !render_shot(&range, &snap, shot)? {
+                bail!("{}: ray tracing failed to set up", shot.name);
+            }
         }
     } else {
         eprintln!("Ray tracing not supported — skipping RT screenshots");
