@@ -77,7 +77,7 @@ fn parse_stream_args() -> StreamArgs {
     }
 }
 
-pub fn run_stream() -> Result<()> {
+pub fn run_stream(frp_url: &str) -> Result<()> {
     let stream_args = parse_stream_args();
     let config = stream_args.config;
 
@@ -124,7 +124,7 @@ pub fn run_stream() -> Result<()> {
     }
 
     // Connect to FRP device.
-    let mut fh = FrpState::new().context("open FRP endpoint")?;
+    let mut fh = FrpState::new(frp_url).context("open FRP endpoint")?;
     let mut fm = FlightManager::new();
 
     let start = Instant::now();

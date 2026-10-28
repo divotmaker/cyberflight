@@ -35,14 +35,14 @@ struct App {
 }
 
 impl App {
-    fn new(windowed: bool) -> Result<Self> {
+    fn new(windowed: bool, frp_url: &str) -> Result<Self> {
         Ok(Self {
             windowed,
             window: None,
             renderer: None,
             range: Range::new(),
             environment: Environment::SEA_LEVEL,
-            frp: FrpState::new().context("open FRP endpoint")?,
+            frp: FrpState::new(frp_url).context("open FRP endpoint")?,
             flights: FlightManager::new(),
             start_time: Instant::now(),
             frame_count: 0,
@@ -272,11 +272,13 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<()> {
-    if std::env::args().any(|a| a == "--stream") {
-        return stream::run_stream();
+    let args: Vec<String> = std::env::args().collect();
+    let frp_url = flight::frp_url(&args);
+    if args.iter().any(|a| a == "--stream") {
+        return stream::run_stream(&frp_url);
     }
 
-    let windowed = std::env::args().any(|a| a == "--windowed");
+    let windowed = args.iter().any(|a| a == "--windowed");
 
     let event_loop = {
         #[cfg(target_os = "linux")]
@@ -297,7 +299,7 @@ fn main() -> Result<()> {
         }
     }
     .context("failed to create event loop")?;
-    let mut app = App::new(windowed).context("failed to initialize app")?;
+    let mut app = App::new(windowed, &frp_url).context("failed to initialize app")?;
     event_loop.run_app(&mut app).context("event loop error")?;
     match app.fatal.take() {
         Some(err) => Err(err),

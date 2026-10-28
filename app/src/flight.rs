@@ -1,6 +1,8 @@
 //! Shared flight animation logic used by both windowed and streaming modes.
 
 use std::collections::HashMap;
+use std::sync::mpsc;
+use std::thread;
 
 use glam::{DVec3, Vec3};
 
@@ -306,7 +308,20 @@ impl AnimatedFlight {
     }
 }
 
-/// Open the FRP endpoint cyberflight dials.
+/// How often a lost or refused FRP connection is retried (seconds).
+pub const RECONNECT_INTERVAL_S: f64 = 5.0;
+
+/// The FRP device URL: the value after `--frp` in `args`, or
+/// [`flightrelay::DEFAULT_URL`].
+pub fn frp_url(args: &[String]) -> String {
+    args.iter()
+        .position(|a| a == "--frp")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| flightrelay::DEFAULT_URL.to_owned())
+}
+
+/// Open the FRP endpoint cyberflight dials at `url`.
 ///
 /// Cyberflight is an FRP *controller*: it receives shot data and drives the
 /// device. Opening a dialing endpoint performs no I/O, so this only fails on a
@@ -315,34 +330,32 @@ impl AnimatedFlight {
 /// # Errors
 ///
 /// Returns an error if the endpoint cannot be opened.
-pub fn frp_endpoint() -> Result<FrpEndpoint, flightrelay::FrpError> {
+pub fn frp_endpoint(url: &str) -> Result<FrpEndpoint, flightrelay::FrpError> {
     FrpEndpoint::open(
-        EndpointConfig::new(
-            Role::Controller,
-            Transport::connect(flightrelay::DEFAULT_URL),
-        )
-        .with_name("cyberflight")
-        .with_versions(&[FRP_VERSION]),
+        EndpointConfig::new(Role::Controller, Transport::connect(url))
+            .with_name("cyberflight")
+            .with_versions(&[FRP_VERSION]),
     )
 }
 
-/// Dial the device and complete the FRP handshake. Returns `(conn, connected)`.
-pub fn try_establish(endpoint: &mut FrpEndpoint) -> (Option<FrpConnection>, bool) {
-    eprintln!("Connecting to FRP at {}...", flightrelay::DEFAULT_URL);
-    match endpoint.establish() {
-        Ok(conn) => {
-            eprintln!("Connected (FRP {})", conn.version());
-            if let Err(e) = conn.set_nonblocking(true) {
-                eprintln!("set_nonblocking failed: {e}");
-                return (None, false);
-            }
-            (Some(conn), true)
-        }
-        Err(e) => {
-            eprintln!("FRP not available (expected {FRP_VERSION}): {e}");
-            (None, false)
-        }
-    }
+/// The endpoint back from a dialing thread, with the connection it made.
+type DialResult = (FrpEndpoint, Result<FrpConnection, flightrelay::FrpError>);
+
+/// Dial the device and complete the FRP handshake on a background thread,
+/// so a slow or silent device cannot stall the render loop. The endpoint
+/// and the outcome come back on the returned channel.
+fn spawn_dial(mut endpoint: FrpEndpoint, url: &str) -> mpsc::Receiver<DialResult> {
+    eprintln!("Connecting to FRP at {url}...");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = endpoint.establish().and_then(|conn| {
+            conn.set_nonblocking(true)?;
+            Ok(conn)
+        });
+        // The receiver is gone only when the app is shutting down.
+        let _ = tx.send((endpoint, result));
+    });
+    rx
 }
 
 /// Turns FRP messages into shots: tracks launch monitor ready states and
@@ -384,41 +397,87 @@ impl ShotIntake {
 }
 
 /// Shared FRP connection state used by both windowed and streaming modes.
+///
+/// Connects in the background and reconnects every
+/// [`RECONNECT_INTERVAL_S`] while disconnected.
 pub struct FrpState {
-    /// Outlives the connections it produces; `establish` again to reconnect.
-    pub endpoint: FrpEndpoint,
-    pub conn: Option<FrpConnection>,
+    url: String,
+    /// Outlives the connections it produces. `None` while a dialing thread
+    /// holds it.
+    endpoint: Option<FrpEndpoint>,
+    /// Outcome of the dial in progress, if any.
+    dial: Option<mpsc::Receiver<DialResult>>,
+    conn: Option<FrpConnection>,
     pub intake: ShotIntake,
     pub connected: bool,
-    pub last_reconnect_attempt: f64,
+    last_dial: f64,
 }
 
 impl FrpState {
+    /// FRP state for the device at `url`. The first [`poll`](Self::poll)
+    /// starts connecting.
+    ///
     /// # Errors
     ///
     /// Returns an error if the FRP endpoint cannot be opened.
-    pub fn new() -> Result<Self, flightrelay::FrpError> {
-        let mut endpoint = frp_endpoint()?;
-        let (conn, connected) = try_establish(&mut endpoint);
+    pub fn new(url: &str) -> Result<Self, flightrelay::FrpError> {
         Ok(Self {
-            endpoint,
-            conn,
+            url: url.to_owned(),
+            endpoint: Some(frp_endpoint(url)?),
+            dial: None,
+            conn: None,
             intake: ShotIntake::default(),
-            connected,
-            last_reconnect_attempt: 0.0,
+            connected: false,
+            last_dial: f64::NEG_INFINITY,
         })
+    }
+
+    /// Pick up a finished dial, or start one when disconnected and the
+    /// retry interval has passed. Never blocks.
+    fn maintain_connection(&mut self, now: f64) {
+        if let Some(dial) = &self.dial {
+            match dial.try_recv() {
+                Ok((endpoint, result)) => {
+                    self.endpoint = Some(endpoint);
+                    self.dial = None;
+                    match result {
+                        Ok(conn) => {
+                            eprintln!("Connected (FRP {})", conn.version());
+                            self.conn = Some(conn);
+                            self.connected = true;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "FRP not available at {} (expected {FRP_VERSION}): {e}",
+                                self.url
+                            );
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // The dialing thread died with the endpoint; open a new one.
+                    self.dial = None;
+                    match frp_endpoint(&self.url) {
+                        Ok(endpoint) => self.endpoint = Some(endpoint),
+                        Err(e) => eprintln!("WARN: cannot reopen FRP endpoint: {e}"),
+                    }
+                }
+            }
+        }
+
+        if self.conn.is_none() && now - self.last_dial >= RECONNECT_INTERVAL_S {
+            if let Some(endpoint) = self.endpoint.take() {
+                self.last_dial = now;
+                self.dial = Some(spawn_dial(endpoint, &self.url));
+            }
+        }
     }
 
     /// Drain all pending FRP messages. Returns the shots completed by them,
     /// oldest first.
     pub fn poll(&mut self, now: f64) -> Vec<ReceivedShot> {
-        // Reconnect if disconnected (try every 5 seconds).
-        if self.conn.is_none() && now - self.last_reconnect_attempt >= 5.0 {
-            self.last_reconnect_attempt = now;
-            let (conn, connected) = try_establish(&mut self.endpoint);
-            self.conn = conn;
-            self.connected = connected;
-        }
+        self.maintain_connection(now);
 
         let mut shots = Vec::new();
         let mut disconnected = false;
@@ -610,6 +669,76 @@ mod tests {
                 fm.launch(&shot, now, &Environment::SEA_LEVEL, &default_targets());
             }
         }
+    }
+
+    #[test]
+    fn frp_url_comes_from_the_flag() {
+        let args = |a: &[&str]| a.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
+        assert_eq!(frp_url(&args(&["cyberflight"])), flightrelay::DEFAULT_URL);
+        assert_eq!(
+            frp_url(&args(&[
+                "cyberflight",
+                "--stream",
+                "--frp",
+                "ws://pc:5880/frp"
+            ])),
+            "ws://pc:5880/frp"
+        );
+        assert_eq!(
+            frp_url(&args(&["cyberflight", "--frp"])),
+            flightrelay::DEFAULT_URL
+        );
+    }
+
+    /// Poll `state` until `done` or a few seconds pass; returns the shots.
+    fn poll_until(
+        state: &mut FrpState,
+        done: impl Fn(&FrpState, &[ReceivedShot]) -> bool,
+    ) -> Vec<ReceivedShot> {
+        let start = std::time::Instant::now();
+        let mut shots = Vec::new();
+        while !done(state, &shots) && start.elapsed().as_secs() < 5 {
+            shots.extend(state.poll(0.0));
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        shots
+    }
+
+    #[test]
+    fn a_silent_device_does_not_block_poll() {
+        // Accepts TCP but never answers the WebSocket upgrade.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("ws://{}/frp", listener.local_addr().expect("addr"));
+        let mut state = FrpState::new(&url).expect("endpoint");
+        let start = std::time::Instant::now();
+        assert!(state.poll(0.0).is_empty());
+        assert!(state.poll(1.0).is_empty());
+        assert!(start.elapsed().as_millis() < 500, "poll returned at once");
+        assert!(!state.connected);
+    }
+
+    #[test]
+    fn connects_in_the_background_and_receives_shots() {
+        let mut device = FrpEndpoint::open(EndpointConfig::new(
+            Role::Device,
+            Transport::listen("127.0.0.1:0"),
+        ))
+        .expect("device endpoint");
+        let addr = device.local_addr().expect("addr").expect("bound");
+        let server = thread::spawn(move || {
+            let mut conn = device.establish().expect("handshake");
+            for msg in shot_messages(7, 140.0, 14.0) {
+                conn.send(&msg).expect("send");
+            }
+            conn
+        });
+
+        let mut state = FrpState::new(&format!("ws://{addr}/frp")).expect("endpoint");
+        let shots = poll_until(&mut state, |s, shots| s.connected && !shots.is_empty());
+        assert!(state.connected);
+        let _conn = server.join().expect("device thread");
+        assert_eq!(shots.len(), 1);
+        assert_eq!(shots[0].shot_number, 7);
     }
 
     #[test]
