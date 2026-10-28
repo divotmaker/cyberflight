@@ -14,6 +14,7 @@ layout(push_constant) uniform PushConstants {
     mat4 inv_view_proj;
     vec4 ball_pos;    // xyz = ball center, w = viewport Y offset (pixels)
     float pixel_size; // size of one pixel per metre of ray path
+    layout(offset = 104) float line_max_radius; // metres; the segment AABBs' padding
 } pc;
 
 // What rt_line.rahit needs to colour the hit.
@@ -26,10 +27,6 @@ hitAttributeEXT LineHit hit;
 // The line is two pixels wide: its radius is this many pixels (a pixel of
 // soft edge inside it, so the half-opacity width is two pixels).
 const float LINE_RADIUS_PX = 1.5;
-
-// Upper bound of the radius in metres. Must equal LINE_MAX_RADIUS in
-// rt_pipeline.rs: the segment AABBs are padded by it.
-const float LINE_MAX_RADIUS = 1.0;
 
 // Closest approach of the ray o + t·dir (dir unit length) to the segment
 // a → b: x = distance, y = ray parameter t, z = position s along the segment.
@@ -82,7 +79,7 @@ void main() {
     // A floor reflection's path from the camera is the camera-to-floor
     // distance plus t_ray.
     float pixel = pc.pixel_size * (distance(pc.camera_pos.xyz, o) + t_ray);
-    float radius = min(LINE_RADIUS_PX * pixel, LINE_MAX_RADIUS);
+    float radius = min(LINE_RADIUS_PX * pixel, pc.line_max_radius);
     if (d >= radius) {
         return;
     }

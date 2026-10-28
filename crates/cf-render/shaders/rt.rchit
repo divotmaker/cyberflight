@@ -10,6 +10,7 @@ layout(push_constant) uniform PushConstants {
     vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;
     vec4 ball_pos;    // xyz = ball center, w = viewport Y offset (pixels)
+    layout(offset = 100) float ball_radius;
 } pc;
 
 layout(location = 0) rayPayloadInEXT vec4 payload;
@@ -52,7 +53,8 @@ void main() {
             hit_pos + N * 0.001, 0.01, refl_dir, 1000.0, 1
         );
 
-        payload = shade_floor(pc.camera_pos.xyz, hit_pos, view_dir, reflPayload, pc.ball_pos.xyz);
+        payload = shade_floor(pc.camera_pos.xyz, hit_pos, view_dir, reflPayload, pc.ball_pos.xyz,
+                             pc.ball_radius);
 
     } else if (geom_type == 2) {
         // Tee box fill: dark surface.

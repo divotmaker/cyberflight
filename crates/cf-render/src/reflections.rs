@@ -68,6 +68,13 @@ impl TraceView {
     }
 }
 
+/// The ball the floor reflects analytically.
+#[derive(Clone, Copy)]
+pub(crate) struct Ball {
+    pub(crate) centre: Vec3,
+    pub(crate) radius: f32,
+}
+
 /// What one frame's reflections are drawn from and into.
 pub(crate) struct ReflectionFrame<'a> {
     /// The views to fill, the main one first; later ones replace the
@@ -99,8 +106,8 @@ pub(crate) struct Reflections {
     mirror: Mirror,
     /// `None` without ray tracing.
     rt: Option<RtPipeline>,
-    /// Centre of the reflected ball.
-    ball_centre: Vec3,
+    /// The reflected ball.
+    ball: Ball,
 }
 
 /// The reflection image of `extent`.
@@ -185,7 +192,10 @@ impl Reflections {
             composite,
             mirror,
             rt,
-            ball_centre: tee_ball_centre(tee),
+            ball: Ball {
+                centre: tee_ball_centre(tee),
+                radius: tee.ball_radius,
+            },
         })
     }
 
@@ -196,7 +206,7 @@ impl Reflections {
 
     /// Reflect the ball with centre `ball_centre`.
     pub(crate) fn set_ball(&mut self, ball_centre: Vec3) {
-        self.ball_centre = ball_centre;
+        self.ball.centre = ball_centre;
     }
 
     /// Recreate the reflection image at `extent` (if it differs) and point
@@ -261,7 +271,7 @@ impl Reflections {
                     frame.tracer,
                     frame.views,
                     frame.extent,
-                    self.ball_centre,
+                    &self.ball,
                 ),
             }
             self.composite
@@ -275,7 +285,8 @@ impl Reflections {
             &view.camera,
             [view.extent.width as f32, view.extent.height as f32],
             [view.offset[0] as f32, view.offset[1] as f32],
-            self.ball_centre,
+            self.ball.centre,
+            self.ball.radius,
         )
     }
 
@@ -451,7 +462,7 @@ mod tests {
                 height: 1080,
             },
         };
-        let pc = RtPushConstants::new(&camera, [384.0, 1080.0], [1536.0, 0.0], ball);
+        let pc = RtPushConstants::new(&camera, [384.0, 1080.0], [1536.0, 0.0], ball, 0.02);
         assert_eq!(pc.camera_pos[3], 1536.0);
         assert_eq!(pc.ball_pos[..3], [1.0, 2.0, 3.0]);
         assert_eq!(view.aspect(), 384.0 / 1080.0);

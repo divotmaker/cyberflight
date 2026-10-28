@@ -32,7 +32,6 @@
 //! terrain are. The camera is above the floor.
 
 use ash::vk;
-use glam::Vec3;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::grid::{GridConfig, GridVertex, generate_floor_quad};
@@ -41,7 +40,7 @@ use cf_scene::tee::TeeBox;
 use crate::error::RenderError;
 use crate::gpu::{HostBuffer, Image2d, Image2dDesc, load_shader, push_constants};
 use crate::recorder::view_proj;
-use crate::reflections::{REFLECTION_FORMAT, TraceView};
+use crate::reflections::{Ball, REFLECTION_FORMAT, TraceView};
 
 /// The newest flight's tracer as the raster pass uploaded it: the mirror
 /// draws these very vertices, mirrored.
@@ -72,7 +71,7 @@ pub(crate) struct FloorPushConstants {
     pub(crate) view_proj: [[f32; 4]; 4],
     /// xyz = camera position.
     pub(crate) camera_pos: [f32; 4],
-    /// xyz = ball centre.
+    /// xyz = ball centre, w = ball radius.
     pub(crate) ball_pos: [f32; 4],
 }
 
@@ -721,8 +720,8 @@ impl Mirror {
     }
 
     /// Fill the reflection image for `views` with the mirrored `tracer` and
-    /// the ball centre `ball_centre`: the tracer pass, then the floor pass.
-    /// Afterwards the reflection image is in `SHADER_READ_ONLY_OPTIMAL`.
+    /// the reflected `ball`: the tracer pass, then the floor pass. Afterwards
+    /// the reflection image is in `SHADER_READ_ONLY_OPTIMAL`.
     ///
     /// Later views replace the rectangle they cover (the chase inset over
     /// the main view).
@@ -739,7 +738,7 @@ impl Mirror {
         tracer: &MirrorTracer,
         views: &[TraceView],
         extent: vk::Extent2D,
-        ball_centre: Vec3,
+        ball: &Ball,
     ) {
         let full = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -826,7 +825,7 @@ impl Mirror {
                 let pc = FloorPushConstants {
                     view_proj: view_proj(&view.camera, view.aspect()),
                     camera_pos: [camera.x, camera.y, camera.z, 0.0],
-                    ball_pos: [ball_centre.x, ball_centre.y, ball_centre.z, 0.0],
+                    ball_pos: [ball.centre.x, ball.centre.y, ball.centre.z, ball.radius],
                 };
                 push_constants(
                     device,

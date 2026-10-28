@@ -47,9 +47,10 @@ unsafe impl GpuData for FloorPushConstants {}
 const _: () = assert!(size_of::<FloorPushConstants>() == 96);
 
 // SAFETY: `#[repr(C)]` with `camera_pos: [f32; 4]`, `inv_view_proj:
-// [[f32; 4]; 4]`, `ball_pos: [f32; 4]` and `pixel_size: f32`: 100 bytes of `f32`, no padding.
+// [[f32; 4]; 4]`, `ball_pos: [f32; 4]` and `pixel_size`, `ball_radius` and
+// `line_max_radius: f32`: 108 bytes of `f32`, no padding.
 unsafe impl GpuData for RtPushConstants {}
-const _: () = assert!(size_of::<RtPushConstants>() == 100);
+const _: () = assert!(size_of::<RtPushConstants>() == 108);
 
 // SAFETY: `#[repr(C)]` Vulkan struct: a 3×4 `f32` transform (48 bytes), two
 // `Packed24_8` (`u32` each) and an 8-byte acceleration-structure reference

@@ -11,7 +11,6 @@
 
 const vec3 CYAN    = vec3(0.0, 1.0, 1.0);
 const vec3 MAGENTA = vec3(1.0, 0.0, 1.0);
-const float BALL_RADIUS = 0.021335; // golf ball radius in meters
 
 // ── Glass material parameters ──
 
@@ -57,9 +56,11 @@ float height_fade(float h) {
 
 // What the floor point `hit_pos` (on the plane y = 0) shows to a camera at
 // `camera_pos` looking along the unit vector `view_dir`: glass tint, the
-// reflected tracer (`trail`) and ball (centre `ball_pos`), and the specular
+// reflected tracer (`trail`) and ball (centre `ball_pos`, radius
+// `ball_radius`, both in metres), and the specular
 // gleam. Alpha 1.
-vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 ball_pos) {
+vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 ball_pos,
+                 float ball_radius) {
     vec3 V = -view_dir; // toward camera
     vec3 N = vec3(0.0, 1.0, 0.0);
 
@@ -80,11 +81,11 @@ vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 
     vec3 to_center = ball_pos - hit_pos;
     float t_closest = max(dot(to_center, refl_dir), 0.0);
     float d = length(to_center - refl_dir * t_closest);
-    float glow_radius = BALL_RADIUS * BALL_GLOW_MULT;
+    float glow_radius = ball_radius * BALL_GLOW_MULT;
     float glow_t = clamp(d / glow_radius, 0.0, 1.0);
     float ball_glow = pow(1.0 - glow_t, 3.0);
     // Core brightens near the center
-    float core_d = clamp(d / BALL_RADIUS, 0.0, 1.0);
+    float core_d = clamp(d / ball_radius, 0.0, 1.0);
     float core_glow = pow(1.0 - core_d, 4.0) * 0.6;
     // Suppress glow directly under the ball where the raster ball occludes
     // the floor — the additive composite would otherwise bleed through.
@@ -93,7 +94,7 @@ vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 
     vec3 to_ball = ball_pos - hit_pos;
     float proj = dot(to_ball, V);
     float perp = length(to_ball - V * proj);
-    float occlude = smoothstep(BALL_RADIUS * 1.5, BALL_RADIUS * 3.0, perp);
+    float occlude = smoothstep(ball_radius * 1.5, ball_radius * 3.0, perp);
     vec3 ball_reflection = (MAGENTA * ball_glow * 3.0 + vec3(1.0) * core_glow * 3.0) * EMISSIVE_REFLECTANCE * occlude;
     float ball_fade = height_fade(ball_pos.y - hit_pos.y);
 

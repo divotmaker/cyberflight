@@ -23,6 +23,11 @@ pub struct RtPushConstants {
     pub ball_pos: [f32; 4],
     /// Size of one pixel per metre of ray path (the viewport's pixel angle).
     pub pixel_size: f32,
+    /// Radius of the reflected ball in metres.
+    pub ball_radius: f32,
+    /// Largest radius of the tracer's centre line in metres:
+    /// [`TRAIL_LINE_MAX_RADIUS`], the padding of its segment AABBs.
+    pub line_max_radius: f32,
 }
 
 impl RtPushConstants {
@@ -30,12 +35,14 @@ impl RtPushConstants {
     ///
     /// `viewport_size` is the dispatch viewport's width and height and
     /// `viewport_offset` its top-left corner, both in storage-image pixels.
+    /// The ball is the sphere of `ball_radius` about `ball_center`.
     #[must_use]
     pub fn new(
         camera: &Camera,
         viewport_size: [f32; 2],
         viewport_offset: [f32; 2],
         ball_center: glam::Vec3,
+        ball_radius: f32,
     ) -> Self {
         let view = camera.view_matrix();
         let mut proj = camera.projection_matrix(viewport_size[0] / viewport_size[1]);
@@ -60,6 +67,8 @@ impl RtPushConstants {
                 viewport_offset[1],
             ],
             pixel_size,
+            ball_radius,
+            line_max_radius: TRAIL_LINE_MAX_RADIUS,
         }
     }
 }
@@ -73,8 +82,8 @@ pub const GEOM_TEE_BOX_BORDER: u32 = 4;
 pub const GEOM_TRAIL_LINE: u32 = 5;
 
 /// Largest radius of the tracer's centre line in metres, and the padding of
-/// each segment's AABB around its axis. Must equal `LINE_MAX_RADIUS` in
-/// `rt_line.rint`.
+/// each segment's AABB around its axis. `rt_line.rint` caps the radius at the
+/// value it gets in the push constants.
 pub const TRAIL_LINE_MAX_RADIUS: f32 = 1.0;
 
 /// Shader stages that read the push constants.
@@ -1511,7 +1520,7 @@ mod tests {
     fn push_constants_size() {
         // The std430 push block in rt.rgen / rt.rchit, within the 128-byte
         // minimum guarantee.
-        assert_eq!(std::mem::size_of::<RtPushConstants>(), 100);
+        assert_eq!(std::mem::size_of::<RtPushConstants>(), 108);
     }
 
     #[test]
@@ -1522,6 +1531,7 @@ mod tests {
             [1920.0, 1080.0],
             [12.0, 34.0],
             glam::Vec3::new(1.0, 2.0, 3.0),
+            0.02,
         );
         assert_eq!(
             pc.camera_pos,
@@ -1537,12 +1547,14 @@ mod tests {
         let inv_view_proj = (proj * camera.view_matrix()).inverse();
         assert_eq!(pc.inv_view_proj, inv_view_proj.to_cols_array_2d());
         assert_eq!(pc.ball_pos, [1.0, 2.0, 3.0, 34.0]);
+        assert_eq!(pc.ball_radius, 0.02);
+        assert_eq!(pc.line_max_radius, TRAIL_LINE_MAX_RADIUS);
     }
 
     #[test]
     fn pixel_size_is_the_pixel_angle() {
         let camera = Camera::default();
-        let pc = RtPushConstants::new(&camera, [384.0, 1080.0], [0.0; 2], glam::Vec3::ZERO);
+        let pc = RtPushConstants::new(&camera, [384.0, 1080.0], [0.0; 2], glam::Vec3::ZERO, 0.02);
         let expected = 2.0 * (camera.fov_y / 2.0).tan() / 1080.0;
         assert!((pc.pixel_size - expected).abs() < 1e-9, "{}", pc.pixel_size);
     }
