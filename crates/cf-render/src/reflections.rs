@@ -357,16 +357,20 @@ impl Reflections {
 
         // SAFETY: The caller guarantees the command buffer and image states.
         unsafe {
-            // Storage image: UNDEFINED → GENERAL.
+            // Storage image: UNDEFINED → GENERAL. The transition is a write,
+            // so it waits for what last used the image: the composite
+            // sampling it (fragment shader) and, after mirrored frames, the
+            // mirror's floor pass writing it (colour attachment output).
             device.cmd_pipeline_barrier(
                 cb,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
                 &[vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::empty())
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::GENERAL)
