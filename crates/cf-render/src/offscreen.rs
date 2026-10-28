@@ -778,7 +778,7 @@ impl OffscreenRenderer {
             device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
 
-            // Green edge (LINE_LIST, orange)
+            // Green edge (LINE_LIST, neon green)
             if let Some(edge) = &self.green_edge {
                 edge.record(device, cb, &self.pipeline, view_proj);
             }

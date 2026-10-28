@@ -190,7 +190,7 @@ impl Renderer {
             device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
 
-            // Green edge (LINE_LIST, orange, 1px)
+            // Green edge (LINE_LIST, neon green, 1px)
             if let Some(edge) = &self.green_edge {
                 edge.record(device, cb, &self.pipeline, view_proj);
             }

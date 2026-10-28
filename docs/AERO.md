@@ -38,7 +38,7 @@ not yet validated against measured data and may change between releases.
   green (`cf_scene::green::GreenConfig`) is one circle on the target line,
   set by its distance downrange to the centre (`distance_m`) and its
   diameter (`diameter_m`); inside it the floor is `Surface::GREEN`, and its
-  edge is drawn as one orange ring, the only circle on the range. dimple
+  edge is drawn as one neon-green ring, the only circle on the range. dimple
   samples the floor under the ball at every step, so a ball that runs onto
   the green rolls on as a green and one that runs off it finishes on
   fairway. A new range has no green
