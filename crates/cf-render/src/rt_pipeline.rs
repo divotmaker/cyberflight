@@ -881,8 +881,7 @@ impl RtPipeline {
             };
 
             // Instance mask bits:
-            //   Bit 0 (0x01): floor. Primary rays and trail continuation rays use
-            //                 cull mask 0x01.
+            //   Bit 0 (0x01): floor. Primary rays use cull mask 0x01.
             //   Bit 1 (0x02): tee box border. No ray uses this bit.
             //   Bit 2 (0x04): tracer tube and centre line. Floor reflection
             //                 rays use cull mask 0x04.
