@@ -23,7 +23,7 @@ pub struct FlightRenderData {
 use crate::context::GpuContext;
 use crate::error::RenderError;
 use crate::mode::RenderMode;
-use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline, NO_CLIP};
+use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::targets::TargetRings;

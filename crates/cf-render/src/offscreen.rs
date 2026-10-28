@@ -15,7 +15,7 @@ use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
-use crate::pipeline::{GridPipeline, GridPushConstants, NO_CLIP};
+use crate::pipeline::{GridPipeline, GridPushConstants};
 use crate::readback::FrameBuffers;
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::build_scene_geometry;
@@ -743,7 +743,6 @@ impl OffscreenRenderer {
             let pc_cyan = GridPushConstants {
                 view_proj,
                 color: color::CYAN.into(),
-                clip_bounds: NO_CLIP,
             };
             let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
                 std::ptr::from_ref(&pc_cyan).cast::<u8>(),
@@ -752,7 +751,6 @@ impl OffscreenRenderer {
             let pc_black = GridPushConstants {
                 view_proj,
                 color: [0.0, 0.0, 0.0, 1.0],
-                clip_bounds: NO_CLIP,
             };
             let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
                 std::ptr::from_ref(&pc_black).cast::<u8>(),
@@ -761,7 +759,6 @@ impl OffscreenRenderer {
             let pc_magenta = GridPushConstants {
                 view_proj,
                 color: color::MAGENTA.into(),
-                clip_bounds: NO_CLIP,
             };
             let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
                 std::ptr::from_ref(&pc_magenta).cast::<u8>(),
@@ -1340,7 +1337,6 @@ impl OffscreenRenderer {
                         let pc_hud_bg = GridPushConstants {
                             view_proj: hud_proj.to_cols_array_2d(),
                             color: [0.0, 0.0, 0.0, 0.8],
-                            clip_bounds: NO_CLIP,
                         };
                         let pc_hud_bg_bytes: &[u8] = std::slice::from_raw_parts(
                             std::ptr::from_ref(&pc_hud_bg).cast::<u8>(),
@@ -1373,7 +1369,6 @@ impl OffscreenRenderer {
                         let pc_hud_text = GridPushConstants {
                             view_proj: hud_proj.to_cols_array_2d(),
                             color: [1.0, 1.0, 1.0, 1.0],
-                            clip_bounds: NO_CLIP,
                         };
                         let pc_hud_text_bytes: &[u8] = std::slice::from_raw_parts(
                             std::ptr::from_ref(&pc_hud_text).cast::<u8>(),

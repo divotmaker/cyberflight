@@ -2,7 +2,7 @@ use ash::vk;
 
 use crate::pipeline::GridPushConstants;
 
-use super::{NO_CLIP, Renderer};
+use super::Renderer;
 
 impl Renderer {
     /// Record HUD overlay commands into the given command buffer.
@@ -59,7 +59,6 @@ impl Renderer {
                     let pc_hud_bg = GridPushConstants {
                         view_proj: hud_proj.to_cols_array_2d(),
                         color: [0.0, 0.0, 0.0, 0.8],
-                        clip_bounds: NO_CLIP,
                     };
                     let pc_hud_bg_bytes: &[u8] = std::slice::from_raw_parts(
                         std::ptr::from_ref(&pc_hud_bg).cast::<u8>(),
@@ -85,7 +84,6 @@ impl Renderer {
                     let pc_hud_text = GridPushConstants {
                         view_proj: hud_proj.to_cols_array_2d(),
                         color: [1.0, 1.0, 1.0, 1.0],
-                        clip_bounds: NO_CLIP,
                     };
                     let pc_hud_text_bytes: &[u8] = std::slice::from_raw_parts(
                         std::ptr::from_ref(&pc_hud_text).cast::<u8>(),

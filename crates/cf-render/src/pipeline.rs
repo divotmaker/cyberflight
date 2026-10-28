@@ -10,14 +10,7 @@ pub struct GridPushConstants {
     pub view_proj: [[f32; 4]; 4],
     /// Neon grid color (RGBA, HDR).
     pub color: [f32; 4],
-    /// World-space clip bounds [min_x, min_z, max_x, max_z].
-    /// Fragments outside these XZ bounds are discarded.
-    /// [`NO_CLIP`] disables clipping.
-    pub clip_bounds: [f32; 4],
 }
-
-/// Clip bounds that effectively disable clipping (huge region).
-pub(crate) const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 /// Depth/stencil format for floor reflection masking.
 pub const DEPTH_STENCIL_FORMAT: vk::Format = vk::Format::D24_UNORM_S8_UINT;

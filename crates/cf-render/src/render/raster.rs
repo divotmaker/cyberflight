@@ -5,7 +5,7 @@ use cf_scene::color;
 
 use crate::pipeline::GridPushConstants;
 
-use super::{CHASE_VIEWPORT_FRAC, NO_CLIP, Renderer};
+use super::{CHASE_VIEWPORT_FRAC, Renderer};
 
 impl Renderer {
     /// Record raster scene commands into the command buffer.
@@ -175,7 +175,6 @@ impl Renderer {
             let pc_cyan = GridPushConstants {
                 view_proj,
                 color: color::CYAN.into(),
-                clip_bounds: NO_CLIP,
             };
             let pc_cyan_bytes: &[u8] = std::slice::from_raw_parts(
                 std::ptr::from_ref(&pc_cyan).cast::<u8>(),
@@ -200,7 +199,6 @@ impl Renderer {
             let pc_black = GridPushConstants {
                 view_proj,
                 color: [0.0, 0.0, 0.0, 1.0],
-                clip_bounds: NO_CLIP,
             };
             let pc_black_bytes: &[u8] = std::slice::from_raw_parts(
                 std::ptr::from_ref(&pc_black).cast::<u8>(),
@@ -235,7 +233,6 @@ impl Renderer {
             let pc_magenta = GridPushConstants {
                 view_proj,
                 color: color::MAGENTA.into(),
-                clip_bounds: NO_CLIP,
             };
             let pc_magenta_bytes: &[u8] = std::slice::from_raw_parts(
                 std::ptr::from_ref(&pc_magenta).cast::<u8>(),

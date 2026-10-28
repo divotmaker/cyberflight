@@ -9,7 +9,7 @@ use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::target::{Target, generate_target_rings};
 
 use crate::error::RenderError;
-use crate::pipeline::{GridPipeline, GridPushConstants, NO_CLIP};
+use crate::pipeline::{GridPipeline, GridPushConstants};
 
 /// Creates a host-visible vertex buffer holding `vertices`.
 pub(crate) type CreateVertexBuffer = fn(
@@ -63,7 +63,6 @@ impl TargetRings {
         let pc = GridPushConstants {
             view_proj,
             color: color::TARGET_RING.into(),
-            clip_bounds: NO_CLIP,
         };
         // SAFETY: Caller guarantees an active render pass; the buffer lives
         // until `destroy`, and the push constants match the pipeline layout.
