@@ -621,29 +621,6 @@ fn create_pipeline(
     Ok(pipelines[0])
 }
 
-/// Pixel rectangle of a view, for scissor and clear.
-fn view_rect(view: &TraceView) -> vk::Rect2D {
-    vk::Rect2D {
-        offset: vk::Offset2D {
-            x: view.offset[0] as i32,
-            y: view.offset[1] as i32,
-        },
-        extent: view.extent,
-    }
-}
-
-/// The viewport of a view.
-fn view_viewport(view: &TraceView) -> vk::Viewport {
-    vk::Viewport {
-        x: view.offset[0] as f32,
-        y: view.offset[1] as f32,
-        width: view.extent.width as f32,
-        height: view.extent.height as f32,
-        min_depth: 0.0,
-        max_depth: 1.0,
-    }
-}
-
 /// Clear the rectangle of `view` of the pass's colour attachment to zero.
 ///
 /// # Safety
@@ -657,7 +634,7 @@ unsafe fn clear_view(device: &ash::Device, cb: vk::CommandBuffer, view: &TraceVi
         },
     }];
     let rect = vk::ClearRect {
-        rect: view_rect(view),
+        rect: view.rect(),
         base_array_layer: 0,
         layer_count: 1,
     };
@@ -774,7 +751,6 @@ impl Mirror {
         let zero = [vk::ClearValue {
             color: vk::ClearColorValue { float32: [0.0; 4] },
         }];
-        let aspect = |view: &TraceView| view.extent.width as f32 / view.extent.height as f32;
         let passes = &self.passes;
 
         // SAFETY: The caller guarantees the command buffer state, the images
@@ -793,10 +769,10 @@ impl Mirror {
                 if i > 0 {
                     clear_view(device, cb, view);
                 }
-                device.cmd_set_viewport(cb, 0, &[view_viewport(view)]);
-                device.cmd_set_scissor(cb, 0, &[view_rect(view)]);
+                device.cmd_set_viewport(cb, 0, &[view.viewport()]);
+                device.cmd_set_scissor(cb, 0, &[view.rect()]);
                 let pc = TracerPushConstants {
-                    view_proj: view_proj(&view.camera, aspect(view)),
+                    view_proj: view_proj(&view.camera, view.aspect()),
                 };
                 if !tracer.tube.is_empty() {
                     device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, passes.tube);
@@ -847,11 +823,11 @@ impl Mirror {
                 if i > 0 {
                     clear_view(device, cb, view);
                 }
-                device.cmd_set_viewport(cb, 0, &[view_viewport(view)]);
-                device.cmd_set_scissor(cb, 0, &[view_rect(view)]);
+                device.cmd_set_viewport(cb, 0, &[view.viewport()]);
+                device.cmd_set_scissor(cb, 0, &[view.rect()]);
                 let camera = view.camera.position;
                 let pc = FloorPushConstants {
-                    view_proj: view_proj(&view.camera, aspect(view)),
+                    view_proj: view_proj(&view.camera, view.aspect()),
                     camera_pos: [camera.x, camera.y, camera.z, 0.0],
                     ball_pos: [ball_centre.x, ball_centre.y, ball_centre.z, 0.0],
                 };
@@ -886,31 +862,10 @@ impl Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cf_scene::camera::Camera;
-
-    fn view(offset: [u32; 2], width: u32, height: u32) -> TraceView {
-        TraceView {
-            camera: Camera::driving_range(),
-            offset,
-            extent: vk::Extent2D { width, height },
-        }
-    }
 
     #[test]
     fn push_constants_fit_the_guaranteed_size() {
         assert_eq!(std::mem::size_of::<TracerPushConstants>(), 64);
         assert_eq!(std::mem::size_of::<FloorPushConstants>(), 96);
-    }
-
-    #[test]
-    fn a_view_clears_and_draws_its_own_rectangle() {
-        let inset = view([1536, 0], 384, 1080);
-        let rect = view_rect(&inset);
-        assert_eq!((rect.offset.x, rect.offset.y), (1536, 0));
-        assert_eq!((rect.extent.width, rect.extent.height), (384, 1080));
-        let viewport = view_viewport(&inset);
-        assert_eq!((viewport.x, viewport.y), (1536.0, 0.0));
-        assert_eq!((viewport.width, viewport.height), (384.0, 1080.0));
-        assert_eq!((viewport.min_depth, viewport.max_depth), (0.0, 1.0));
     }
 }

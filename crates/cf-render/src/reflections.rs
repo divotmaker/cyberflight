@@ -62,13 +62,44 @@ impl RtTracer {
     }
 }
 
-/// One view of the reflection image: a camera and the rectangle of the
-/// image it fills.
+/// One view of a frame: a camera and the rectangle of the frame (and of the
+/// reflection image) it fills.
+#[derive(Clone, Copy)]
 pub(crate) struct TraceView {
     pub(crate) camera: Camera,
-    /// Top-left corner in reflection-image pixels.
+    /// Top-left corner in pixels.
     pub(crate) offset: [u32; 2],
     pub(crate) extent: vk::Extent2D,
+}
+
+impl TraceView {
+    /// The view's rectangle (scissor and clear rect).
+    pub(crate) fn rect(&self) -> vk::Rect2D {
+        vk::Rect2D {
+            offset: vk::Offset2D {
+                x: self.offset[0] as i32,
+                y: self.offset[1] as i32,
+            },
+            extent: self.extent,
+        }
+    }
+
+    /// The view's viewport.
+    pub(crate) fn viewport(&self) -> vk::Viewport {
+        vk::Viewport {
+            x: self.offset[0] as f32,
+            y: self.offset[1] as f32,
+            width: self.extent.width as f32,
+            height: self.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }
+    }
+
+    /// Width / height of the view.
+    pub(crate) fn aspect(&self) -> f32 {
+        self.extent.width as f32 / self.extent.height as f32
+    }
 }
 
 /// What one frame's reflections are drawn from and into.
@@ -551,6 +582,25 @@ mod tests {
         let pc = RtPushConstants::new(&camera, [384.0, 1080.0], [1536.0, 0.0], ball);
         assert_eq!(pc.camera_pos[3], 1536.0);
         assert_eq!(pc.ball_pos[..3], [1.0, 2.0, 3.0]);
-        assert_eq!(view.extent.width, 384);
+        assert_eq!(view.aspect(), 384.0 / 1080.0);
+    }
+
+    #[test]
+    fn a_view_is_its_own_rectangle_and_viewport() {
+        let inset = TraceView {
+            camera: Camera::driving_range(),
+            offset: [1536, 0],
+            extent: vk::Extent2D {
+                width: 384,
+                height: 1080,
+            },
+        };
+        let rect = inset.rect();
+        assert_eq!((rect.offset.x, rect.offset.y), (1536, 0));
+        assert_eq!((rect.extent.width, rect.extent.height), (384, 1080));
+        let viewport = inset.viewport();
+        assert_eq!((viewport.x, viewport.y), (1536.0, 0.0));
+        assert_eq!((viewport.width, viewport.height), (384.0, 1080.0));
+        assert_eq!((viewport.min_depth, viewport.max_depth), (0.0, 1.0));
     }
 }

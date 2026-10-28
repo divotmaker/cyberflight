@@ -49,36 +49,16 @@ impl ChaseViewport {
         }
     }
 
-    /// The inset's rectangle in a frame `height` pixels high (scissor and
-    /// clear rect).
-    pub(crate) fn rect(self, height: u32) -> vk::Rect2D {
-        vk::Rect2D {
-            offset: vk::Offset2D {
-                x: self.x as i32,
-                y: 0,
-            },
+    /// The inset of a frame `height` pixels high, seen from `camera`.
+    pub(crate) fn view(self, camera: Camera, height: u32) -> TraceView {
+        TraceView {
+            camera,
+            offset: [self.x, 0],
             extent: vk::Extent2D {
                 width: self.width,
                 height,
             },
         }
-    }
-
-    /// The inset's viewport in a frame `height` pixels high.
-    pub(crate) fn viewport(self, height: u32) -> vk::Viewport {
-        vk::Viewport {
-            x: self.x as f32,
-            y: 0.0,
-            width: self.width as f32,
-            height: height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }
-    }
-
-    /// Width / height of the inset in a frame `height` pixels high.
-    pub(crate) fn aspect(self, height: u32) -> f32 {
-        self.width as f32 / height as f32
     }
 }
 
@@ -335,21 +315,16 @@ impl SceneRecorder {
     ) {
         self.frame.upload(&self.content);
         let extent = target.extent;
-        let full = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
+        let main_view = TraceView {
+            camera: *camera,
+            offset: [0, 0],
             extent,
         };
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let chase = self
+        let full = main_view.rect();
+        let viewport = main_view.viewport();
+        let chase_view = self
             .chase
-            .map(|chase| (chase, ChaseViewport::new(extent.width)));
+            .map(|chase| ChaseViewport::new(extent.width).view(chase, extent.height));
 
         // SAFETY: The caller guarantees the command buffer state and that the
         // framebuffers match the passes; every resource lives in `self`.
@@ -376,16 +351,15 @@ impl SceneRecorder {
             device.cmd_begin_render_pass(cb, &scene_pass_info, vk::SubpassContents::INLINE);
             device.cmd_set_viewport(cb, 0, &[viewport]);
             device.cmd_set_scissor(cb, 0, &[full]);
-            let aspect = extent.width as f32 / extent.height as f32;
             self.geometry.draw(
                 device,
                 cb,
                 &self.pipelines,
                 &self.frame,
-                view_proj(camera, aspect),
+                view_proj(camera, main_view.aspect()),
             );
 
-            if let Some((chase_camera, chase_vp)) = &chase {
+            if let Some(inset) = &chase_view {
                 let clear_attachments = [
                     vk::ClearAttachment {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -399,19 +373,19 @@ impl SceneRecorder {
                     },
                 ];
                 let clear_rect = vk::ClearRect {
-                    rect: chase_vp.rect(extent.height),
+                    rect: inset.rect(),
                     base_array_layer: 0,
                     layer_count: 1,
                 };
                 device.cmd_clear_attachments(cb, &clear_attachments, &[clear_rect]);
-                device.cmd_set_viewport(cb, 0, &[chase_vp.viewport(extent.height)]);
-                device.cmd_set_scissor(cb, 0, &[chase_vp.rect(extent.height)]);
+                device.cmd_set_viewport(cb, 0, &[inset.viewport()]);
+                device.cmd_set_scissor(cb, 0, &[inset.rect()]);
                 self.geometry.draw(
                     device,
                     cb,
                     &self.pipelines,
                     &self.frame,
-                    view_proj(chase_camera, chase_vp.aspect(extent.height)),
+                    view_proj(&inset.camera, inset.aspect()),
                 );
             }
             device.cmd_end_render_pass(cb);
@@ -420,26 +394,11 @@ impl SceneRecorder {
             if let Some(reflections) = &self.reflections {
                 let ray_traced = self.mode == RenderMode::RayTraced;
                 let tracer = self.frame.newest_tracer();
-                let main_view = TraceView {
-                    camera: *camera,
-                    offset: [0, 0],
-                    extent,
-                };
                 let with_chase;
                 let main_only;
-                let views: &[TraceView] = match chase {
-                    Some((chase_camera, chase_vp)) => {
-                        with_chase = [
-                            main_view,
-                            TraceView {
-                                camera: chase_camera,
-                                offset: [chase_vp.x, 0],
-                                extent: vk::Extent2D {
-                                    width: chase_vp.width,
-                                    height: extent.height,
-                                },
-                            },
-                        ];
+                let views: &[TraceView] = match chase_view {
+                    Some(inset) => {
+                        with_chase = [main_view, inset];
                         &with_chase
                     }
                     None => {
@@ -506,10 +465,12 @@ mod tests {
             assert_eq!(chase.x, (w as f32 * 0.8) as u32, "x at {w}");
             assert_eq!(chase.width, (w as f32 * 0.2) as u32, "width at {w}");
             assert!(chase.x + chase.width <= w, "inside the frame at {w}");
-            let rect = chase.rect(1080);
+            let inset = chase.view(Camera::default(), 1080);
+            let rect = inset.rect();
             assert_eq!(rect.offset.x as u32, chase.x, "i32 round trip at {w}");
             assert_eq!(rect.extent.width, chase.width);
             assert_eq!(rect.extent.height, 1080);
+            assert_eq!(inset.aspect(), chase.width as f32 / 1080.0);
         }
     }
 
