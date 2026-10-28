@@ -41,13 +41,14 @@ cyberflight --windowed              # 1920x1080 window
 cyberflight --frp ws://pc:5880/frp  # flighthook on another machine
 ```
 
-With a GPU that supports Vulkan ray tracing, the window starts with ray-traced floor
-reflections; otherwise it rasterizes.
+The floor reflects the tracer and the ball. With a GPU that supports Vulkan ray tracing, the
+window starts with ray-traced reflections; otherwise (or after `R`) the reflections are the
+tracer mirrored across the floor, which works on any Vulkan GPU and looks the same.
 
 | Key | Action |
 |---|---|
 | `Esc` | Quit |
-| `R` | Toggle ray-traced reflections / rasterized (ray-tracing GPUs only) |
+| `R` | Switch the floor reflections between ray traced and mirrored; the screen says which (no ray tracing: mirrored only) |
 | `[` / `]` | Draw the tracer from more / fewer trajectory points |
 
 On Linux, winit picks Wayland or X11; set `CYBERFLIGHT_X11=1` to force X11.
@@ -56,7 +57,7 @@ On Linux, winit picks Wayland or X11; set `CYBERFLIGHT_X11=1` to force X11.
 
 `--stream` renders headless (no window) and streams H.264 through
 [ffmpeg](https://ffmpeg.org/), which must be on `PATH`. Like the window, it draws ray-traced
-floor reflections when the GPU supports Vulkan ray tracing and rasterizes otherwise. It uses
+floor reflections when the GPU supports Vulkan ray tracing and mirrored ones otherwise. It uses
 NVENC when a test encode succeeds and libx264 otherwise.
 
 ```bash
@@ -74,7 +75,8 @@ cyberflight --stream --mode hls --serve --port 8080 # HLS in stream/, served ove
 ## Building
 
 Requires a recent stable Rust toolchain (edition 2024) and a Vulkan 1.3 driver. Ray tracing
-needs `VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure`; it is optional.
+needs `VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure`; it is optional (the
+floor's reflections are then mirrored).
 
 ```bash
 cargo build --release -p cyberflight          # target/release/cyberflight
@@ -89,7 +91,7 @@ Compiled SPIR-V shaders are checked in. After editing a shader in
 ### Screenshots
 
 The `screenshot` example renders a fixed set of views headless (needs a Vulkan GPU): the hero
-shot with chase camera and HUD, the empty range, a 7-iron from five views (one with the HUD),
+shot with chase camera and HUD, the empty range, a 7-iron from five views (one with the HUD; the floor's reflections mirrored),
 ray-traced versions of the range and four of the 7-iron views on GPUs that ray-trace, and
 two frames (in flight, then idle) through the calls `--stream` makes. `cf-test` compares two
 sets, so a change can be checked for visual differences:

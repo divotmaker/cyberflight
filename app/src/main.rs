@@ -13,8 +13,10 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use cf_render::context::{GpuConfig, GpuContext};
+use cf_render::mode::RenderMode;
 use cf_render::render::Renderer;
 use cf_render::window::Swapchain;
+use cf_scene::hud::build_notice;
 use cf_scene::range::Range;
 use dimple::environment::Environment;
 
@@ -23,6 +25,27 @@ use flight::{FlightManager, FrpState};
 /// How often a minimised window wakes to take in shots and advance the
 /// flights without drawing.
 const MINIMISED_TICK: Duration = Duration::from_millis(200);
+
+/// How long the notice of a key press stays on screen.
+const NOTICE_DURATION: Duration = Duration::from_millis(2500);
+
+/// The reflections mode a press of the reflections key (`R`) switches to.
+fn next_reflections(current: RenderMode) -> RenderMode {
+    match current {
+        RenderMode::Rasterized => RenderMode::RayTraced,
+        RenderMode::RayTraced => RenderMode::Rasterized,
+    }
+}
+
+/// The notice that says which reflections are drawn, after a press of the
+/// reflections key left the renderer in `mode`.
+fn reflections_notice(mode: RenderMode, ray_tracing_available: bool) -> &'static str {
+    match (mode, ray_tracing_available) {
+        (RenderMode::RayTraced, _) => "REFLECTIONS: RAY TRACED",
+        (RenderMode::Rasterized, true) => "REFLECTIONS: MIRROR",
+        (RenderMode::Rasterized, false) => "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE",
+    }
+}
 
 /// Whether a window of `size` is minimised: Windows reports a minimised
 /// window as a resize to zero width and height.
@@ -54,6 +77,8 @@ struct App {
     /// The window is minimised: nothing is drawn, and [`App::advance`] runs
     /// on a timer instead of per frame.
     minimised: bool,
+    /// The notice shown over the scene and when it was raised.
+    notice: Option<(&'static str, Instant)>,
     /// Why the event loop was stopped, when the app could not run.
     fatal: Option<anyhow::Error>,
 }
@@ -72,6 +97,7 @@ impl App {
             frame_count: 0,
             fps_timer: Instant::now(),
             minimised: false,
+            notice: None,
             fatal: None,
         })
     }
@@ -172,7 +198,16 @@ impl App {
                 screen_w,
                 screen_h,
             );
-            renderer.update_hud(&hud.lines, &hud.fills);
+            let mut lines = hud.lines;
+            let mut fills = hud.fills;
+            self.notice
+                .take_if(|(_, raised)| raised.elapsed() >= NOTICE_DURATION);
+            if let Some((text, _)) = self.notice {
+                let notice = build_notice(text, screen_w, screen_h);
+                lines.extend(notice.lines);
+                fills.extend(notice.fills);
+            }
+            renderer.update_hud(&lines, &fills);
         }
 
         // FPS counter
@@ -268,17 +303,17 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
+                    && !event.repeat
                     && event.physical_key == PhysicalKey::Code(KeyCode::KeyR) =>
             {
                 if let Some(renderer) = &mut self.renderer {
-                    use cf_render::mode::RenderMode;
-                    let new_mode = if renderer.render_mode() == RenderMode::Rasterized {
-                        RenderMode::RayTraced
-                    } else {
-                        RenderMode::Rasterized
-                    };
-                    renderer.set_render_mode(new_mode);
-                    eprintln!("Render mode: {:?}", renderer.render_mode());
+                    renderer.set_render_mode(next_reflections(renderer.render_mode()));
+                    let text = reflections_notice(
+                        renderer.render_mode(),
+                        renderer.ray_tracing_available(),
+                    );
+                    eprintln!("{text}");
+                    self.notice = Some((text, Instant::now()));
                 }
             }
             WindowEvent::KeyboardInput { event, .. }
@@ -375,6 +410,37 @@ mod tests {
     /// An app whose FRP device is never dialled (no I/O until `advance`).
     fn app() -> App {
         App::new(true, "ws://127.0.0.1:9/frp").expect("app")
+    }
+
+    #[test]
+    fn the_reflections_key_alternates_the_modes() {
+        assert_eq!(
+            next_reflections(RenderMode::RayTraced),
+            RenderMode::Rasterized
+        );
+        assert_eq!(
+            next_reflections(RenderMode::Rasterized),
+            RenderMode::RayTraced
+        );
+    }
+
+    #[test]
+    fn the_notice_names_the_reflections_drawn() {
+        assert_eq!(
+            reflections_notice(RenderMode::RayTraced, true),
+            "REFLECTIONS: RAY TRACED"
+        );
+        assert_eq!(
+            reflections_notice(RenderMode::Rasterized, true),
+            "REFLECTIONS: MIRROR"
+        );
+        // Pressing the key without a ray tracer stays on the mirror and says why.
+        let stays = next_reflections(RenderMode::Rasterized);
+        assert_eq!(stays, RenderMode::RayTraced, "the key asks for ray tracing");
+        assert_eq!(
+            reflections_notice(RenderMode::Rasterized, false),
+            "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE"
+        );
     }
 
     #[test]

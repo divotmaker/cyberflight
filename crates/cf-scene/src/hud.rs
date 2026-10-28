@@ -399,18 +399,44 @@ fn emit_row(
 }
 
 fn build_panel_fill(x_left: f32, x_right: f32, screen_h: f32) -> Vec<GridVertex> {
+    build_rect_fill(x_left, x_right, 0.0, screen_h)
+}
+
+/// The two triangles of the rectangle `x_left..x_right` × `y_top..y_bottom`
+/// (pixels).
+fn build_rect_fill(x_left: f32, x_right: f32, y_top: f32, y_bottom: f32) -> Vec<GridVertex> {
     let v = |x: f32, y: f32| GridVertex {
         position: [x, y, 0.0],
         fade: 0.0,
     };
     vec![
-        v(x_left, 0.0),
-        v(x_right, 0.0),
-        v(x_right, screen_h),
-        v(x_left, 0.0),
-        v(x_right, screen_h),
-        v(x_left, screen_h),
+        v(x_left, y_top),
+        v(x_right, y_top),
+        v(x_right, y_bottom),
+        v(x_left, y_top),
+        v(x_right, y_bottom),
+        v(x_left, y_bottom),
     ]
+}
+
+/// Build the HUD geometry of a short `text` notice: one line in a panel,
+/// centred between the side panels at the top of the screen, in the style of
+/// the telemetry panel.
+#[must_use]
+pub fn build_notice(text: &str, screen_w: f32, screen_h: f32) -> HudGeometry {
+    let sc = HudScale::new(screen_h);
+    let pad = REF_SECTION_GAP * screen_h / REF_HEIGHT;
+    let text_w = hud_font::text_width(text, sc.char_height);
+    let x_left = (screen_w - text_w) * 0.5;
+    let y_top = sc.margin_top;
+    let lines = hud_font::build_text(text, x_left, y_top, sc.char_height, VALUE_FADE);
+    let fills = build_rect_fill(
+        x_left - pad,
+        x_left + text_w + pad,
+        y_top - pad,
+        y_top + sc.char_height + pad,
+    );
+    HudGeometry { lines, fills }
 }
 
 #[cfg(test)]
@@ -610,5 +636,39 @@ mod tests {
             (right_min_x - 1536.0).abs() < 1.0,
             "right panel edge should be 1536, got {right_min_x}"
         );
+    }
+
+    #[test]
+    fn notice_is_centred_between_the_panels() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0), (3840.0, 2160.0)] {
+            let text = "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE";
+            let geom = build_notice(text, w, h);
+            assert!(!geom.lines.is_empty() && geom.lines.len() % 2 == 0);
+            assert_eq!(geom.fills.len(), 6, "one rectangle");
+            let xs = geom.fills.iter().map(|v| v.position[0]);
+            let (left, right) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(0.0, f32::max));
+            assert!(
+                ((left + right) * 0.5 - w * 0.5).abs() < 1.0,
+                "centred at {w}x{h}"
+            );
+            assert!(
+                left > w * PANEL_FRAC && right < w * (1.0 - PANEL_FRAC),
+                "between the panels at {w}x{h}"
+            );
+            // The text lies inside its panel.
+            let inside = geom.lines.iter().all(|v| {
+                v.position[0] > left
+                    && v.position[0] < right
+                    && v.position[1] > geom.fills[0].position[1]
+                    && v.position[1] < geom.fills[2].position[1]
+            });
+            assert!(inside, "text inside the fill at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn notice_text_is_bright() {
+        let geom = build_notice("REFLECTIONS: MIRROR", 1920.0, 1080.0);
+        assert!(geom.lines.iter().all(|v| v.fade == VALUE_FADE));
     }
 }
