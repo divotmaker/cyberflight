@@ -1,6 +1,3 @@
-mod hud;
-mod raster;
-
 use std::mem::ManuallyDrop;
 
 use ash::vk;
@@ -16,30 +13,24 @@ pub use crate::flight::FlightRenderData;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::flight::flight_vertices;
-use crate::frame::{FrameContent, FrameResources};
 use crate::gpu::{Image2d, Image2dDesc};
 use crate::mode::RenderMode;
-use crate::pipeline::ScenePipelines;
-use crate::recorder::ChaseViewport;
-use crate::reflections::{Reflections, RtSceneState, TraceView};
+use crate::recorder::{FrameTarget, SceneRecorder};
+use crate::reflections::RtSceneState;
 use crate::rt_offscreen::RtTrail;
-use crate::scene::SceneGeometry;
 use crate::window::Swapchain;
 
 /// Complete renderer: owns GPU resources and draws frames.
 pub struct Renderer {
-    pub gpu: GpuContext,
+    /// Passes, scene, per-frame content, reflections, mode and chase camera.
+    recorder: ManuallyDrop<SceneRecorder>,
     pub swapchain: Swapchain,
-    pub pipeline: ManuallyDrop<ScenePipelines>,
-    pub(super) framebuffers: Vec<vk::Framebuffer>,
-    // Grid, green edge, tee box and the ball on the tee.
-    pub(super) geometry: ManuallyDrop<SceneGeometry>,
-    // Next frame's flights and HUD, uploaded into `frame` when it is recorded.
-    content: FrameContent,
-    // Per-frame flight and HUD buffers.
-    pub(super) frame: ManuallyDrop<FrameResources>,
-    // Depth image for depth testing (`None` only after a failed rebuild).
+    /// Colour + depth framebuffers of the scene pass, one per swapchain image.
+    framebuffers: Vec<vk::Framebuffer>,
+    /// Colour-only framebuffers of the HUD and composite passes, one per
+    /// swapchain image.
+    overlay_framebuffers: Vec<vk::Framebuffer>,
+    /// Depth image for depth testing (`None` only after a failed rebuild).
     depth: Option<Image2d>,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available: Vec<vk::Semaphore>,
@@ -50,14 +41,7 @@ pub struct Renderer {
     window_extent: vk::Extent2D,
     /// Swapchain must be rebuilt before the next acquire (out of date or suboptimal).
     swapchain_stale: bool,
-    // Colour-only framebuffers of the HUD and composite passes, one per
-    // swapchain image.
-    pub(super) overlay_framebuffers: Vec<vk::Framebuffer>,
-    // Ray tracing (optional, only when hardware supports it).
-    pub render_mode: RenderMode,
-    pub(super) reflections: Option<Reflections>,
-    /// Optional chase camera for the right 20% viewport (set per-frame).
-    pub(super) chase_camera: Option<Camera>,
+    gpu: GpuContext,
 }
 
 impl Renderer {
@@ -68,11 +52,12 @@ impl Renderer {
         grid_config: &GridConfig,
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
-        let pipeline = ScenePipelines::new(
-            &gpu.device,
+        let mut recorder = SceneRecorder::new(
+            &mut gpu,
             swapchain.format,
-            gpu.depth_format,
             vk::ImageLayout::PRESENT_SRC_KHR,
+            grid_config,
+            None,
         )?;
 
         let depth = Self::create_depth(
@@ -82,49 +67,27 @@ impl Renderer {
             swapchain.extent,
         )?;
 
-        let framebuffers =
-            Self::create_framebuffers(&gpu.device, &swapchain, pipeline.scene_pass, depth.view())?;
-        let overlay_framebuffers =
-            Self::create_overlay_framebuffers(&gpu.device, &swapchain, pipeline.hud_pass)?;
-
-        let tee = TeeBox::default();
-        let geometry = SceneGeometry::new(
+        let framebuffers = Self::create_framebuffers(
             &gpu.device,
-            &mut gpu.allocator,
-            grid_config,
-            &tee,
-            None,
-            gpu.wide_lines,
+            &swapchain,
+            recorder.scene_pass(),
+            depth.view(),
         )?;
-
-        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
+        let overlay_framebuffers =
+            Self::create_overlay_framebuffers(&gpu.device, &swapchain, recorder.hud_pass())?;
 
         // Build RT reflections if hardware supports it.
-        let (render_mode, reflections) = if gpu.rt_supported {
+        if gpu.rt_supported {
+            let tee = TeeBox::default();
             let scene = RtSceneState::new(
                 glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
                 RtTrail::default(),
             );
-            match Reflections::new(
-                &mut gpu,
-                swapchain.format,
-                swapchain.extent,
-                grid_config,
-                &tee,
-                scene,
-            ) {
-                Ok(reflections) => {
-                    eprintln!("RT pipeline: initialized (windowed mode)");
-                    (RenderMode::RayTraced, Some(reflections))
-                }
-                Err(e) => {
-                    eprintln!("RT pipeline init failed, falling back to raster: {e}");
-                    (RenderMode::Rasterized, None)
-                }
+            match recorder.enable_reflections(&mut gpu, swapchain.extent, scene) {
+                Ok(()) => eprintln!("RT pipeline: initialized (windowed mode)"),
+                Err(e) => eprintln!("RT pipeline init failed, falling back to raster: {e}"),
             }
-        } else {
-            (RenderMode::Rasterized, None)
-        };
+        }
 
         let window_extent = swapchain.extent;
         let image_count = framebuffers.len();
@@ -133,15 +96,11 @@ impl Renderer {
             Self::create_sync_objects(&gpu.device, image_count)?;
 
         Ok(Self {
-            gpu,
+            recorder: ManuallyDrop::new(recorder),
             swapchain,
-            pipeline: ManuallyDrop::new(pipeline),
             framebuffers,
-            geometry: ManuallyDrop::new(geometry),
-            content: FrameContent::default(),
-            frame: ManuallyDrop::new(frame),
-            depth: Some(depth),
             overlay_framebuffers,
+            depth: Some(depth),
             command_buffers,
             image_available,
             render_finished,
@@ -149,16 +108,14 @@ impl Renderer {
             current_frame: 0,
             window_extent,
             swapchain_stale: false,
-            render_mode,
-            reflections,
-            chase_camera: None,
+            gpu,
         })
     }
 
     /// Draw a frame with the current camera.
     ///
-    /// Dispatches to the raster or RT scene recording, then overlays HUD,
-    /// submits, and presents. Does nothing while the window is minimised
+    /// Records the scene, the reflections in `RayTraced` mode and the HUD,
+    /// then submits and presents. Does nothing while the window is minimised
     /// (zero extent). An out-of-date swapchain is rebuilt and the frame
     /// skipped; a suboptimal one is rendered and presented, then rebuilt.
     ///
@@ -183,7 +140,6 @@ impl Renderer {
                 .wait_for_fences(&[self.in_flight_fences[frame]], true, u64::MAX)
                 .map_err(RenderError::Vulkan)?;
         }
-        self.frame.upload(&self.content);
 
         // Acquire next image
         // SAFETY: Acquiring swapchain image with valid semaphore.
@@ -213,8 +169,16 @@ impl Renderer {
 
         let device = &self.gpu.device;
         let cb = self.command_buffers[image_index as usize];
+        let target = FrameTarget {
+            scene: self.framebuffers[image_index as usize],
+            overlay: self.overlay_framebuffers[image_index as usize],
+            extent: self.swapchain.extent,
+        };
 
-        // SAFETY: Recording commands into a valid command buffer.
+        // SAFETY: Recording commands into a valid command buffer. The
+        // framebuffers of `image_index` were made with the recorder's passes
+        // at the swapchain extent, the recorder was resized to it, and this
+        // frame's fence was waited on above.
         unsafe {
             device
                 .reset_command_buffer(cb, vk::CommandBufferResetFlags::empty())
@@ -226,41 +190,8 @@ impl Renderer {
                 .begin_command_buffer(cb, &begin_info)
                 .map_err(RenderError::Vulkan)?;
 
-            // Dispatch scene recording — leaves image at COLOR_ATTACHMENT_OPTIMAL.
-            self.record_raster_scene(cb, camera, image_index);
-
-            // Ray-traced reflections: main view, plus the chase inset when set.
-            if self.render_mode == RenderMode::RayTraced {
-                if let Some(reflections) = &self.reflections {
-                    let extent = self.swapchain.extent;
-                    let mut views = vec![TraceView {
-                        camera: *camera,
-                        offset: [0, 0],
-                        extent,
-                    }];
-                    if let Some(chase) = self.chase_camera {
-                        let chase_vp = ChaseViewport::new(extent.width);
-                        views.push(TraceView {
-                            camera: chase,
-                            offset: [chase_vp.x, 0],
-                            extent: vk::Extent2D {
-                                width: chase_vp.width,
-                                height: extent.height,
-                            },
-                        });
-                    }
-                    reflections.record(
-                        device,
-                        cb,
-                        &views,
-                        self.overlay_framebuffers[image_index as usize],
-                        extent,
-                    );
-                }
-            }
-
-            // HUD overlay (final_layout = PRESENT_SRC_KHR)
-            self.record_hud_commands(cb, image_index, self.swapchain.extent);
+            // Scene, reflections and HUD; leaves the image in PRESENT_SRC_KHR.
+            self.recorder.record_frame(device, cb, &target, camera);
 
             device.end_command_buffer(cb).map_err(RenderError::Vulkan)?;
         }
@@ -419,26 +350,24 @@ impl Renderer {
         self.framebuffers = Self::create_framebuffers(
             &self.gpu.device,
             &self.swapchain,
-            self.pipeline.scene_pass,
+            self.recorder.scene_pass(),
             depth_view,
         )?;
         self.overlay_framebuffers = Self::create_overlay_framebuffers(
             &self.gpu.device,
             &self.swapchain,
-            self.pipeline.hud_pass,
+            self.recorder.hud_pass(),
         )?;
         // The swapchain's actual extent, which may differ from the requested
         // size after surface clamping.
-        if let Some(reflections) = &mut self.reflections {
-            // SAFETY: The device is idle (waited above) and the old
-            // framebuffers are destroyed.
-            unsafe {
-                reflections.resize(
-                    &self.gpu.device,
-                    &mut self.gpu.allocator,
-                    self.swapchain.extent,
-                )?;
-            }
+        // SAFETY: The device is idle (waited above) and the old framebuffers
+        // are destroyed.
+        unsafe {
+            self.recorder.resize(
+                &self.gpu.device,
+                &mut self.gpu.allocator,
+                self.swapchain.extent,
+            )?;
         }
 
         // Reallocate command buffers if image count changed
@@ -456,33 +385,35 @@ impl Renderer {
         Ok(())
     }
 
+    /// The current rendering mode.
+    #[must_use]
+    pub fn render_mode(&self) -> RenderMode {
+        self.recorder.mode()
+    }
+
     /// Switch between raster and ray-traced rendering.
     ///
     /// Falls back to `Rasterized` if RT is requested but not available.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
-        if mode == RenderMode::RayTraced && self.reflections.is_none() {
-            self.render_mode = RenderMode::Rasterized;
-        } else {
-            self.render_mode = mode;
-        }
+        self.recorder.set_mode(mode);
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
-    /// `grid`; `None` draws nothing. Replaces any green set before.
+    /// the renderer's grid; `None` draws nothing. Replaces any green set
+    /// before. `_grid` must be the grid the renderer was created with.
     pub fn set_green(
         &mut self,
         green: Option<&GreenConfig>,
-        grid: &GridConfig,
+        _grid: &GridConfig,
     ) -> Result<(), RenderError> {
-        self.geometry
-            .set_green(&self.gpu.device, &mut self.gpu.allocator, green, grid)
+        self.recorder.set_green(&mut self.gpu, green)
     }
 
     /// Set or clear the chase camera for the right 20% viewport.
     ///
     /// Pass `Some(camera)` when a ball is in flight, `None` otherwise.
     pub fn set_chase_camera(&mut self, camera: Option<Camera>) {
-        self.chase_camera = camera;
+        self.recorder.set_chase_camera(camera);
     }
 
     /// Update dynamic flight geometry for the next frame.
@@ -491,43 +422,34 @@ impl Renderer {
     /// next `draw_frame` uploads them. Rebuilds the RT scene when the
     /// reflected ball or trail changed.
     pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
-        let tee = TeeBox::default();
-        flight_vertices(flights, camera.position, &tee, &mut self.content);
-
-        // Track RT scene state: reflections show the newest flight's ball +
-        // trail, the flight the HUD and chase camera follow. The reflected
+        // Reflections show the newest flight's ball + trail, the flight the
+        // HUD and chase camera follow, or the ball on the tee. The reflected
         // trail is the part of the trail the raster tracer still draws, so
-        // the reflection disappears in sync with the visible tracer.
-        let mut new_rt_ball =
-            glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
-        let mut new_rt_trail = RtTrail::default();
-        if let Some(flight) = flights.last() {
-            new_rt_ball = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-            new_rt_trail = RtTrail::new(
-                &flight.trail_points,
-                flight.current_time,
-                DEFAULT_TRAIL_LIFETIME,
-            );
-        }
-
-        // The tail fade value changes as the trail ages, even between
+        // the reflection disappears in sync with the visible tracer. The
+        // tail fade value changes as the trail ages, even between
         // acceleration-structure rebuilds.
-        if let Some(reflections) = &mut self.reflections {
-            reflections.set_scene(
-                &mut self.gpu,
-                RtSceneState::new(new_rt_ball, new_rt_trail),
-                &GridConfig::default(),
-                &tee,
-            );
-        }
+        let tee = TeeBox::default();
+        let newest = flights.last();
+        self.recorder
+            .update_flight(&mut self.gpu, flights, camera, |_| match newest {
+                Some(flight) => RtSceneState::new(
+                    flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0),
+                    RtTrail::new(
+                        &flight.trail_points,
+                        flight.current_time,
+                        DEFAULT_TRAIL_LIFETIME,
+                    ),
+                ),
+                None => RtSceneState::new(
+                    glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
+                    RtTrail::default(),
+                ),
+            });
     }
 
     /// Update HUD overlay geometry (pixel coordinates) for the next frame.
     pub fn update_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
-        self.content.hud_lines.clear();
-        self.content.hud_lines.extend_from_slice(lines);
-        self.content.hud_fills.clear();
-        self.content.hud_fills.extend_from_slice(fills);
+        self.recorder.update_hud(lines, fills);
     }
 
     // ── Private helpers ──
@@ -682,21 +604,13 @@ impl Drop for Renderer {
             for fb in &self.overlay_framebuffers {
                 self.gpu.device.destroy_framebuffer(*fb, None);
             }
-            // SAFETY: Each `ManuallyDrop` buffer is taken once, here in `Drop`,
-            // and never used after.
-            ManuallyDrop::take(&mut self.geometry)
-                .destroy(&self.gpu.device, &mut self.gpu.allocator);
-            ManuallyDrop::take(&mut self.frame).destroy(&self.gpu.device, &mut self.gpu.allocator);
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
-
-            if let Some(reflections) = self.reflections.take() {
-                reflections.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-
-            // SAFETY: Taken once, here in `Drop`, and never used after.
-            ManuallyDrop::take(&mut self.pipeline).destroy(&self.gpu.device);
+            // SAFETY: Taken once, here in `Drop`, and never used after; the
+            // device is idle.
+            ManuallyDrop::take(&mut self.recorder)
+                .destroy(&self.gpu.device, &mut self.gpu.allocator);
             self.swapchain.destroy(&self.gpu.device);
         }
     }

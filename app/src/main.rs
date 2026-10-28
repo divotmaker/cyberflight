@@ -271,13 +271,13 @@ impl ApplicationHandler for App {
             {
                 if let Some(renderer) = &mut self.renderer {
                     use cf_render::mode::RenderMode;
-                    let new_mode = if renderer.render_mode == RenderMode::Rasterized {
+                    let new_mode = if renderer.render_mode() == RenderMode::Rasterized {
                         RenderMode::RayTraced
                     } else {
                         RenderMode::Rasterized
                     };
                     renderer.set_render_mode(new_mode);
-                    eprintln!("Render mode: {:?}", renderer.render_mode);
+                    eprintln!("Render mode: {:?}", renderer.render_mode());
                 }
             }
             WindowEvent::KeyboardInput { event, .. }

@@ -3,7 +3,6 @@ use std::mem::ManuallyDrop;
 use ash::vk;
 
 use cf_scene::camera::Camera;
-use cf_scene::color;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::TeeBox;
@@ -11,36 +10,22 @@ use cf_scene::trail::TrailPoint;
 
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
-use crate::flight::flight_vertices;
-use crate::frame::{FrameContent, FrameResources};
 use crate::framebuffer::OffscreenTarget;
-use crate::pipeline::ScenePipelines;
 use crate::readback::FrameBuffers;
-use crate::recorder::{ChaseViewport, view_proj};
-use crate::reflections::{Reflections, RtSceneState, TraceView};
+use crate::recorder::{FrameTarget, SceneRecorder};
+use crate::reflections::RtSceneState;
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::RtTrail;
-use crate::scene::{SceneGeometry, Snapshot};
+use crate::scene::Snapshot;
 
 /// Offscreen renderer for headless PNG generation.
 pub struct OffscreenRenderer {
-    gpu: GpuContext,
-    pipeline: ManuallyDrop<ScenePipelines>,
+    /// Passes, scene, per-frame content, reflections and chase camera.
+    recorder: ManuallyDrop<SceneRecorder>,
     target: ManuallyDrop<OffscreenTarget>,
-    /// Grid, green edge, tee box and the ball on the tee (or a snapshot's
-    /// ball in flight).
-    geometry: ManuallyDrop<SceneGeometry>,
-    /// Next frame's flights and HUD, uploaded into `frame` by `render`.
-    content: FrameContent,
-    /// Per-frame flight and HUD buffers.
-    frame: ManuallyDrop<FrameResources>,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
-
-    /// Ray-traced floor reflections, when the device supports them.
-    reflections: Option<Reflections>,
-    /// Optional chase camera for split viewport (right 20%).
-    chase_camera: Option<Camera>,
+    gpu: GpuContext,
 }
 
 /// Offscreen image format (RGBA8 sRGB for correct gamma in PNG output).
@@ -50,85 +35,12 @@ impl OffscreenRenderer {
     /// Create a headless renderer for the given grid configuration.
     /// Enables raytracing if hardware supports it.
     pub fn new(width: u32, height: u32, grid_config: &GridConfig) -> Result<Self, RenderError> {
-        let config = GpuConfig {
-            validation: cfg!(debug_assertions),
-            enable_raytracing: true,
-        };
-
-        let mut gpu = GpuContext::new_headless(config)?;
-        let rt_available = gpu.rt_supported;
-
-        let pipeline = ScenePipelines::new(
-            &gpu.device,
-            OFFSCREEN_FORMAT,
-            gpu.depth_format,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        )?;
-
-        let target = OffscreenTarget::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            width,
-            height,
-            OFFSCREEN_FORMAT,
-            gpu.depth_format,
-            pipeline.scene_pass,
-            pipeline.hud_pass,
-        )?;
-
         let tee = TeeBox::default();
-        let geometry = SceneGeometry::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            grid_config,
-            &tee,
-            None,
-            gpu.wide_lines,
-        )?;
-
-        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
-
-        let command_buffer = Self::allocate_command_buffer(&gpu)?;
-
-        let fence_info = vk::FenceCreateInfo::default();
-        // SAFETY: Creating a fence.
-        let fence = unsafe {
-            gpu.device
-                .create_fence(&fence_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // Build RT reflections if hardware supports it.
-        let reflections = if rt_available {
-            let scene = RtSceneState::new(
-                glam::Vec3::new(0.0, tee.ball_radius, 0.0),
-                RtTrail::default(),
-            );
-            Some(Reflections::new(
-                &mut gpu,
-                OFFSCREEN_FORMAT,
-                vk::Extent2D { width, height },
-                grid_config,
-                &tee,
-                scene,
-            )?)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            gpu,
-            pipeline: ManuallyDrop::new(pipeline),
-            target: ManuallyDrop::new(target),
-            geometry: ManuallyDrop::new(geometry),
-            content: FrameContent::default(),
-            frame: ManuallyDrop::new(frame),
-            command_buffer,
-            fence,
-
-            reflections,
-            chase_camera: None,
-        })
+        let scene = RtSceneState::new(
+            glam::Vec3::new(0.0, tee.ball_radius, 0.0),
+            RtTrail::default(),
+        );
+        Self::create(width, height, grid_config, true, Some(scene), None)
     }
 
     /// Create a headless renderer with a ball in flight and a tracer trail.
@@ -147,33 +59,6 @@ impl OffscreenRenderer {
         max_lifetime: f64,
         camera: &Camera,
     ) -> Result<Self, RenderError> {
-        let config = GpuConfig {
-            validation: cfg!(debug_assertions),
-            enable_raytracing: false,
-        };
-
-        let mut gpu = GpuContext::new_headless(config)?;
-
-        let pipeline = ScenePipelines::new(
-            &gpu.device,
-            OFFSCREEN_FORMAT,
-            gpu.depth_format,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        )?;
-
-        let target = OffscreenTarget::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            width,
-            height,
-            OFFSCREEN_FORMAT,
-            gpu.depth_format,
-            pipeline.scene_pass,
-            pipeline.hud_pass,
-        )?;
-
-        // Tee box + ball at flight position, trail glow and core.
-        let tee = TeeBox::default();
         let snapshot = Snapshot {
             ball_pos,
             trail_points,
@@ -181,40 +66,7 @@ impl OffscreenRenderer {
             max_lifetime,
             camera_pos: camera.position,
         };
-        let geometry = SceneGeometry::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            grid_config,
-            &tee,
-            Some(&snapshot),
-            gpu.wide_lines,
-        )?;
-
-        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
-
-        let command_buffer = Self::allocate_command_buffer(&gpu)?;
-
-        let fence_info = vk::FenceCreateInfo::default();
-        // SAFETY: Creating a fence.
-        let fence = unsafe {
-            gpu.device
-                .create_fence(&fence_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        Ok(Self {
-            gpu,
-            pipeline: ManuallyDrop::new(pipeline),
-            target: ManuallyDrop::new(target),
-            geometry: ManuallyDrop::new(geometry),
-            content: FrameContent::default(),
-            frame: ManuallyDrop::new(frame),
-            command_buffer,
-            fence,
-
-            reflections: None,
-            chase_camera: None,
-        })
+        Self::create(width, height, grid_config, false, None, Some(&snapshot))
     }
 
     /// Create a headless renderer with RT reflection compositing for the static range.
@@ -226,7 +78,7 @@ impl OffscreenRenderer {
             glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0),
             RtTrail::default(),
         );
-        Self::create_rt(width, height, grid_config, &tee, scene, None)
+        Self::create(width, height, grid_config, true, Some(scene), None)
     }
 
     /// Create a headless renderer with RT reflection compositing and a ball in flight.
@@ -259,34 +111,40 @@ impl OffscreenRenderer {
             camera_pos: camera.position,
         };
 
-        Self::create_rt(width, height, grid_config, &tee, scene, Some(&snapshot))
+        Self::create(
+            width,
+            height,
+            grid_config,
+            true,
+            Some(scene),
+            Some(&snapshot),
+        )
     }
 
-    /// Internal RT constructor shared by `new_rt` and `new_with_flight_rt`.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn create_rt(
+    /// The constructor behind every public one: a device with or without
+    /// ray tracing; reflections showing `rt_scene` when it is given and the
+    /// device supports them; the ball on the tee or `snapshot`'s.
+    fn create(
         width: u32,
         height: u32,
         grid_config: &GridConfig,
-        tee: &TeeBox,
-        scene: RtSceneState,
+        enable_raytracing: bool,
+        rt_scene: Option<RtSceneState>,
         snapshot: Option<&Snapshot<'_>>,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
             validation: cfg!(debug_assertions),
-            enable_raytracing: true,
+            enable_raytracing,
         };
 
         let mut gpu = GpuContext::new_headless(config)?;
 
-        // Determine if RT is actually available.
-        let rt_available = gpu.rt_supported;
-
-        let pipeline = ScenePipelines::new(
-            &gpu.device,
+        let mut recorder = SceneRecorder::new(
+            &mut gpu,
             OFFSCREEN_FORMAT,
-            gpu.depth_format,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            grid_config,
+            snapshot,
         )?;
 
         let target = OffscreenTarget::new(
@@ -296,21 +154,9 @@ impl OffscreenRenderer {
             height,
             OFFSCREEN_FORMAT,
             gpu.depth_format,
-            pipeline.scene_pass,
-            pipeline.hud_pass,
+            recorder.scene_pass(),
+            recorder.hud_pass(),
         )?;
-
-        // Tee box + ball, on the tee or at the snapshot's flight position.
-        let geometry = SceneGeometry::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            grid_config,
-            tee,
-            snapshot,
-            gpu.wide_lines,
-        )?;
-
-        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
@@ -323,76 +169,43 @@ impl OffscreenRenderer {
         };
 
         // Build RT reflections if hardware supports it.
-        let reflections = if rt_available {
-            Some(Reflections::new(
-                &mut gpu,
-                OFFSCREEN_FORMAT,
-                vk::Extent2D { width, height },
-                grid_config,
-                tee,
-                scene,
-            )?)
-        } else {
-            None
-        };
+        if let Some(scene) = rt_scene
+            && gpu.rt_supported
+        {
+            recorder.enable_reflections(&mut gpu, vk::Extent2D { width, height }, scene)?;
+        }
 
         Ok(Self {
-            gpu,
-            pipeline: ManuallyDrop::new(pipeline),
+            recorder: ManuallyDrop::new(recorder),
             target: ManuallyDrop::new(target),
-            geometry: ManuallyDrop::new(geometry),
-            content: FrameContent::default(),
-            frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
-
-            reflections,
-            chase_camera: None,
+            gpu,
         })
-    }
-
-    /// Draw all scene geometry (grid, green edge, tee box, ball, glow) with
-    /// the given view-projection.
-    ///
-    /// Assumes viewport and scissor are already set, and we're inside a render pass.
-    ///
-    /// # Safety
-    /// Must be called within an active render pass.
-    unsafe fn draw_scene_geometry(&self, view_proj: [[f32; 4]; 4]) {
-        // SAFETY: The caller guarantees an active scene pass.
-        unsafe {
-            self.geometry.draw(
-                &self.gpu.device,
-                self.command_buffer,
-                &self.pipeline,
-                &self.frame,
-                view_proj,
-            );
-        }
     }
 
     /// Whether this renderer has RT reflection compositing enabled.
     #[must_use]
     pub fn has_rt(&self) -> bool {
-        self.reflections.is_some()
+        self.recorder.has_reflections()
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
-    /// `grid`; `None` draws nothing. Replaces any green set before.
+    /// the renderer's grid; `None` draws nothing. Replaces any green set
+    /// before. `_grid` must be the grid the renderer was created with.
     pub fn set_green(
         &mut self,
         green: Option<&GreenConfig>,
-        grid: &GridConfig,
+        _grid: &GridConfig,
     ) -> Result<(), RenderError> {
-        self.geometry
-            .set_green(&self.gpu.device, &mut self.gpu.allocator, green, grid)
+        self.recorder.set_green(&mut self.gpu, green)
     }
 
     /// Set or clear the chase camera for the right 20% split viewport.
     ///
     /// Pass `Some(camera)` while a ball is being followed, `None` otherwise.
     pub fn set_chase_camera(&mut self, camera: Option<Camera>) {
-        self.chase_camera = camera;
+        self.recorder.set_chase_camera(camera);
     }
 
     /// Set the HUD overlay geometry (pixel coordinates) for the next
@@ -422,35 +235,25 @@ impl OffscreenRenderer {
     pub fn update_flight(&mut self, flights: &[FlightRenderData], camera: &Camera) {
         use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
-        let tee = TeeBox::default();
-        flight_vertices(flights, camera.position, &tee, &mut self.content);
-
         // Reflections follow the newest flight, the one the HUD and chase
         // camera show, and reflect the part of its trail the raster tracer
         // still draws. With no flight the reflected ball stays where the
         // last flight left it. The acceleration structures are rebuilt only
         // when the reflected ball or trail moves.
-        if let Some(reflections) = &mut self.reflections {
-            let newest = flights.last();
-            let trail = newest.map_or_else(RtTrail::default, |f| {
-                RtTrail::new(&f.trail_points, f.current_time, DEFAULT_TRAIL_LIFETIME)
+        let newest = flights.last();
+        self.recorder
+            .update_flight(&mut self.gpu, flights, camera, |current| {
+                let trail = newest.map_or_else(RtTrail::default, |f| {
+                    RtTrail::new(&f.trail_points, f.current_time, DEFAULT_TRAIL_LIFETIME)
+                });
+                let ball_centre = newest.map_or(current.ball_centre(), |f| f.ball_pos);
+                RtSceneState::new(ball_centre, trail)
             });
-            let ball_centre = newest.map_or(reflections.scene().ball_centre(), |f| f.ball_pos);
-            reflections.set_scene(
-                &mut self.gpu,
-                RtSceneState::new(ball_centre, trail),
-                &GridConfig::default(),
-                &tee,
-            );
-        }
     }
 
     /// Update HUD overlay geometry (pixel coordinates) for the next `render`.
     pub fn update_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
-        self.content.hud_lines.clear();
-        self.content.hud_lines.extend_from_slice(lines);
-        self.content.hud_fills.clear();
-        self.content.hud_fills.extend_from_slice(fills);
+        self.recorder.update_hud(lines, fills);
     }
 
     /// Update HUD overlay geometry for the next `render`; the same as
@@ -465,15 +268,20 @@ impl OffscreenRenderer {
     /// rays, and composites them onto the rasterized output. The HUD is
     /// drawn last, over the scene and its reflections.
     pub fn render(&mut self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
-        self.frame.upload(&self.content);
         let target = &self.target;
         let device = &self.gpu.device;
         let width = target.width;
         let height = target.height;
-        let extent = vk::Extent2D { width, height };
+        let frame_target = FrameTarget {
+            scene: target.scene,
+            overlay: target.overlay,
+            extent: vk::Extent2D { width, height },
+        };
 
         // Record command buffer
-        // SAFETY: Recording commands into a valid command buffer.
+        // SAFETY: Recording commands into a valid command buffer. The target's
+        // framebuffers were made with the recorder's passes at the target
+        // size, and the previous frame's fence was waited on.
         unsafe {
             device
                 .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
@@ -485,164 +293,9 @@ impl OffscreenRenderer {
                 .begin_command_buffer(self.command_buffer, &begin_info)
                 .map_err(RenderError::Vulkan)?;
 
-            // Begin render pass
-            let clear_color = [
-                color::BACKGROUND.x,
-                color::BACKGROUND.y,
-                color::BACKGROUND.z,
-                color::BACKGROUND.w,
-            ];
-            let clear_values = [
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: clear_color,
-                    },
-                },
-                vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
-                    },
-                },
-            ];
-
-            let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(self.pipeline.scene_pass)
-                .framebuffer(target.scene)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent,
-                })
-                .clear_values(&clear_values);
-
-            device.cmd_begin_render_pass(
-                self.command_buffer,
-                &render_pass_info,
-                vk::SubpassContents::INLINE,
-            );
-
-            device.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.line,
-            );
-            device.cmd_set_line_width(self.command_buffer, 1.0);
-
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: width as f32,
-                height: height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
-
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            };
-            device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
-
-            // Main scene
-            let aspect = width as f32 / height as f32;
-            self.draw_scene_geometry(view_proj(camera, aspect));
-
-            // Chase camera: right 20% viewport
-            if let Some(chase) = &self.chase_camera.clone() {
-                let chase_vp = ChaseViewport::new(width);
-
-                let clear_attachments = [
-                    vk::ClearAttachment {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        color_attachment: 0,
-                        clear_value: vk::ClearValue {
-                            color: vk::ClearColorValue {
-                                float32: [
-                                    color::BACKGROUND.x,
-                                    color::BACKGROUND.y,
-                                    color::BACKGROUND.z,
-                                    color::BACKGROUND.w,
-                                ],
-                            },
-                        },
-                    },
-                    vk::ClearAttachment {
-                        aspect_mask: vk::ImageAspectFlags::DEPTH,
-                        color_attachment: 0,
-                        clear_value: vk::ClearValue {
-                            depth_stencil: vk::ClearDepthStencilValue {
-                                depth: 1.0,
-                                stencil: 0,
-                            },
-                        },
-                    },
-                ];
-                let clear_rect = vk::ClearRect {
-                    rect: chase_vp.rect(height),
-                    base_array_layer: 0,
-                    layer_count: 1,
-                };
-                device.cmd_clear_attachments(
-                    self.command_buffer,
-                    &clear_attachments,
-                    &[clear_rect],
-                );
-
-                device.cmd_set_viewport(self.command_buffer, 0, &[chase_vp.viewport(height)]);
-                device.cmd_set_scissor(self.command_buffer, 0, &[chase_vp.rect(height)]);
-
-                self.draw_scene_geometry(view_proj(chase, chase_vp.aspect(height)));
-            }
-
-            device.cmd_end_render_pass(self.command_buffer);
-
-            // Ray-traced reflections: main view, plus the chase inset when set.
-            if let Some(reflections) = &self.reflections {
-                let mut views = vec![TraceView {
-                    camera: *camera,
-                    offset: [0, 0],
-                    extent,
-                }];
-                if let Some(chase) = self.chase_camera {
-                    let chase_vp = ChaseViewport::new(width);
-                    views.push(TraceView {
-                        camera: chase,
-                        offset: [chase_vp.x, 0],
-                        extent: vk::Extent2D {
-                            width: chase_vp.width,
-                            height,
-                        },
-                    });
-                }
-                reflections.record(device, self.command_buffer, &views, target.overlay, extent);
-            }
-
-            // HUD overlay (2D, pixel coordinates) over the scene and its
-            // reflections. The HUD pass leaves the image in TRANSFER_SRC_OPTIMAL.
-            let hud_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(self.pipeline.hud_pass)
-                .framebuffer(target.overlay)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent,
-                });
-            device.cmd_begin_render_pass(
-                self.command_buffer,
-                &hud_pass_info,
-                vk::SubpassContents::INLINE,
-            );
-            device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
-            device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
-            self.frame.draw_hud(
-                device,
-                self.command_buffer,
-                self.pipeline.hud_fill,
-                self.pipeline.hud_line,
-                self.pipeline.layout,
-                extent,
-            );
-            device.cmd_end_render_pass(self.command_buffer);
+            // Scene, reflections and HUD; leaves the image in TRANSFER_SRC_OPTIMAL.
+            self.recorder
+                .record_frame(device, self.command_buffer, &frame_target, camera);
 
             // Barrier: HUD pass output -> transfer read
             let barrier = vk::ImageMemoryBarrier::default()
@@ -761,20 +414,10 @@ impl Drop for OffscreenRenderer {
 
             let device = &self.gpu.device;
             let allocator = &mut self.gpu.allocator;
-            // SAFETY: Each `ManuallyDrop` buffer is taken once, here in `Drop`,
-            // and never used after.
-            ManuallyDrop::take(&mut self.geometry).destroy(device, allocator);
-            ManuallyDrop::take(&mut self.frame).destroy(device, allocator);
-
-            if let Some(reflections) = self.reflections.take() {
-                reflections.destroy(&self.gpu.device, &mut self.gpu.allocator);
-            }
-
-            // SAFETY: Taken once, here in `Drop`, and never used after.
-            ManuallyDrop::take(&mut self.target).destroy(&self.gpu.device, &mut self.gpu.allocator);
-
-            // SAFETY: Taken once, here in `Drop`, and never used after.
-            ManuallyDrop::take(&mut self.pipeline).destroy(&self.gpu.device);
+            // SAFETY: Each `ManuallyDrop` field is taken once, here in `Drop`,
+            // and never used after; the device is idle.
+            ManuallyDrop::take(&mut self.target).destroy(device, allocator);
+            ManuallyDrop::take(&mut self.recorder).destroy(device, allocator);
         }
     }
 }
