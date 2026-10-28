@@ -2,9 +2,10 @@ use ash::vk;
 
 use cf_scene::camera::Camera;
 
+use crate::recorder::ChaseViewport;
 use crate::rt_pipeline::RtPushConstants;
 
-use super::{CHASE_VIEWPORT_FRAC, Renderer};
+use super::Renderer;
 
 impl Renderer {
     /// Build RT push constants for a given camera and viewport offset.
@@ -84,11 +85,14 @@ impl Renderer {
                     &[],
                 );
 
-                let chase_x = (extent.width as f32 * (1.0 - CHASE_VIEWPORT_FRAC)) as u32;
-                let chase_w = (extent.width as f32 * CHASE_VIEWPORT_FRAC) as u32;
-                let chase_aspect = chase_w as f32 / extent.height as f32;
-                let chase_pc = self.rt_push_constants(chase, chase_aspect, chase_x as f32, 0.0);
-                rt.record_trace(device, cb, &chase_pc, chase_w, extent.height);
+                let chase_vp = ChaseViewport::new(extent.width);
+                let chase_pc = self.rt_push_constants(
+                    chase,
+                    chase_vp.aspect(extent.height),
+                    chase_vp.x as f32,
+                    0.0,
+                );
+                rt.record_trace(device, cb, &chase_pc, chase_vp.width, extent.height);
             }
 
             // Transition storage image: GENERAL → SHADER_READ_ONLY_OPTIMAL (for composite sampling)

@@ -32,9 +32,6 @@ use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
 use crate::window::Swapchain;
 
-/// Fraction of screen width used by the chase camera viewport (right side).
-const CHASE_VIEWPORT_FRAC: f32 = 0.20;
-
 /// RT reflection composite pass: fullscreen triangle that samples the RT storage
 /// image and additively blends reflections onto the rasterized scene.
 pub(super) struct CompositePass {

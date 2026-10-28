@@ -20,6 +20,7 @@ use crate::gpu::{HostBuffer, load_shader, push_constants};
 use crate::green::GreenEdge;
 use crate::pipeline::{GridPipeline, GridPushConstants};
 use crate::readback::FrameBuffers;
+use crate::recorder::{ChaseViewport, view_proj};
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::{RtTrail, build_scene_geometry};
 use crate::rt_pipeline::{RtPipeline, RtPushConstants};
@@ -731,16 +732,6 @@ impl OffscreenRenderer {
         })
     }
 
-    /// Vulkan view-projection matrix for `camera` at `aspect` (Y flipped for
-    /// Vulkan NDC), as column arrays for push constants.
-    fn compute_view_proj(camera: &Camera, aspect: f32) -> [[f32; 4]; 4] {
-        let view = camera.view_matrix();
-        let mut proj = camera.projection_matrix(aspect);
-        // Vulkan NDC has +Y down; glam assumes OpenGL (+Y up). Flip Y.
-        proj.y_axis.y *= -1.0;
-        (proj * view).to_cols_array_2d()
-    }
-
     /// Draw all scene geometry (grid, green edge, tee box, ball, glow) with
     /// the given view-projection.
     ///
@@ -1207,14 +1198,11 @@ impl OffscreenRenderer {
 
             // Main scene
             let aspect = width as f32 / height as f32;
-            let view_proj = Self::compute_view_proj(camera, aspect);
-            self.draw_scene_geometry(view_proj);
+            self.draw_scene_geometry(view_proj(camera, aspect));
 
             // Chase camera: right 20% viewport
             if let Some(chase) = &self.chase_camera.clone() {
-                let chase_frac: f32 = 0.20;
-                let chase_x = (width as f32 * (1.0 - chase_frac)) as i32;
-                let chase_w = (width as f32 * chase_frac) as u32;
+                let chase_vp = ChaseViewport::new(width);
 
                 let clear_attachments = [
                     vk::ClearAttachment {
@@ -1243,13 +1231,7 @@ impl OffscreenRenderer {
                     },
                 ];
                 let clear_rect = vk::ClearRect {
-                    rect: vk::Rect2D {
-                        offset: vk::Offset2D { x: chase_x, y: 0 },
-                        extent: vk::Extent2D {
-                            width: chase_w,
-                            height,
-                        },
-                    },
+                    rect: chase_vp.rect(height),
                     base_array_layer: 0,
                     layer_count: 1,
                 };
@@ -1259,28 +1241,10 @@ impl OffscreenRenderer {
                     &[clear_rect],
                 );
 
-                let chase_viewport = vk::Viewport {
-                    x: chase_x as f32,
-                    y: 0.0,
-                    width: chase_w as f32,
-                    height: height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                };
-                device.cmd_set_viewport(self.command_buffer, 0, &[chase_viewport]);
+                device.cmd_set_viewport(self.command_buffer, 0, &[chase_vp.viewport(height)]);
+                device.cmd_set_scissor(self.command_buffer, 0, &[chase_vp.rect(height)]);
 
-                let chase_scissor = vk::Rect2D {
-                    offset: vk::Offset2D { x: chase_x, y: 0 },
-                    extent: vk::Extent2D {
-                        width: chase_w,
-                        height,
-                    },
-                };
-                device.cmd_set_scissor(self.command_buffer, 0, &[chase_scissor]);
-
-                let chase_aspect = chase_w as f32 / height as f32;
-                let chase_view_proj = Self::compute_view_proj(chase, chase_aspect);
-                self.draw_scene_geometry(chase_view_proj);
+                self.draw_scene_geometry(view_proj(chase, chase_vp.aspect(height)));
 
                 // Restore full viewport for HUD
                 device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);

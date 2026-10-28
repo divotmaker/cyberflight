@@ -7,6 +7,7 @@ pub mod mode;
 pub mod offscreen;
 pub mod pipeline;
 pub mod readback;
+mod recorder;
 pub mod render;
 pub mod rt_offscreen;
 pub mod rt_pipeline;

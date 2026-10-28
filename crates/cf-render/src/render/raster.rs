@@ -5,8 +5,9 @@ use cf_scene::color;
 
 use crate::gpu::push_constants;
 use crate::pipeline::GridPushConstants;
+use crate::recorder::{ChaseViewport, view_proj};
 
-use super::{CHASE_VIEWPORT_FRAC, Renderer};
+use super::Renderer;
 
 impl Renderer {
     /// Record raster scene commands into the command buffer.
@@ -75,15 +76,12 @@ impl Renderer {
             device.cmd_set_scissor(cb, 0, &[scissor]);
 
             let aspect = extent.width as f32 / extent.height as f32;
-            let view_proj = Self::compute_view_proj(camera, aspect);
-            self.draw_scene_geometry(cb, view_proj);
+            self.draw_scene_geometry(cb, view_proj(camera, aspect));
 
             // Chase camera: right 20% viewport (only when a ball is in flight)
             if let Some(chase) = &self.chase_camera {
-                let chase_x = (extent.width as f32 * (1.0 - CHASE_VIEWPORT_FRAC)) as i32;
-                let chase_w = (extent.width as f32 * CHASE_VIEWPORT_FRAC) as u32;
+                let chase_vp = ChaseViewport::new(extent.width);
 
-                // Clear color + depth in the chase viewport region
                 let clear_attachments = [
                     vk::ClearAttachment {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -106,54 +104,22 @@ impl Renderer {
                     },
                 ];
                 let clear_rect = vk::ClearRect {
-                    rect: vk::Rect2D {
-                        offset: vk::Offset2D { x: chase_x, y: 0 },
-                        extent: vk::Extent2D {
-                            width: chase_w,
-                            height: extent.height,
-                        },
-                    },
+                    rect: chase_vp.rect(extent.height),
                     base_array_layer: 0,
                     layer_count: 1,
                 };
                 device.cmd_clear_attachments(cb, &clear_attachments, &[clear_rect]);
 
-                let chase_viewport = vk::Viewport {
-                    x: chase_x as f32,
-                    y: 0.0,
-                    width: chase_w as f32,
-                    height: extent.height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                };
-                device.cmd_set_viewport(cb, 0, &[chase_viewport]);
+                device.cmd_set_viewport(cb, 0, &[chase_vp.viewport(extent.height)]);
+                device.cmd_set_scissor(cb, 0, &[chase_vp.rect(extent.height)]);
 
-                let chase_scissor = vk::Rect2D {
-                    offset: vk::Offset2D { x: chase_x, y: 0 },
-                    extent: vk::Extent2D {
-                        width: chase_w,
-                        height: extent.height,
-                    },
-                };
-                device.cmd_set_scissor(cb, 0, &[chase_scissor]);
-
-                let chase_aspect = chase_w as f32 / extent.height as f32;
-                let chase_view_proj = Self::compute_view_proj(chase, chase_aspect);
+                let chase_view_proj = view_proj(chase, chase_vp.aspect(extent.height));
                 self.draw_scene_geometry(cb, chase_view_proj);
             }
 
             // End scene render pass (final_layout = COLOR_ATTACHMENT_OPTIMAL)
             device.cmd_end_render_pass(cb);
         }
-    }
-
-    /// Compute the Vulkan view-projection matrix for a camera at a given aspect ratio.
-    fn compute_view_proj(camera: &Camera, aspect: f32) -> [[f32; 4]; 4] {
-        let view = camera.view_matrix();
-        let mut proj = camera.projection_matrix(aspect);
-        // Vulkan NDC has +Y down; glam assumes OpenGL (+Y up). Flip Y.
-        proj.y_axis.y *= -1.0;
-        (proj * view).to_cols_array_2d()
     }
 
     /// Draw all scene geometry with the given view-projection matrix.
