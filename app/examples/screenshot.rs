@@ -14,6 +14,11 @@
 //!   - `driving_range_rt.png`, `flight_rt.png`, `flight_tee_rt.png`,
 //!     `flight_wide_rt.png`, `flight_wide_45_rt.png` — ray-traced versions,
 //!     when the GPU supports ray tracing
+//!   - `stream_flight.png` — the hero shot rendered through the streaming
+//!     calls (`init_streaming`, `update_flight`, `update_hud_streaming`) on one
+//!     renderer configured like `--stream` (ray-traced when supported)
+//!   - `stream_idle.png` — the same renderer after the flight clears: no
+//!     flight, no chase camera, idle HUD
 //!
 //! Compare two runs with `cargo run -p cf-test -- compare <dir_a> <dir_b>`.
 
@@ -27,6 +32,7 @@ use image::{ImageBuffer, Rgba};
 
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::FrameBuffers;
+use cf_render::render::FlightRenderData;
 use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
 use cf_scene::grid::GridConfig;
@@ -446,10 +452,8 @@ fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     save_png(&frame, &out_path("flight_hud.png"))
 }
 
-fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering hero screenshot (tee box + chase camera + HUD, RT)...");
-
-    // Chase camera: behind and above the ball, looking toward the landing zone
+/// Chase camera of the hero shot: behind and above the ball, looking toward the landing zone.
+fn hero_chase_camera(snap: &FlightSnapshot) -> Camera {
     let velocity = Vec3::new(
         -snap.input.launch_azimuth_deg.to_radians().sin() as f32,
         0.0,
@@ -460,10 +464,12 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .last()
         .map(|p| p.position)
         .unwrap_or(Vec3::new(0.0, 0.0, 200.0));
-    let chase = Camera::chase(snap.ball_pos, velocity, landing_pos);
-    let main_camera = Camera::driving_range();
+    Camera::chase(snap.ball_pos, velocity, landing_pos)
+}
 
-    let telemetry = ShotTelemetry {
+/// HUD telemetry of the hero shot, with live carry at the snapshot time.
+fn hero_telemetry(snap: &FlightSnapshot) -> ShotTelemetry {
+    ShotTelemetry {
         club_speed_mph: Some(snap.input.ball_speed_mph / 1.33), // 7-iron smash ~1.33
         ball_speed_mph: snap.input.ball_speed_mph,
         smash_factor: Some(1.33),
@@ -483,7 +489,15 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
         flight_time_s: snap.flight_time,
         elapsed_s: snap.elapsed,
-    };
+    }
+}
+
+fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
+    eprintln!("Rendering hero screenshot (tee box + chase camera + HUD, RT)...");
+
+    let chase = hero_chase_camera(snap);
+    let main_camera = Camera::driving_range();
+    let telemetry = hero_telemetry(snap);
 
     // Render at 2x resolution for supersampled anti-aliasing, then downscale
     let render_w = WIDTH * HERO_SCALE;
@@ -690,6 +704,60 @@ fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> 
     save_png(&frame, &out_path("flight_wide_45_rt.png"))
 }
 
+/// Render the hero shot, then the idle range, through the streaming calls on
+/// one renderer set up exactly like `--stream`.
+fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
+    eprintln!("Rendering streaming frames (flight, then idle)...");
+    let camera = Camera::driving_range();
+    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
+
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid)
+        .context("failed to create stream renderer")?;
+    renderer
+        .init_streaming()
+        .context("failed to initialize streaming buffers")?;
+    renderer
+        .set_green(range.green.as_ref(), &range.grid)
+        .context("failed to upload the green")?;
+
+    renderer.update_flight(
+        &[FlightRenderData {
+            ball_pos: snap.ball_pos,
+            trail_points: snap.trail_points.clone(),
+            current_time: snap.elapsed,
+        }],
+        &camera,
+    );
+    renderer.set_chase_camera(Some(hero_chase_camera(snap)));
+    let hud = build_hud(
+        Some(&hero_telemetry(snap)),
+        UnitSystem::Imperial,
+        true,
+        &lm,
+        true,
+        WIDTH as f32,
+        HEIGHT as f32,
+    );
+    renderer.update_hud_streaming(&hud.lines, &hud.fills);
+    let frame = renderer.render(&camera).context("render failed")?;
+    save_png(&frame, &out_path("stream_flight.png"))?;
+
+    renderer.update_flight(&[], &camera);
+    renderer.set_chase_camera(None);
+    let hud = build_hud(
+        None,
+        UnitSystem::Imperial,
+        false,
+        &lm,
+        true,
+        WIDTH as f32,
+        HEIGHT as f32,
+    );
+    renderer.update_hud_streaming(&hud.lines, &hud.fills);
+    let frame = renderer.render(&camera).context("render failed")?;
+    save_png(&frame, &out_path("stream_idle.png"))
+}
+
 fn main() -> Result<()> {
     let Some(out_dir) = parse_out_dir(std::env::args().skip(1))? else {
         println!("usage: screenshot [--out <dir>]   (default: {DEFAULT_OUTPUT_DIR}/)");
@@ -734,6 +802,9 @@ fn main() -> Result<()> {
     } else {
         eprintln!("Ray tracing not supported — skipping RT screenshots");
     }
+
+    // ── Streaming path (dynamic geometry, as `--stream` renders it) ──
+    render_stream(&range, &hero_snap)?;
 
     Ok(())
 }
