@@ -585,14 +585,25 @@ impl OffscreenRenderer {
 
             device.cmd_end_render_pass(self.command_buffer);
 
-            // ── RT reflection compositing ──
+            // Ray-traced reflections: main view, plus the chase inset when set.
             if let Some(reflections) = &self.reflections {
-                let main = TraceView {
+                let mut views = vec![TraceView {
                     camera: *camera,
                     offset: [0, 0],
                     extent,
-                };
-                reflections.record(device, self.command_buffer, &[main], target.overlay, extent);
+                }];
+                if let Some(chase) = self.chase_camera {
+                    let chase_vp = ChaseViewport::new(width);
+                    views.push(TraceView {
+                        camera: chase,
+                        offset: [chase_vp.x, 0],
+                        extent: vk::Extent2D {
+                            width: chase_vp.width,
+                            height,
+                        },
+                    });
+                }
+                reflections.record(device, self.command_buffer, &views, target.overlay, extent);
             }
 
             // HUD overlay (2D, pixel coordinates) over the scene and its
