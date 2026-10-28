@@ -566,7 +566,7 @@ mod tests {
                 conn.send(&FrpMessage::Envelope(FrpEnvelope::new("test.0", event)))
                     .expect("send");
             }
-            conn
+            (device, conn)
         });
 
         let mut app = app_of(&format!("ws://{addr}/frp"));
@@ -578,7 +578,14 @@ mod tests {
             let _ = app.advance(now);
             std::thread::sleep(Duration::from_millis(5));
         }
-        let _conn = server.join().expect("device thread");
+        let start = Instant::now();
+        while !server.is_finished() && start.elapsed().as_secs() < 5 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(server.is_finished(), "the device is still running");
+        let (_device, conn) = server
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         assert!(app.renderer.is_none());
         assert_eq!(app.flights.flights.len(), 1);
         let flight = &app.flights.flights[0];
@@ -595,5 +602,10 @@ mod tests {
         let _ = app.advance(landed);
         assert!(app.flights.flights[0].landed);
         assert_eq!(app.frame_count, 0, "nothing was drawn");
+
+        // The app goes before the connection, so its intake ends without
+        // dialling again.
+        drop(app);
+        drop(conn);
     }
 }

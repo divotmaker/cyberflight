@@ -974,6 +974,12 @@ mod tests {
         }
     }
 
+    // Every port an intake in these tests dials stays bound by the test (a
+    // device endpoint or a held listener) until that intake can dial no
+    // more. A released port can be bound again by anything on the machine,
+    // such as another test's device, whose connection a stray dial would
+    // then take.
+
     /// A device listening on a free local port, and the URL to dial it.
     fn device() -> (FrpEndpoint, String) {
         let device = FrpEndpoint::open(EndpointConfig::new(
@@ -985,6 +991,24 @@ mod tests {
         (device, format!("ws://{addr}/frp"))
     }
 
+    /// A local port held by a listener that answers no dial, and the URL to
+    /// dial it. [`turn_away`] fails the dials waiting on it.
+    fn held_port() -> (std::net::TcpListener, String) {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        holder.set_nonblocking(true).expect("nonblocking");
+        let url = format!("ws://{}/frp", holder.local_addr().expect("addr"));
+        (holder, url)
+    }
+
+    /// Close every connection waiting on `holder`, which fails those dials.
+    /// Returns how many there were.
+    fn turn_away(holder: &std::net::TcpListener) -> usize {
+        std::iter::from_fn(|| holder.accept().ok()).count()
+    }
+
+    /// The longest any wait in these tests lasts.
+    const PATIENCE: Duration = Duration::from_secs(5);
+
     /// Quick redials and no slow-dial reports, so tests run in milliseconds.
     const QUICK: IntakeTiming = IntakeTiming {
         reconnect: Duration::from_millis(50),
@@ -992,46 +1016,88 @@ mod tests {
     };
 
     /// An intake of `url` on a clock started now, with [`QUICK`] timing and
-    /// a count of its wakes.
-    fn intake(url: &str) -> (FrpState, Instant, Arc<AtomicUsize>) {
+    /// a count of its wakes, and its thread.
+    fn intake(url: &str) -> (FrpState, Instant, Arc<AtomicUsize>, thread::JoinHandle<()>) {
         let start = Instant::now();
         let wakes = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&wakes);
         let wake = move || {
             counter.fetch_add(1, Ordering::SeqCst);
         };
-        let (events, _thread) = spawn_intake(url, start, wake, QUICK).expect("intake");
-        (FrpState::from_events(events), start, wakes)
+        let (events, thread) = spawn_intake(url, start, wake, QUICK).expect("intake");
+        (FrpState::from_events(events), start, wakes, thread)
     }
 
-    /// Wait until `done` or a few seconds pass.
-    fn wait_until(done: impl Fn() -> bool) {
+    /// Wait until `done` or [`PATIENCE`] passes.
+    fn wait_until(mut done: impl FnMut() -> bool) {
         let start = Instant::now();
-        while !done() && start.elapsed().as_secs() < 5 {
+        while !done() && start.elapsed() < PATIENCE {
             thread::sleep(Duration::from_millis(5));
         }
     }
 
-    /// Poll `state` until `done` or a few seconds pass; returns the shots.
+    /// Poll `state` until `done` or [`PATIENCE`] passes; returns the shots.
     fn poll_until(
         state: &mut FrpState,
         done: impl Fn(&FrpState, &[ArrivedShot]) -> bool,
     ) -> Vec<ArrivedShot> {
         let start = Instant::now();
         let mut shots = Vec::new();
-        while !done(state, &shots) && start.elapsed().as_secs() < 5 {
+        while !done(state, &shots) && start.elapsed() < PATIENCE {
             shots.extend(state.poll());
             thread::sleep(Duration::from_millis(5));
         }
         shots
     }
 
-    /// A free local port: nothing listens on a port that was just released.
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .expect("free port")
-            .port()
+    /// Wait at most [`PATIENCE`] for `thread` to end and return its result.
+    /// Fails the test, naming `what`, if it is still running, and with the
+    /// thread's own message if it panicked.
+    fn join<T>(thread: thread::JoinHandle<T>, what: &str) -> T {
+        wait_until(|| thread.is_finished());
+        assert!(
+            thread.is_finished(),
+            "{what} is still running after {PATIENCE:?}"
+        );
+        thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    /// Receive intake events until one is `last`, for at most [`PATIENCE`]
+    /// in all. Returns them, `last` included.
+    fn recv_until(
+        events: &mpsc::Receiver<IntakeEvent>,
+        last: impl Fn(&IntakeEvent) -> bool,
+    ) -> Vec<IntakeEvent> {
+        let deadline = Instant::now() + PATIENCE;
+        let mut seen = Vec::new();
+        loop {
+            match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(event) => {
+                    let done = last(&event);
+                    seen.push(event);
+                    if done {
+                        return seen;
+                    }
+                }
+                Err(e) => panic!("{e} after {PATIENCE:?}; received {:?}", labels(&seen)),
+            }
+        }
+    }
+
+    /// The intake events as text, without dial starts: how many dials start
+    /// depends on timing.
+    fn labels(events: &[IntakeEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| !matches!(e, IntakeEvent::Connecting))
+            .map(|e| match e {
+                IntakeEvent::Shot(s) => format!("shot {}", s.shot.shot_number),
+                IntakeEvent::LmStates(states) => format!("ready {states:?}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
     }
 
     #[test]
@@ -1044,16 +1110,15 @@ mod tests {
         )));
     }
 
-    // The dial this test starts stays blocked in the handshake for the rest
-    // of the test process: the FRP handshake has no timeout. That is
-    // intended; nothing joins it.
+    // The dial this test starts stays blocked in the handshake until the
+    // test closes the connection: the FRP handshake has no timeout.
     #[test]
     fn a_silent_device_is_dialled_once() {
         // Accepts TCP but never answers the WebSocket upgrade.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         listener.set_nonblocking(true).expect("nonblocking");
         let url = format!("ws://{}/frp", listener.local_addr().expect("addr"));
-        let (mut state, _, _) = intake(&url);
+        let (mut state, _, _, intake) = intake(&url);
         let polled = Instant::now();
         assert!(state.poll().is_empty());
         assert!(
@@ -1073,26 +1138,46 @@ mod tests {
         assert_eq!(accepted.len(), 1);
         assert!(state.poll().is_empty());
         assert!(!state.connected);
+
+        // The app goes, then the dial fails and the intake ends.
+        drop(state);
+        drop(accepted);
+        join(intake, "the intake");
     }
 
     #[test]
     fn a_refused_device_is_redialled_until_it_listens() {
-        let port = free_port();
-        let (mut state, _, _) = intake(&format!("ws://127.0.0.1:{port}/frp"));
+        let (holder, url) = held_port();
+        let (mut state, _, _, intake) = intake(&url);
         // Several dials are refused meanwhile.
-        thread::sleep(QUICK.reconnect * 4);
+        let mut dials = 0;
+        wait_until(|| {
+            dials += turn_away(&holder);
+            dials >= 3
+        });
+        assert!(dials >= 3, "{dials} dials");
         assert!(state.poll().is_empty());
         assert!(!state.connected);
 
+        // The device takes the port over from the holder.
+        let addr = holder.local_addr().expect("addr");
+        drop(holder);
         let mut device = FrpEndpoint::open(EndpointConfig::new(
             Role::Device,
-            Transport::listen(format!("127.0.0.1:{port}")),
+            Transport::listen(addr.to_string()),
         ))
         .expect("device endpoint");
-        let server = thread::spawn(move || device.establish().expect("handshake"));
+        let server = thread::spawn(move || {
+            let conn = device.establish().expect("handshake");
+            (device, conn)
+        });
         let _ = poll_until(&mut state, |s, _| s.connected);
         assert!(state.connected);
-        let _conn = server.join().expect("device thread");
+        let (_device, conn) = join(server, "the device's handshake");
+
+        drop(state);
+        drop(conn);
+        join(intake, "the intake");
     }
 
     #[test]
@@ -1103,19 +1188,23 @@ mod tests {
             for msg in shot_messages(7, 140.0, 14.0) {
                 conn.send(&msg).expect("send");
             }
-            conn
+            (device, conn)
         });
 
-        let (mut state, _, wakes) = intake(&url);
+        let (mut state, _, wakes, intake) = intake(&url);
         let shots = poll_until(&mut state, |s, shots| s.connected && !shots.is_empty());
         assert!(state.connected);
-        let _conn = server.join().expect("device thread");
+        let (_device, conn) = join(server, "the device");
         assert_eq!(shots.len(), 1);
         assert_eq!(shots[0].shot.shot_number, 7);
         assert!(shots[0].arrival > 0.0);
         // The intake sends each event before it wakes the app.
         wait_until(|| wakes.load(Ordering::SeqCst) >= 2);
         assert_eq!(wakes.load(Ordering::SeqCst), 2, "connected, then the shot");
+
+        drop(state);
+        drop(conn);
+        join(intake, "the intake");
     }
 
     #[test]
@@ -1132,13 +1221,13 @@ mod tests {
                     conn.send(&msg).expect("send");
                 }
             }
-            conn
+            (device, conn)
         });
 
         // Nothing is polled while the shots arrive: the app is not drawing.
-        let (mut state, start, wakes) = intake(&url);
+        let (mut state, start, wakes, intake) = intake(&url);
         wait_until(|| wakes.load(Ordering::SeqCst) >= 3);
-        let _conn = server.join().expect("device thread");
+        let (_device, conn) = join(server, "the device");
         thread::sleep(Duration::from_millis(200));
         let polled = start.elapsed().as_secs_f64();
         let shots = state.poll();
@@ -1158,6 +1247,10 @@ mod tests {
             "arrival {:.3}s is not the poll time {polled:.3}s",
             shots[1].arrival
         );
+
+        drop(state);
+        drop(conn);
+        join(intake, "the intake");
     }
 
     #[test]
@@ -1188,34 +1281,14 @@ mod tests {
             for msg in shot_messages(4, 140.0, 14.0) {
                 conn.send(&msg).expect("send");
             }
-            conn
+            (device, conn)
         });
 
-        let (events, _thread) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
-        let mut seen = Vec::new();
-        loop {
-            let event = events
-                .recv_timeout(Duration::from_secs(5))
-                .expect("an event");
-            let last = matches!(&event, IntakeEvent::Shot(_));
-            seen.push(event);
-            if last {
-                break;
-            }
-        }
-        let _conn = server.join().expect("device thread accepted twice");
-        // Repeated dial starts are left out: refused redials are timing-dependent.
-        let seen: Vec<String> = seen
-            .iter()
-            .filter(|e| !matches!(e, IntakeEvent::Connecting))
-            .map(|e| match e {
-                IntakeEvent::Shot(s) => format!("shot {}", s.shot.shot_number),
-                IntakeEvent::LmStates(states) => format!("ready {states:?}"),
-                other => format!("{other:?}"),
-            })
-            .collect();
+        let (events, intake) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
+        let seen = recv_until(&events, |e| matches!(e, IntakeEvent::Shot(_)));
+        let (_device, conn) = join(server, "the device (it accepts twice)");
         assert_eq!(
-            seen,
+            labels(&seen),
             [
                 "Connected",
                 r#"ready {"test.0": true}"#,
@@ -1225,6 +1298,9 @@ mod tests {
                 "shot 4",
             ]
         );
+        drop(events);
+        drop(conn);
+        join(intake, "the intake");
 
         // The app forgets the ready states with the connection.
         let (tx, rx) = mpsc::channel();
@@ -1256,29 +1332,40 @@ mod tests {
     #[test]
     fn the_intake_ends_when_the_app_is_gone() {
         // Disconnected: it ends at its next dial.
-        let port = free_port();
-        let (events, thread) = spawn_intake(
-            &format!("ws://127.0.0.1:{port}/frp"),
-            Instant::now(),
-            || {},
-            QUICK,
-        )
-        .expect("intake");
-        thread::sleep(QUICK.reconnect * 2);
+        let (holder, url) = held_port();
+        let (events, intake) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
+        let mut dials = 0;
+        wait_until(|| {
+            dials += turn_away(&holder);
+            dials >= 2
+        });
+        assert!(dials >= 2, "{dials} dials");
         drop(events);
-        wait_until(|| thread.is_finished());
-        assert!(thread.is_finished(), "ended while disconnected");
+        // A dial already started waits on the holder until it is turned away.
+        wait_until(|| {
+            turn_away(&holder);
+            intake.is_finished()
+        });
+        assert!(intake.is_finished(), "ended while disconnected");
+        drop(holder);
 
         // Connected: it ends at the next shot.
         let (mut device, url) = device();
-        let (events, thread) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
-        let mut conn = device.establish().expect("handshake");
+        let (events, intake) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
+        let server = thread::spawn(move || {
+            let conn = device.establish().expect("handshake");
+            (device, conn)
+        });
+        // Once the app has heard of the connection, the intake is reading it
+        // and closes it only after the shot.
+        recv_until(&events, |e| matches!(e, IntakeEvent::Connected));
+        let (_device, mut conn) = join(server, "the device's handshake");
         drop(events);
         for msg in shot_messages(1, 140.0, 14.0) {
             conn.send(&msg).expect("send");
         }
-        wait_until(|| thread.is_finished());
-        assert!(thread.is_finished(), "ended while connected");
+        wait_until(|| intake.is_finished());
+        assert!(intake.is_finished(), "ended while connected");
     }
 
     #[test]
