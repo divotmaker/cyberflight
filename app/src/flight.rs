@@ -36,8 +36,6 @@ pub const TRAIL_TAIL_FRACTION: f64 = 1.2;
 /// Longest a ball that dimple did not bring to rest keeps moving on the
 /// ground after landing (seconds). Shots that come to rest animate to the end.
 pub const MAX_UNSETTLED_GROUND_TIME_S: f64 = 8.0;
-/// Default smash factor for estimating club speed.
-pub const DEFAULT_SMASH_FACTOR: f64 = 1.40;
 
 /// A point in the unified shot timeline (flight, then hops, slide and roll),
 /// in dimple's frame.
@@ -102,6 +100,10 @@ pub struct AnimatedFlight {
     pub launch_time: f64,
     pub club: ClubDelivery,
     pub lm_carry_yards: Option<f64>,
+    /// Whether the device measured the backspin (see [`ReceivedShot`]).
+    pub backspin_measured: bool,
+    /// Whether the device measured the sidespin (see [`ReceivedShot`]).
+    pub sidespin_measured: bool,
     pub landed: bool,
     pub prev_chase: Option<(Camera, f64)>,
 }
@@ -166,6 +168,8 @@ impl AnimatedFlight {
             launch_time,
             club: shot.club.clone(),
             lm_carry_yards: shot.lm_carry_yards,
+            backspin_measured: shot.backspin_measured,
+            sidespin_measured: shot.sidespin_measured,
             landed: false,
             prev_chase: None,
         }
@@ -192,19 +196,14 @@ impl AnimatedFlight {
             self.result.flight.carry_yards
         };
 
-        let club_speed_mph = self
-            .club
-            .club_speed_mph
-            .unwrap_or(self.input.ball_speed_mph / DEFAULT_SMASH_FACTOR);
-
         ShotTelemetry {
-            club_speed_mph,
+            club_speed_mph: self.club.club_speed_mph,
             ball_speed_mph: self.input.ball_speed_mph,
             smash_factor: self.club.smash_factor,
             launch_angle_deg: self.input.launch_angle_deg,
             launch_azimuth_deg: self.input.launch_azimuth_deg,
-            backspin_rpm: self.input.backspin_rpm,
-            sidespin_rpm: self.input.sidespin_rpm,
+            backspin_rpm: self.backspin_measured.then_some(self.input.backspin_rpm),
+            sidespin_rpm: self.sidespin_measured.then_some(self.input.sidespin_rpm),
             club_path_deg: self.club.path_deg,
             attack_angle_deg: self.club.attack_angle_deg,
             face_angle_deg: self.club.face_angle_deg,
@@ -218,9 +217,9 @@ impl AnimatedFlight {
             lm_carry_yards: self.lm_carry_yards,
             total_yards: dimple::units::meters_to_yards(total_m),
             downrange_yards: dimple::units::meters_to_yards(downrange_m),
-            lateral_m: pos.z,
+            lateral_yards: dimple::units::meters_to_yards(pos.z),
             flight_time_s: self.result.flight.flight_time,
-            elapsed_s: shot_t.min(self.result.flight.flight_time),
+            elapsed_s: t_clamped,
             in_flight: self.is_animating(now),
         }
     }
@@ -951,8 +950,13 @@ mod tests {
         let r = &f.result;
         assert!((t.carry_yards - r.flight.carry_yards).abs() < 1e-9);
         assert!((t.total_yards - r.total_yards).abs() < 1e-9);
-        assert!((t.lateral_m - r.final_pos.z).abs() < 1e-9);
-        assert!(t.lateral_m > 0.0, "slice finishes right");
+        let lateral = dimple::units::meters_to_yards(r.final_pos.z);
+        assert!((t.lateral_yards - lateral).abs() < 1e-9);
+        assert!(t.lateral_yards > 0.0, "slice finishes right");
+        assert!(
+            (t.elapsed_s - f.total_time).abs() < 1e-9,
+            "clock runs to rest"
+        );
         assert!(!t.in_flight);
     }
 

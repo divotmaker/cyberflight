@@ -145,13 +145,16 @@ pub enum UnitSystem {
 /// they increase with the ball animation each frame, not final calculated values.
 #[derive(Debug, Clone)]
 pub struct ShotTelemetry {
-    pub club_speed_mph: f64,
+    /// Club speed, when the device measured it.
+    pub club_speed_mph: Option<f64>,
     pub ball_speed_mph: f64,
     pub smash_factor: Option<f64>,
     pub launch_angle_deg: f64,
     pub launch_azimuth_deg: f64,
-    pub backspin_rpm: f64,
-    pub sidespin_rpm: f64,
+    /// Backspin, when the device measured it.
+    pub backspin_rpm: Option<f64>,
+    /// Sidespin (positive = right), when the device measured it.
+    pub sidespin_rpm: Option<f64>,
     /// Club path (degrees, negative = left of target for RH).
     pub club_path_deg: Option<f64>,
     /// Attack angle (degrees, negative = descending blow).
@@ -169,9 +172,11 @@ pub struct ShotTelemetry {
     pub total_yards: f64,
     /// Live downrange distance (Z-axis only), updated each frame.
     pub downrange_yards: f64,
-    pub lateral_m: f64,
+    /// Live offset from the target line (positive = right), updated each frame.
+    pub lateral_yards: f64,
     /// Carry flight time only (excludes bounce/rollout).
     pub flight_time_s: f64,
+    /// Time since launch, counting until the ball comes to rest.
     pub elapsed_s: f64,
     pub in_flight: bool,
 }
@@ -222,6 +227,158 @@ impl HudScale {
     }
 }
 
+/// One line of the telemetry panel.
+#[derive(Debug, Clone, PartialEq)]
+enum HudRow {
+    /// Section title with a rule.
+    Header(&'static str),
+    /// Label and right-aligned value.
+    Value(&'static str, String),
+    /// Space between sections.
+    Gap,
+}
+
+/// Value text for a measurement the device may not have sent: `-` when absent.
+fn or_dash(value: Option<f64>, fmt: impl Fn(f64) -> String) -> String {
+    value.map_or_else(|| "-".to_owned(), fmt)
+}
+
+/// The telemetry panel's sections and rows for `t`.
+fn telemetry_rows(t: &ShotTelemetry, units: UnitSystem) -> Vec<HudRow> {
+    use HudRow::{Gap, Header, Value};
+
+    let (spd_label, spd_factor) = match units {
+        UnitSystem::Imperial => ("MPH", 1.0),
+        UnitSystem::Metric => ("KPH", 1.60934),
+    };
+    let fmt_dist = |yards: f64| match units {
+        UnitSystem::Imperial => format!("{yards:.1} YDS"),
+        UnitSystem::Metric => format!("{:.1} M", yards * 0.9144),
+    };
+    let fmt_height = |meters: f64| match units {
+        UnitSystem::Imperial => format!("{:.1} FT", meters / 0.3048),
+        UnitSystem::Metric => format!("{meters:.1} M"),
+    };
+    // Offset from the target line: `R`/`L` and the distance, unsigned.
+    let fmt_lateral = |yards: f64| {
+        let text = fmt_dist(yards.abs());
+        if text.starts_with("0.0 ") {
+            text
+        } else if yards > 0.0 {
+            format!("R {text}")
+        } else {
+            format!("L {text}")
+        }
+    };
+    let fmt_rpm = |rpm: f64| format!("{rpm:.0} RPM");
+
+    let mut rows = vec![
+        Header("CLUB"),
+        Value(
+            "SPEED",
+            or_dash(t.club_speed_mph, |v| {
+                format!("{:.0} {spd_label}", v * spd_factor)
+            }),
+        ),
+    ];
+    let club_angles = [
+        ("PATH", t.club_path_deg),
+        ("AOA", t.attack_angle_deg),
+        ("FACE", t.face_angle_deg),
+        ("D LOFT", t.dynamic_loft_deg),
+    ];
+    for (label, value) in club_angles {
+        if let Some(v) = value {
+            rows.push(Value(label, format!("{v:.1}")));
+        }
+    }
+
+    rows.extend([
+        Gap,
+        Header("LAUNCH"),
+        Value(
+            "SPEED",
+            format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor),
+        ),
+    ]);
+    if let Some(sf) = t.smash_factor {
+        rows.push(Value("SMASH", format!("{sf:.2}")));
+    }
+    rows.extend([
+        Value("VLA", format!("{:.1}", t.launch_angle_deg)),
+        Value("HLA", format!("{:.1}", t.launch_azimuth_deg)),
+        Value("BACK", or_dash(t.backspin_rpm, fmt_rpm)),
+        Value("SIDE", or_dash(t.sidespin_rpm, fmt_rpm)),
+        Gap,
+        Header("FLIGHT"),
+        Value("APEX", fmt_height(t.apex_m)),
+        Value("CARRY", fmt_dist(t.carry_yards)),
+    ]);
+    if let Some(lm_carry) = t.lm_carry_yards {
+        let carry_complete = t.elapsed_s >= t.flight_time_s;
+        let lm_text = if carry_complete {
+            fmt_dist(lm_carry)
+        } else {
+            "-".to_owned()
+        };
+        rows.push(Value("CARRY(LM)", lm_text));
+    }
+    rows.extend([
+        Value("TIME", format!("{:.1} S", t.elapsed_s)),
+        Gap,
+        Header("RESULT"),
+        Value("TOTAL", fmt_dist(t.total_yards)),
+        Value("DOWNRANGE", fmt_dist(t.downrange_yards)),
+        Value("LATERAL", fmt_lateral(t.lateral_yards)),
+    ]);
+    rows
+}
+
+/// One row of the SYSTEM section.
+#[derive(Debug, Clone, PartialEq)]
+struct SystemRow<'a> {
+    label: &'a str,
+    value: &'a str,
+    label_fade: f32,
+    value_fade: f32,
+}
+
+/// SYSTEM section rows: the connection, or each launch monitor's ready
+/// state, sorted by device name.
+fn system_rows(lm_states: &HashMap<String, bool>, connected: bool) -> Vec<SystemRow<'_>> {
+    let row = |label, value, label_fade, value_fade| SystemRow {
+        label,
+        value,
+        label_fade,
+        value_fade,
+    };
+    if !connected {
+        // Negative fade = red alert color (see grid.frag).
+        return vec![row("LAUNCH MONITOR", "-", -1.0, -1.0)];
+    }
+    if lm_states.is_empty() {
+        return vec![row("LAUNCH MONITOR", "UNKNOWN", LABEL_FADE, LABEL_FADE)];
+    }
+    let multi = lm_states.len() > 1;
+    let mut devices: Vec<(&String, &bool)> = lm_states.iter().collect();
+    devices.sort_unstable_by_key(|&(name, _)| name);
+    devices
+        .into_iter()
+        .map(|(source, &armed)| {
+            let label = if multi {
+                source.as_str()
+            } else {
+                "LAUNCH MONITOR"
+            };
+            if armed {
+                row(label, "READY", LABEL_FADE, 0.0)
+            } else {
+                row(label, "WAITING", LABEL_FADE, LABEL_FADE)
+            }
+        })
+        .collect()
+}
+
 /// Build HUD geometry for the telemetry overlay.
 ///
 /// Returns line vertices (for text + decorations) and fill vertices (panel background).
@@ -261,148 +418,13 @@ pub fn build_hud(
     let mut y = sc.margin_top;
 
     if let Some(t) = telemetry {
-        // Unit labels and conversions
-        let (spd_label, spd_factor) = match units {
-            UnitSystem::Imperial => ("MPH", 1.0),
-            UnitSystem::Metric => ("KPH", 1.60934),
-        };
-        let fmt_dist = |yards: f64| match units {
-            UnitSystem::Imperial => format!("{:.1} YDS", yards),
-            UnitSystem::Metric => format!("{:.1} M", yards * 0.9144),
-        };
-        let fmt_height = |meters: f64| match units {
-            UnitSystem::Imperial => format!("{:.1} FT", meters / 0.3048),
-            UnitSystem::Metric => format!("{:.1} M", meters),
-        };
-
-        // ── CLUB section
-        y = emit_section_header(&mut lines, "CLUB", y, panel_w, &sc);
-        y = emit_row(
-            &mut lines,
-            "SPEED",
-            &format!("{:.0} {spd_label}", t.club_speed_mph * spd_factor),
-            y,
-            panel_w,
-            &sc,
-        );
-        if let Some(v) = t.club_path_deg {
-            y = emit_row(&mut lines, "PATH", &format!("{v:.1}"), y, panel_w, &sc);
-        }
-        if let Some(v) = t.attack_angle_deg {
-            y = emit_row(&mut lines, "AOA", &format!("{v:.1}"), y, panel_w, &sc);
-        }
-        if let Some(v) = t.face_angle_deg {
-            y = emit_row(&mut lines, "FACE", &format!("{v:.1}"), y, panel_w, &sc);
-        }
-        if let Some(v) = t.dynamic_loft_deg {
-            y = emit_row(&mut lines, "D LOFT", &format!("{v:.1}"), y, panel_w, &sc);
-        }
-        y += sc.section_gap;
-
-        // ── LAUNCH section
-        y = emit_section_header(&mut lines, "LAUNCH", y, panel_w, &sc);
-        y = emit_row(
-            &mut lines,
-            "SPEED",
-            &format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor),
-            y,
-            panel_w,
-            &sc,
-        );
-        if let Some(sf) = t.smash_factor {
-            y = emit_row(&mut lines, "SMASH", &format!("{sf:.2}"), y, panel_w, &sc);
-        }
-        y = emit_row(
-            &mut lines,
-            "VLA",
-            &format!("{:.1}", t.launch_angle_deg),
-            y,
-            panel_w,
-            &sc,
-        );
-        y = emit_row(
-            &mut lines,
-            "HLA",
-            &format!("{:.1}", t.launch_azimuth_deg),
-            y,
-            panel_w,
-            &sc,
-        );
-        y = emit_row(
-            &mut lines,
-            "BACK",
-            &format!("{:.0} RPM", t.backspin_rpm),
-            y,
-            panel_w,
-            &sc,
-        );
-        y = emit_row(
-            &mut lines,
-            "SIDE",
-            &format!("{:.0} RPM", t.sidespin_rpm),
-            y,
-            panel_w,
-            &sc,
-        );
-        y += sc.section_gap;
-
-        // ── FLIGHT section
-        y = emit_section_header(&mut lines, "FLIGHT", y, panel_w, &sc);
-        y = emit_row(&mut lines, "APEX", &fmt_height(t.apex_m), y, panel_w, &sc);
-        y = emit_row(
-            &mut lines,
-            "CARRY",
-            &fmt_dist(t.carry_yards),
-            y,
-            panel_w,
-            &sc,
-        );
-        if let Some(lm_carry) = t.lm_carry_yards {
-            let carry_complete = t.elapsed_s >= t.flight_time_s;
-            let lm_text = if carry_complete {
-                fmt_dist(lm_carry)
-            } else {
-                "-".to_owned()
+        for row in telemetry_rows(t, units) {
+            y = match row {
+                HudRow::Header(title) => emit_section_header(&mut lines, title, y, panel_w, &sc),
+                HudRow::Value(label, value) => emit_row(&mut lines, label, &value, y, panel_w, &sc),
+                HudRow::Gap => y + sc.section_gap,
             };
-            y = emit_row(&mut lines, "CARRY(LM)", &lm_text, y, panel_w, &sc);
         }
-        y = emit_row(
-            &mut lines,
-            "TIME",
-            &format!("{:.1} S", t.elapsed_s),
-            y,
-            panel_w,
-            &sc,
-        );
-        y += sc.section_gap;
-
-        // ── RESULT section
-        y = emit_section_header(&mut lines, "RESULT", y, panel_w, &sc);
-        y = emit_row(
-            &mut lines,
-            "TOTAL",
-            &fmt_dist(t.total_yards),
-            y,
-            panel_w,
-            &sc,
-        );
-        y = emit_row(
-            &mut lines,
-            "DOWNRANGE",
-            &fmt_dist(t.downrange_yards),
-            y,
-            panel_w,
-            &sc,
-        );
-        y = emit_row(
-            &mut lines,
-            "LATERAL",
-            &fmt_height(t.lateral_m),
-            y,
-            panel_w,
-            &sc,
-        );
-        let _ = y;
     } else {
         // No telemetry — show standby
         lines.extend(hud_font::build_text(
@@ -416,50 +438,28 @@ pub fn build_hud(
 
     // ── SYSTEM section (bottom-aligned in left panel)
     {
-        let mut rows: Vec<(&str, &str, f32, f32)> = Vec::new(); // (label, value, label_fade, value_fade)
-
-        if !connected {
-            // Negative fade = red alert color (see grid.frag).
-            rows.push(("LAUNCH MONITOR", "-", -1.0, -1.0));
-        } else if lm_states.is_empty() {
-            rows.push(("LAUNCH MONITOR", "UNKNOWN", LABEL_FADE, LABEL_FADE));
-        } else {
-            let multi = lm_states.len() > 1;
-            for (source, &armed) in lm_states {
-                let label = if multi {
-                    source.as_str()
-                } else {
-                    "LAUNCH MONITOR"
-                };
-                let (status, vfade) = if armed {
-                    ("READY", 0.0)
-                } else {
-                    ("WAITING", LABEL_FADE)
-                };
-                rows.push((label, status, LABEL_FADE, vfade));
-            }
-        }
+        let rows = system_rows(lm_states, connected);
 
         let num_rows = rows.len() as f32;
         let header_y = screen_h - sc.margin_top - (num_rows * sc.line_height) - sc.line_height;
         emit_section_header(&mut lines, "SYSTEM", header_y, panel_w, &sc);
 
         let mut row_y = header_y + sc.line_height;
-        for (label, value, label_fade, value_fade) in &rows {
+        for row in &rows {
             lines.extend(hud_font::build_text(
-                label,
+                row.label,
                 sc.label_x,
                 row_y,
                 sc.char_height,
-                *label_fade,
+                row.label_fade,
             ));
-            let value_x = panel_w - panel_margin - hud_font::text_width(value, sc.char_height);
+            let value_x = panel_w - panel_margin - hud_font::text_width(row.value, sc.char_height);
             lines.extend(hud_font::build_text(
-                value,
+                row.value,
                 value_x,
                 row_y,
                 sc.char_height,
-                *value_fade,
+                row.value_fade,
             ));
             row_y += sc.line_height;
         }
@@ -568,16 +568,15 @@ mod tests {
         assert_eq!(layout.panels.len(), layout2.panels.len());
     }
 
-    #[test]
-    fn build_hud_with_telemetry() {
-        let t = ShotTelemetry {
-            club_speed_mph: 90.0,
+    fn sample() -> ShotTelemetry {
+        ShotTelemetry {
+            club_speed_mph: Some(90.0),
             ball_speed_mph: 132.0,
             smash_factor: Some(1.47),
             launch_angle_deg: 16.0,
             launch_azimuth_deg: -1.2,
-            backspin_rpm: 7000.0,
-            sidespin_rpm: -300.0,
+            backspin_rpm: Some(7000.0),
+            sidespin_rpm: Some(-300.0),
             club_path_deg: Some(-2.1),
             attack_angle_deg: Some(-4.5),
             face_angle_deg: Some(0.3),
@@ -587,11 +586,124 @@ mod tests {
             lm_carry_yards: None,
             total_yards: 172.0,
             downrange_yards: 170.5,
-            lateral_m: -4.2,
+            lateral_yards: -4.6,
             flight_time_s: 5.8,
             elapsed_s: 3.2,
             in_flight: true,
+        }
+    }
+
+    /// The value shown for `label` in `section`.
+    fn value(rows: &[HudRow], section: &str, label: &str) -> String {
+        let start = rows
+            .iter()
+            .position(|r| matches!(r, HudRow::Header(h) if *h == section))
+            .expect("section");
+        rows[start + 1..]
+            .iter()
+            .take_while(|r| !matches!(r, HudRow::Header(_)))
+            .find_map(|r| match r {
+                HudRow::Value(l, v) if *l == label => Some(v.clone()),
+                _ => None,
+            })
+            .expect("row")
+    }
+
+    #[test]
+    fn telemetry_values() {
+        let rows = telemetry_rows(&sample(), UnitSystem::Imperial);
+        assert_eq!(value(&rows, "CLUB", "SPEED"), "90 MPH");
+        assert_eq!(value(&rows, "CLUB", "PATH"), "-2.1");
+        assert_eq!(value(&rows, "LAUNCH", "SPEED"), "132.0 MPH");
+        assert_eq!(value(&rows, "LAUNCH", "SMASH"), "1.47");
+        assert_eq!(value(&rows, "LAUNCH", "HLA"), "-1.2");
+        assert_eq!(value(&rows, "LAUNCH", "BACK"), "7000 RPM");
+        assert_eq!(value(&rows, "LAUNCH", "SIDE"), "-300 RPM");
+        assert_eq!(value(&rows, "FLIGHT", "APEX"), "92.8 FT");
+        assert_eq!(value(&rows, "FLIGHT", "CARRY"), "159.0 YDS");
+        assert_eq!(value(&rows, "FLIGHT", "TIME"), "3.2 S");
+        assert_eq!(value(&rows, "RESULT", "TOTAL"), "172.0 YDS");
+        assert_eq!(value(&rows, "RESULT", "LATERAL"), "L 4.6 YDS");
+    }
+
+    #[test]
+    fn unmeasured_values_show_a_dash() {
+        let t = ShotTelemetry {
+            club_speed_mph: None,
+            backspin_rpm: None,
+            sidespin_rpm: None,
+            club_path_deg: None,
+            ..sample()
         };
+        let rows = telemetry_rows(&t, UnitSystem::Imperial);
+        assert_eq!(value(&rows, "CLUB", "SPEED"), "-");
+        assert_eq!(value(&rows, "LAUNCH", "BACK"), "-");
+        assert_eq!(value(&rows, "LAUNCH", "SIDE"), "-");
+        assert!(rows.iter().all(|r| !matches!(r, HudRow::Value("PATH", _))));
+    }
+
+    #[test]
+    fn lateral_is_yards_left_or_right() {
+        let lateral = |yards: f64, units| {
+            let t = ShotTelemetry {
+                lateral_yards: yards,
+                ..sample()
+            };
+            value(&telemetry_rows(&t, units), "RESULT", "LATERAL")
+        };
+        assert_eq!(lateral(4.24, UnitSystem::Imperial), "R 4.2 YDS");
+        assert_eq!(lateral(-12.0, UnitSystem::Imperial), "L 12.0 YDS");
+        assert_eq!(lateral(0.01, UnitSystem::Imperial), "0.0 YDS");
+        assert_eq!(lateral(-0.04, UnitSystem::Imperial), "0.0 YDS");
+        assert_eq!(lateral(10.0, UnitSystem::Metric), "R 9.1 M");
+    }
+
+    #[test]
+    fn lm_carry_waits_for_landing() {
+        let flying = ShotTelemetry {
+            lm_carry_yards: Some(161.2),
+            ..sample()
+        };
+        let rows = telemetry_rows(&flying, UnitSystem::Imperial);
+        assert_eq!(value(&rows, "FLIGHT", "CARRY(LM)"), "-");
+        let landed = ShotTelemetry {
+            elapsed_s: 7.5,
+            ..flying
+        };
+        let rows = telemetry_rows(&landed, UnitSystem::Imperial);
+        assert_eq!(value(&rows, "FLIGHT", "CARRY(LM)"), "161.2 YDS");
+        assert_eq!(value(&rows, "FLIGHT", "TIME"), "7.5 S");
+    }
+
+    #[test]
+    fn system_rows_are_sorted_by_device() {
+        let lm = HashMap::from([
+            ("square.0".to_owned(), false),
+            ("mevo.0".to_owned(), true),
+            ("r10.0".to_owned(), true),
+            ("gc3.0".to_owned(), false),
+        ]);
+        let labels: Vec<_> = system_rows(&lm, true).iter().map(|r| r.label).collect();
+        assert_eq!(labels, ["gc3.0", "mevo.0", "r10.0", "square.0"]);
+        let values: Vec<_> = system_rows(&lm, true).iter().map(|r| r.value).collect();
+        assert_eq!(values, ["WAITING", "READY", "READY", "WAITING"]);
+    }
+
+    #[test]
+    fn system_rows_for_one_device_or_none() {
+        let one = HashMap::from([("mevo.0".to_owned(), true)]);
+        let rows = system_rows(&one, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].label, rows[0].value), ("LAUNCH MONITOR", "READY"));
+        let offline = system_rows(&one, false);
+        assert_eq!(offline[0].value, "-");
+        assert!(offline[0].label_fade < 0.0, "alert colour");
+        assert_eq!(system_rows(&HashMap::new(), true)[0].value, "UNKNOWN");
+    }
+
+    #[test]
+    fn build_hud_with_telemetry() {
+        let t = sample();
         let geom = build_hud(
             Some(&t),
             UnitSystem::Imperial,

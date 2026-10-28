@@ -19,7 +19,8 @@ not yet validated against measured data and may change between releases.
   launch elevation; a missing azimuth is a straight shot. Spin comes from
   the backspin/sidespin pair or from total spin and spin axis; a total
   spin without an axis counts as backspin. A shot without any spin flies
-  with an assumed 2500 rpm of backspin.
+  with an assumed 2500 rpm of backspin; the HUD shows spin the device did
+  not measure as `-`.
   NaN or infinite launch values drop the shot. Values outside a physical
   envelope are clamped to it and logged: ball speed 0–250 mph, launch
   elevation −20° to 70°, azimuth ±60°, backspin and sidespin ±20 000 rpm.

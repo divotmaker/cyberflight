@@ -336,13 +336,13 @@ fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (tee box view + HUD)...");
 
     let telemetry = ShotTelemetry {
-        club_speed_mph: snap.input.ball_speed_mph / 1.33,
+        club_speed_mph: Some(snap.input.ball_speed_mph / 1.33),
         ball_speed_mph: snap.input.ball_speed_mph,
         smash_factor: Some(1.33),
         launch_angle_deg: snap.input.launch_angle_deg,
         launch_azimuth_deg: snap.input.launch_azimuth_deg,
-        backspin_rpm: snap.input.backspin_rpm,
-        sidespin_rpm: snap.input.sidespin_rpm,
+        backspin_rpm: Some(snap.input.backspin_rpm),
+        sidespin_rpm: Some(snap.input.sidespin_rpm),
         club_path_deg: Some(-1.8),
         attack_angle_deg: Some(-4.2),
         face_angle_deg: Some(0.5),
@@ -352,7 +352,7 @@ fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         lm_carry_yards: None,
         total_yards: snap.carry_yards,
         downrange_yards: snap.carry_yards,
-        lateral_m: snap.lateral_m,
+        lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
         flight_time_s: snap.flight_time,
         elapsed_s: snap.elapsed,
         in_flight: true,
@@ -409,13 +409,13 @@ fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     let main_camera = Camera::driving_range();
 
     let telemetry = ShotTelemetry {
-        club_speed_mph: snap.input.ball_speed_mph / 1.33, // 7-iron smash ~1.33
+        club_speed_mph: Some(snap.input.ball_speed_mph / 1.33), // 7-iron smash ~1.33
         ball_speed_mph: snap.input.ball_speed_mph,
         smash_factor: Some(1.33),
         launch_angle_deg: snap.input.launch_angle_deg,
         launch_azimuth_deg: snap.input.launch_azimuth_deg,
-        backspin_rpm: snap.input.backspin_rpm,
-        sidespin_rpm: snap.input.sidespin_rpm,
+        backspin_rpm: Some(snap.input.backspin_rpm),
+        sidespin_rpm: Some(snap.input.sidespin_rpm),
         club_path_deg: Some(-1.8),
         attack_angle_deg: Some(-4.2),
         face_angle_deg: Some(0.5),
@@ -425,7 +425,7 @@ fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         lm_carry_yards: None,
         total_yards: snap.carry_yards * (snap.elapsed / snap.flight_time),
         downrange_yards: snap.carry_yards * (snap.elapsed / snap.flight_time),
-        lateral_m: snap.lateral_m,
+        lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
         flight_time_s: snap.flight_time,
         elapsed_s: snap.elapsed,
         in_flight: true,
