@@ -54,9 +54,9 @@ pub fn build_scene_geometry(
 
     // Trail: cross-shaped ribbon (horizontal + vertical quads) for floor reflections.
     // Horizontal ribbon is visible from below (reflection rays); vertical adds side visibility.
-    // Width matches raster glow visual extent (~4x ball radius with additive shells).
+    // Half-width 3x ball radius: between the raster core (1x) and its outer glow shell (4x).
     if trail_points.len() >= 2 {
-        let trail_positions = build_trail_cross(trail_points, tee.ball_radius * 6.0);
+        let trail_positions = build_trail_cross(trail_points, tee.ball_radius * 3.0);
         if !trail_positions.is_empty() {
             geometries.push(RtGeometry {
                 positions: trail_positions,

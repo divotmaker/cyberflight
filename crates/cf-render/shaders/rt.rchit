@@ -38,8 +38,13 @@ const float BALL_RADIUS = 0.021335; // golf ball radius in meters
 // for a more dramatic Tron floor look).
 const float F0_GLASS = 0.10;
 
-// Subtle dark blue-cyan tint visible at grazing angles.
-const vec3 GLASS_TINT = vec3(0.006, 0.014, 0.022);
+// Minimum reflectance for the emissive tracer and ball. The Fresnel term
+// alone (~0.10 at a 45° view) leaves the reflection of a full-brightness
+// tracer too faint; glass tint and specular keep the plain Fresnel term.
+const float EMISSIVE_REFLECTANCE = 0.6;
+
+// Dark navy glass tint, stronger at grazing angles.
+const vec3 GLASS_TINT = vec3(0.006, 0.014, 0.030);
 
 // Overhead specular intensity (cyan gleam on floor surface).
 const float SPEC_INTENSITY = 0.18;
@@ -73,16 +78,17 @@ void main() {
             );
         }
 
-        // Fresnel-modulated trail reflection with distance fade
+        // Trail reflection with distance fade
         float cam_dist = length(hit_pos.xz - pc.camera_pos.xz);
         float dist_fade = 1.0 - smoothstep(100.0, 350.0, cam_dist);
-        vec3 trail_reflection = reflPayload.rgb * fresnel * dist_fade;
+        float emissive_refl = max(fresnel, EMISSIVE_REFLECTANCE);
+        vec3 trail_reflection = reflPayload.rgb * emissive_refl * dist_fade;
 
-        // Analytical ball reflection: mirror ball center across floor (Y=0)
-        // and compute glow intensity based on distance from the floor hit point
-        // to the mirrored ball position.
-        vec3 ball_mirror = vec3(pc.ball_pos.x, -pc.ball_pos.y, pc.ball_pos.z);
-        float d = distance(hit_pos, ball_mirror);
+        // Analytical ball reflection: glow intensity from the closest approach
+        // of the reflected ray to the ball center (none if the ball is behind it).
+        vec3 to_center = pc.ball_pos.xyz - hit_pos;
+        float t_closest = dot(to_center, refl_dir);
+        float d = t_closest > 0.0 ? length(to_center - refl_dir * t_closest) : 1e9;
         float glow_radius = BALL_RADIUS * BALL_GLOW_MULT;
         float glow_t = clamp(d / glow_radius, 0.0, 1.0);
         float ball_glow = pow(1.0 - glow_t, 3.0);
@@ -97,9 +103,9 @@ void main() {
         float proj = dot(to_ball, V);
         float perp = length(to_ball - V * proj);
         float occlude = smoothstep(BALL_RADIUS * 1.5, BALL_RADIUS * 3.0, perp);
-        vec3 ball_reflection = (MAGENTA * ball_glow * 3.0 + vec3(1.0) * core_glow * 3.0) * fresnel * dist_fade * occlude;
+        vec3 ball_reflection = (MAGENTA * ball_glow * 3.0 + vec3(1.0) * core_glow * 3.0) * emissive_refl * dist_fade * occlude;
 
-        // Glass base tint: subtle dark blue-cyan, stronger at grazing angles.
+        // Glass base tint: dark navy, stronger at grazing angles.
         vec3 glass_base = GLASS_TINT * fresnel;
 
         // Specular highlight: faint cyan gleam from an overhead light source.
@@ -127,19 +133,9 @@ void main() {
         float d = distance(hit_pos, pc.ball_pos.xyz);
         float alpha = 1.0 - clamp(d / fade_dist, 0.0, 1.0);
 
-        // Continuation ray through trail to see what's behind (floor only).
-        reflPayload = vec4(0.0);
-        traceRayEXT(
-            tlas,
-            gl_RayFlagsOpaqueEXT,
-            0x01, 0, 0, 0,
-            hit_pos + gl_WorldRayDirectionEXT * 0.001,
-            0.01, gl_WorldRayDirectionEXT, 1000.0, 1
-        );
-        vec3 background = reflPayload.rgb;
-
-        vec3 trail_color = mix(background, MAGENTA, alpha);
-        payload = vec4(trail_color, 1.0);
+        // Only floor reflection rays reach the trail (mask 0x04), so this
+        // runs at the pipeline's maximum recursion depth and traces nothing.
+        payload = vec4(MAGENTA * alpha, 1.0);
 
     } else if (geom_type == 4) {
         // Tee box border: bright cyan.

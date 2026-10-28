@@ -64,6 +64,13 @@ impl RtPushConstants {
     }
 }
 
+/// Format of the RT reflection storage image (`rgba16f` in `rt.rgen`).
+///
+/// It holds linear colour that the composite pass blends into an sRGB target,
+/// so it needs more precision than 8 bits for dark tones. Vulkan requires
+/// storage, sampled and linear-filter support for this format.
+const STORAGE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
 pub const GEOM_FLOOR: u32 = 0;
 // The ball has no RT geometry: the floor shader reflects it analytically.
@@ -930,7 +937,7 @@ impl RtPipeline {
     ) -> Result<(vk::Image, vk::ImageView, Allocation), RenderError> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_UNORM)
+            .format(STORAGE_FORMAT)
             .extent(vk::Extent3D {
                 width,
                 height,
@@ -978,7 +985,7 @@ impl RtPipeline {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_UNORM)
+            .format(STORAGE_FORMAT)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
