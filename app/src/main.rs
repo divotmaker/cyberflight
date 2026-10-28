@@ -30,6 +30,8 @@ struct App {
     start_time: Instant,
     frame_count: u64,
     fps_timer: Instant,
+    /// Why the event loop was stopped, when the app could not run.
+    fatal: Option<anyhow::Error>,
 }
 
 impl App {
@@ -45,10 +47,11 @@ impl App {
             start_time: Instant::now(),
             frame_count: 0,
             fps_timer: Instant::now(),
+            fatal: None,
         })
     }
 
-    fn init_renderer(&mut self, window: &Window) {
+    fn init_renderer(&mut self, window: &Window) -> Result<()> {
         let size = window.inner_size();
         let config = GpuConfig {
             width: size.width,
@@ -57,41 +60,51 @@ impl App {
             ..GpuConfig::default()
         };
 
-        let display_handle = window.display_handle().expect("display handle").as_raw();
-        let window_handle = window.window_handle().expect("window handle").as_raw();
+        let display_handle = window
+            .display_handle()
+            .context("window has no display handle")?
+            .as_raw();
+        let window_handle = window
+            .window_handle()
+            .context("window has no window handle")?
+            .as_raw();
 
-        match GpuContext::new(config, display_handle, window_handle) {
-            Err(cf_render::error::RenderError::Loading(_)) => {
-                eprintln!("ERROR: Vulkan loader not found.");
-                eprintln!("  Linux:   sudo apt install libvulkan1 mesa-vulkan-drivers");
-                eprintln!("  Windows: Install or update your GPU drivers");
-            }
-            Ok((gpu, surface, surface_loader)) => {
-                match Swapchain::new(
-                    &gpu.instance,
-                    &gpu.device,
-                    gpu.physical_device,
-                    surface,
-                    surface_loader,
-                    gpu.queue_family_index,
-                    size.width,
-                    size.height,
-                ) {
-                    Ok(swapchain) => match Renderer::new(gpu, swapchain, &self.range.grid) {
-                        Ok(renderer) => {
-                            eprintln!(
-                                "Renderer initialized: {}x{}",
-                                renderer.swapchain.extent.width, renderer.swapchain.extent.height
-                            );
-                            self.renderer = Some(renderer);
-                        }
-                        Err(e) => eprintln!("Failed to create renderer: {e}"),
-                    },
-                    Err(e) => eprintln!("Failed to create swapchain: {e}"),
+        let (gpu, surface, surface_loader) =
+            match GpuContext::new(config, display_handle, window_handle) {
+                Err(cf_render::error::RenderError::Loading(e)) => {
+                    eprintln!("ERROR: Vulkan loader not found.");
+                    eprintln!("  Linux:   sudo apt install libvulkan1 mesa-vulkan-drivers");
+                    eprintln!("  Windows: Install or update your GPU drivers");
+                    return Err(e).context("failed to load Vulkan");
                 }
-            }
-            Err(e) => eprintln!("Failed to create GPU context: {e}"),
-        }
+                other => other.context("failed to create GPU context")?,
+            };
+        let swapchain = Swapchain::new(
+            &gpu.instance,
+            &gpu.device,
+            gpu.physical_device,
+            surface,
+            surface_loader,
+            gpu.queue_family_index,
+            size.width,
+            size.height,
+        )
+        .context("failed to create swapchain")?;
+        let renderer =
+            Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
+        eprintln!(
+            "Renderer initialized: {}x{}",
+            renderer.swapchain.extent.width, renderer.swapchain.extent.height
+        );
+        self.renderer = Some(renderer);
+        Ok(())
+    }
+
+    /// Stop the event loop because the app cannot run; `main` returns `err`.
+    fn fail(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
+        eprintln!("ERROR: {err:#}");
+        self.fatal = Some(err);
+        event_loop.exit();
     }
 
     fn update(&mut self) {
@@ -163,12 +176,17 @@ impl ApplicationHandler for App {
                     if !self.windowed {
                         window.set_cursor_visible(false);
                     }
-                    self.init_renderer(&window);
+                    let init = self.init_renderer(&window);
                     self.window = Some(window);
+                    if let Err(e) = init {
+                        self.fail(event_loop, e);
+                    }
                 }
                 Err(e) => {
-                    eprintln!("Failed to create window: {e}");
-                    event_loop.exit();
+                    self.fail(
+                        event_loop,
+                        anyhow::Error::new(e).context("failed to create window"),
+                    );
                 }
             }
         }
@@ -190,7 +208,9 @@ impl ApplicationHandler for App {
             {
                 event_loop.exit();
             }
-            WindowEvent::RedrawRequested => {
+            // Without a renderer nothing paces the loop, so it is not redrawn
+            // (the app is exiting; see `fail`).
+            WindowEvent::RedrawRequested if self.renderer.is_some() => {
                 self.update();
 
                 if let Some(renderer) = &mut self.renderer {
@@ -279,5 +299,8 @@ fn main() -> Result<()> {
     .context("failed to create event loop")?;
     let mut app = App::new(windowed).context("failed to initialize app")?;
     event_loop.run_app(&mut app).context("event loop error")?;
-    Ok(())
+    match app.fatal.take() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
