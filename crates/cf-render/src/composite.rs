@@ -88,10 +88,11 @@ impl CompositePass {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         )?;
 
-        // Sampler for the RT storage image (nearest — 1:1 pixel mapping).
+        // Sampler for the RT storage image (linear: the blur taps fall
+        // between texels).
         let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST)
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);

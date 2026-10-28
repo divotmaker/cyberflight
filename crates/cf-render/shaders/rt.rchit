@@ -38,10 +38,17 @@ const float BALL_RADIUS = 0.021335; // golf ball radius in meters
 // for a more dramatic Tron floor look).
 const float F0_GLASS = 0.10;
 
-// Minimum reflectance for the emissive tracer and ball. The Fresnel term
-// alone (~0.10 at a 45° view) leaves the reflection of a full-brightness
-// tracer too faint; glass tint and specular keep the plain Fresnel term.
-const float EMISSIVE_REFLECTANCE = 0.6;
+// Emissive gain of the tracer and ball as seen in the floor: they are light
+// sources several times brighter than display white, so their Fresnel
+// reflection (~0.10 at a 45° view) stays visible. Glass tint and specular
+// use the plain Fresnel term.
+const float EMISSIVE_GAIN = 4.0;
+
+// Colour filter of the tinted glass on emissive reflections: they lose
+// REFL_DESATURATE of their saturation and are multiplied by the cool
+// REFL_TINT, so the tracer's magenta reads as violet in the navy glass.
+const vec3 REFL_TINT = vec3(0.55, 0.75, 1.0);
+const float REFL_DESATURATE = 0.45;
 
 // Dark navy glass tint, stronger at grazing angles.
 const vec3 GLASS_TINT = vec3(0.006, 0.014, 0.030);
@@ -81,7 +88,7 @@ void main() {
         // Trail reflection with distance fade
         float cam_dist = length(hit_pos.xz - pc.camera_pos.xz);
         float dist_fade = 1.0 - smoothstep(100.0, 350.0, cam_dist);
-        float emissive_refl = max(fresnel, EMISSIVE_REFLECTANCE);
+        float emissive_refl = fresnel * EMISSIVE_GAIN;
         vec3 trail_reflection = reflPayload.rgb * emissive_refl * dist_fade;
 
         // Analytical ball reflection: glow intensity from the closest approach
@@ -119,6 +126,12 @@ void main() {
         float haze = smoothstep(150.0, 400.0, cam_dist);
         vec3 haze_color = GLASS_TINT * 1.5;
         vec3 reflection = trail_reflection + ball_reflection;
+
+        // Tinted glass: the reflection loses saturation and takes the glass hue.
+        float lum = dot(reflection, vec3(0.2126, 0.7152, 0.0722));
+        reflection = mix(reflection, vec3(lum), REFL_DESATURATE);
+        reflection *= REFL_TINT;
+
         reflection = mix(reflection, haze_color, haze * 0.6);
 
         payload = vec4(glass_base + reflection + specular, 1.0);

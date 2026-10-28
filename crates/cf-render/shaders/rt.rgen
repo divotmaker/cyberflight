@@ -13,6 +13,9 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) rayPayloadEXT vec4 payload; // rgb + alpha (1 = hit floor, 0 = miss)
 
+// Upper bound of the stored colour, well above the brightest reflection.
+const float MAX_RADIANCE = 64.0;
+
 void main() {
     ivec2 local_pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
@@ -54,10 +57,11 @@ void main() {
         0           // payload location
     );
 
-    // Preserve alpha: transparent where no floor was hit,
-    // reflection color where floor reflected something.
-    // Store in [0, 1] with NaN as 0, so the composite blur never spreads
-    // out-of-range or NaN values.
-    vec4 color = clamp(mix(payload, vec4(0.0), isnan(payload)), 0.0, 1.0);
+    // Colour in [0, MAX_RADIANCE] (emissive reflections are brighter than
+    // display white until the composite blur spreads them) and zero where no
+    // floor was hit; alpha 1 on the floor, 0 elsewhere. NaN is stored as 0, so
+    // the blur never spreads unbounded or NaN values.
+    vec4 color = clamp(mix(payload, vec4(0.0), isnan(payload)), vec4(0.0),
+                       vec4(vec3(MAX_RADIANCE), 1.0));
     imageStore(outputImage, pixel, color);
 }
