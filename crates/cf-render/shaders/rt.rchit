@@ -103,10 +103,11 @@ void main() {
         float trail_fade = height_fade(reflPayload.a - hit_pos.y);
 
         // Analytical ball reflection: glow intensity from the closest approach
-        // of the reflected ray to the ball center (none if the ball is behind it).
+        // of the reflected ray, which starts at the floor, to the ball center
+        // (the ray's start if the ball is behind it).
         vec3 to_center = pc.ball_pos.xyz - hit_pos;
-        float t_closest = dot(to_center, refl_dir);
-        float d = t_closest > 0.0 ? length(to_center - refl_dir * t_closest) : 1e9;
+        float t_closest = max(dot(to_center, refl_dir), 0.0);
+        float d = length(to_center - refl_dir * t_closest);
         float glow_radius = BALL_RADIUS * BALL_GLOW_MULT;
         float glow_t = clamp(d / glow_radius, 0.0, 1.0);
         float ball_glow = pow(1.0 - glow_t, 3.0);
