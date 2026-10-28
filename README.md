@@ -33,6 +33,11 @@ current set and each device's status.
    logs a warning every 30 s; restart cyberflight to reconnect.
 3. Send it
 
+Shots are received in the background whatever is on screen, and each ball flies from the
+moment its shot arrived: when drawing pauses (window hidden or minimised, display off), the
+range picks up where it would have been, and shots that have finished meanwhile are not
+replayed.
+
 ## Running
 
 ```bash

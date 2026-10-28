@@ -126,11 +126,11 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         }
     }
 
-    // Connect to FRP device.
-    let mut fh = FrpState::new(frp_url).context("open FRP endpoint")?;
+    // Take in shots from the FRP device.
+    let start = Instant::now();
+    let mut fh = FrpState::new(frp_url, start, || {}).context("start the FRP intake")?;
     let mut fm = FlightManager::new();
 
-    let start = Instant::now();
     let frame_duration = Duration::from_secs_f64(1.0 / f64::from(config.fps));
     let mut frame_count: u64 = 0;
     let mut fps_timer = Instant::now();
@@ -154,9 +154,9 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
             }
         }
 
-        // Poll FRP for new shots.
-        for shot in fh.poll(now) {
-            fm.launch(&shot, now, &environment, range.green);
+        // Launch the shots that have arrived, each from its arrival time.
+        for shot in fh.poll() {
+            fm.take_in(&shot, now, &environment, range.green);
         }
 
         // Update flight animations.
@@ -173,7 +173,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         let hud = fm.build_hud(
             now,
             chase_camera.is_some(),
-            &fh.intake.lm_states,
+            &fh.lm_states,
             fh.connected,
             config.width as f32,
             config.height as f32,

@@ -8,7 +8,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -84,22 +84,24 @@ struct App {
 }
 
 impl App {
-    fn new(windowed: bool, frp_url: &str) -> Result<Self> {
-        Ok(Self {
+    /// The app, taking in shots from `frp`, whose arrival times are seconds
+    /// since `start_time`.
+    fn new(windowed: bool, frp: FrpState, start_time: Instant) -> Self {
+        Self {
             windowed,
             window: None,
             renderer: None,
             range: Range::new(),
             environment: Environment::SEA_LEVEL,
-            frp: FrpState::new(frp_url).context("open FRP endpoint")?,
+            frp,
             flights: FlightManager::new(),
-            start_time: Instant::now(),
+            start_time,
             frame_count: 0,
             fps_timer: Instant::now(),
             minimised: false,
             notice: None,
             fatal: None,
-        })
+        }
     }
 
     fn init_renderer(&mut self, window: &Window) -> Result<()> {
@@ -168,13 +170,19 @@ impl App {
         was_minimised && !self.minimised
     }
 
+    /// Launch the shots that have arrived, each from its arrival time, as of
+    /// `now` (seconds since start).
+    fn take_in(&mut self, now: f64) {
+        for shot in self.frp.poll() {
+            self.flights
+                .take_in(&shot, now, &self.environment, self.range.green);
+        }
+    }
+
     /// Take in shots and advance the flights to `now` (seconds since
     /// start), without touching the renderer.
     fn advance(&mut self, now: f64) -> Vec<cf_render::flight::FlightRenderData> {
-        for shot in self.frp.poll(now) {
-            self.flights
-                .launch(&shot, now, &self.environment, self.range.green);
-        }
+        self.take_in(now);
         self.flights.update(now)
     }
 
@@ -193,7 +201,7 @@ impl App {
             let hud = self.flights.build_hud(
                 now,
                 chase_camera.is_some(),
-                &self.frp.intake.lm_states,
+                &self.frp.lm_states,
                 self.frp.connected,
                 screen_w,
                 screen_h,
@@ -354,12 +362,34 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// The FRP intake woke the loop: a shot arrived or the connection
+    /// changed.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
+        let now = self.start_time.elapsed().as_secs_f64();
+        self.take_in(now);
+        if self.renderer.is_some() && !self.minimised {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = self.start_time.elapsed().as_secs_f64();
         if self.minimised && self.renderer.is_some() {
-            let now = self.start_time.elapsed().as_secs_f64();
             let _ = self.advance(now);
+        } else {
+            self.take_in(now);
         }
         event_loop.set_control_flow(control_flow(self.minimised, Instant::now()));
+    }
+}
+
+/// Wake the event loop from the FRP intake thread.
+fn wake_on_intake(proxy: EventLoopProxy<()>) -> impl Fn() + Send + 'static {
+    move || {
+        // Fails only once the event loop has exited.
+        let _ = proxy.send_event(());
     }
 }
 
@@ -391,7 +421,14 @@ fn main() -> Result<()> {
         }
     }
     .context("failed to create event loop")?;
-    let mut app = App::new(windowed, &frp_url).context("failed to initialize app")?;
+    let start_time = Instant::now();
+    let frp = FrpState::new(
+        &frp_url,
+        start_time,
+        wake_on_intake(event_loop.create_proxy()),
+    )
+    .context("failed to start the FRP intake")?;
+    let mut app = App::new(windowed, frp, start_time);
     event_loop.run_app(&mut app).context("event loop error")?;
     match app.fatal.take() {
         Some(err) => Err(err),
@@ -407,9 +444,16 @@ mod tests {
         Transport, Velocity,
     };
 
-    /// An app whose FRP device is never dialled (no I/O until `advance`).
+    /// An app whose FRP device at `url` is dialled from now.
+    fn app_of(url: &str) -> App {
+        let start = Instant::now();
+        let frp = FrpState::new(url, start, || {}).expect("intake");
+        App::new(true, frp, start)
+    }
+
+    /// An app whose FRP device refuses the connection.
     fn app() -> App {
-        App::new(true, "ws://127.0.0.1:9/frp").expect("app")
+        app_of("ws://127.0.0.1:9/frp")
     }
 
     #[test]
@@ -475,7 +519,7 @@ mod tests {
         assert_eq!(control_flow(false, now), ControlFlow::Wait);
     }
 
-    /// Shots that arrive while nothing is drawn launch when they arrive.
+    /// Shots that arrive while nothing is drawn launch when they arrived.
     #[test]
     fn advance_launches_shots_without_a_renderer() {
         let mut device = FrpEndpoint::open(EndpointConfig::new(
@@ -508,7 +552,7 @@ mod tests {
             conn
         });
 
-        let mut app = App::new(true, &format!("ws://{addr}/frp")).expect("app");
+        let mut app = app_of(&format!("ws://{addr}/frp"));
         app.minimised = true;
         let start = Instant::now();
         let mut now = 0.0;
@@ -521,10 +565,16 @@ mod tests {
         assert!(app.renderer.is_none());
         assert_eq!(app.flights.flights.len(), 1);
         let flight = &app.flights.flights[0];
-        assert_eq!(flight.launch_time, now, "launched at the tick it arrived");
+        // The ticks run ahead of the app's clock, so the tick that took the
+        // shot in is later than its arrival.
+        assert!(flight.launch_time > 0.0);
+        assert!(
+            flight.launch_time < now,
+            "launched at its arrival, not the tick"
+        );
 
         // Later ticks animate it in game time; it lands while minimised.
-        let landed = now + flight.total_time + 0.1;
+        let landed = flight.launch_time + flight.total_time + 0.1;
         let _ = app.advance(landed);
         assert!(app.flights.flights[0].landed);
         assert_eq!(app.frame_count, 0, "nothing was drawn");
