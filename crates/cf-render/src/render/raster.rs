@@ -191,7 +191,7 @@ impl Renderer {
             };
 
             // Static ball on tee box (hidden when a flight is active)
-            if self.ball_on_tee_box {
+            if self.frame.ball_on_tee() {
                 // Ball glow (additive blend, magenta — draw before ball so ball occludes center)
                 device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.glow_buffer.handle()], &[0]);
@@ -223,48 +223,14 @@ impl Renderer {
                 );
             }
 
-            // In-flight trail wireframe core (LINE_LIST, magenta — 2px when supported)
-            if self.flight_line_count > 0 {
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.line);
-                device.cmd_set_line_width(cb, if self.gpu.wide_lines { 2.0 } else { 1.0 });
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_line_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_magenta,
-                );
-                device.cmd_draw(cb, self.flight_line_count, 1, 0, 0);
-            }
-
-            // In-flight ball glow + trail glow (additive, magenta)
-            if self.flight_glow_count > 0 {
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.glow);
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_glow_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_magenta,
-                );
-                device.cmd_draw(cb, self.flight_glow_count, 1, 0, 0);
-            }
-
-            // In-flight ball fill (black sphere — occludes glow center)
-            if self.flight_fill_count > 0 {
-                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline.fill);
-                device.cmd_bind_vertex_buffers(cb, 0, &[self.flight_fill_buffer.handle()], &[0]);
-                push_constants(
-                    device,
-                    cb,
-                    self.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    &pc_black,
-                );
-                device.cmd_draw(cb, self.flight_fill_count, 1, 0, 0);
-            }
+            // In-flight trails, glows and balls (trail core 2 px when supported).
+            self.frame.draw_flights(
+                device,
+                cb,
+                &self.pipeline,
+                view_proj,
+                if self.gpu.wide_lines { 2.0 } else { 1.0 },
+            );
         }
     }
 }

@@ -1,8 +1,5 @@
 use ash::vk;
 
-use crate::gpu::push_constants;
-use crate::pipeline::GridPushConstants;
-
 use super::Renderer;
 
 impl Renderer {
@@ -51,54 +48,14 @@ impl Renderer {
             };
             device.cmd_set_scissor(cb, 0, &[scissor]);
 
-            if self.hud_fill_count > 0 || self.hud_line_count > 0 {
-                let w = extent.width as f32;
-                let h = extent.height as f32;
-                let hud_proj = glam::Mat4::orthographic_rh(0.0, w, 0.0, h, -1.0, 1.0);
-
-                if self.hud_fill_count > 0 {
-                    let pc_hud_bg = GridPushConstants {
-                        view_proj: hud_proj.to_cols_array_2d(),
-                        color: [0.0, 0.0, 0.0, 0.8],
-                    };
-                    device.cmd_bind_pipeline(
-                        cb,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.pipeline.hud_fill,
-                    );
-                    device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_fill_buffer.handle()], &[0]);
-                    push_constants(
-                        device,
-                        cb,
-                        self.pipeline.layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        &pc_hud_bg,
-                    );
-                    device.cmd_draw(cb, self.hud_fill_count, 1, 0, 0);
-                }
-
-                if self.hud_line_count > 0 {
-                    let pc_hud_text = GridPushConstants {
-                        view_proj: hud_proj.to_cols_array_2d(),
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    };
-                    device.cmd_bind_pipeline(
-                        cb,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.pipeline.hud_line,
-                    );
-                    device.cmd_set_line_width(cb, 1.0);
-                    device.cmd_bind_vertex_buffers(cb, 0, &[self.hud_line_buffer.handle()], &[0]);
-                    push_constants(
-                        device,
-                        cb,
-                        self.pipeline.layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        &pc_hud_text,
-                    );
-                    device.cmd_draw(cb, self.hud_line_count, 1, 0, 0);
-                }
-            }
+            self.frame.draw_hud(
+                device,
+                cb,
+                self.pipeline.hud_fill,
+                self.pipeline.hud_line,
+                self.pipeline.layout,
+                extent,
+            );
 
             device.cmd_end_render_pass(cb);
         }

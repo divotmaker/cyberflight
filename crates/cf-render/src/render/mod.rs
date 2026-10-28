@@ -5,7 +5,6 @@ mod raytrace;
 use std::mem::ManuallyDrop;
 
 use ash::vk;
-use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
@@ -15,16 +14,13 @@ use cf_scene::tee::{
     TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill,
 };
 
-/// Per-frame flight render data: ball position + trail points (scene space).
-pub struct FlightRenderData {
-    pub ball_pos: glam::Vec3,
-    pub trail_points: Vec<cf_scene::trail::TrailPoint>,
-    pub current_time: f64,
-}
+pub use crate::flight::FlightRenderData;
 
 use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
+use crate::flight::flight_vertices;
+use crate::frame::{FrameContent, FrameResources};
 use crate::gpu::{HostBuffer, Image2d, Image2dDesc};
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
@@ -47,20 +43,10 @@ pub struct Renderer {
     pub(super) ball_count: u32,
     pub(super) glow_buffer: ManuallyDrop<HostBuffer>,
     pub(super) glow_count: u32,
-    // Whether to draw the static ball on the tee box (hidden when a flight is active).
-    pub(super) ball_on_tee_box: bool,
-    // Dynamic per-frame flight geometry (in-flight balls + trail glow).
-    pub(super) flight_line_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) flight_line_count: u32,
-    pub(super) flight_fill_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) flight_fill_count: u32,
-    pub(super) flight_glow_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) flight_glow_count: u32,
-    // HUD overlay geometry (2D, pixel coordinates).
-    pub(super) hud_line_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) hud_line_count: u32,
-    pub(super) hud_fill_buffer: ManuallyDrop<HostBuffer>,
-    pub(super) hud_fill_count: u32,
+    // Next frame's flights and HUD, uploaded into `frame` when it is recorded.
+    content: FrameContent,
+    // Per-frame flight and HUD buffers.
+    pub(super) frame: ManuallyDrop<FrameResources>,
     // Depth image for depth testing (`None` only after a failed rebuild).
     depth: Option<Image2d>,
     command_buffers: Vec<vk::CommandBuffer>,
@@ -158,54 +144,7 @@ impl Renderer {
             "ball glow",
         )?;
 
-        // Pre-allocate dynamic flight buffers (empty initially).
-        // Line: trail centerline (LINE_LIST), ~2000 points × 2 verts × 16 bytes = ~64 KB
-        let flight_line_buffer = HostBuffer::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            128 * 1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            MemoryLocation::CpuToGpu,
-            "flight line",
-        )?;
-        // Fill: up to 5 in-flight balls × 1728 verts = ~140 KB
-        let flight_fill_buffer = HostBuffer::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            256 * 1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            MemoryLocation::CpuToGpu,
-            "flight fill",
-        )?;
-        // Glow: up to 5 in-flight balls × (ball glow + trail glow) ≈ 6 MB
-        let flight_glow_buffer = HostBuffer::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            8 * 1024 * 1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            MemoryLocation::CpuToGpu,
-            "flight glow",
-        )?;
-
-        // Pre-allocate HUD overlay buffers.
-        // Lines: ~5000 text verts + decoration lines ≈ 128 KB
-        let hud_line_buffer = HostBuffer::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            128 * 1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            MemoryLocation::CpuToGpu,
-            "hud lines",
-        )?;
-        // Fill: panel background = 6 verts × 16 bytes = 96 bytes, allocate 4 KB
-        let hud_fill_buffer = HostBuffer::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            4 * 1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            MemoryLocation::CpuToGpu,
-            "hud fill",
-        )?;
+        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
 
         // Build RT pipeline if hardware supports it.
         let (render_mode, rt_pipeline) = if gpu.rt_supported {
@@ -260,17 +199,8 @@ impl Renderer {
             ball_count,
             glow_buffer: ManuallyDrop::new(glow_buffer),
             glow_count,
-            flight_fill_buffer: ManuallyDrop::new(flight_fill_buffer),
-            ball_on_tee_box: true,
-            flight_line_buffer: ManuallyDrop::new(flight_line_buffer),
-            flight_line_count: 0,
-            flight_fill_count: 0,
-            flight_glow_buffer: ManuallyDrop::new(flight_glow_buffer),
-            flight_glow_count: 0,
-            hud_line_buffer: ManuallyDrop::new(hud_line_buffer),
-            hud_line_count: 0,
-            hud_fill_buffer: ManuallyDrop::new(hud_fill_buffer),
-            hud_fill_count: 0,
+            content: FrameContent::default(),
+            frame: ManuallyDrop::new(frame),
             depth: Some(depth),
             overlay_framebuffers,
             command_buffers,
@@ -325,6 +255,7 @@ impl Renderer {
                 .wait_for_fences(&[self.in_flight_fences[frame]], true, u64::MAX)
                 .map_err(RenderError::Vulkan)?;
         }
+        self.frame.upload(&self.content);
 
         // Acquire next image
         // SAFETY: Acquiring swapchain image with valid semaphore.
@@ -622,68 +553,32 @@ impl Renderer {
         self.chase_camera = camera;
     }
 
-    /// Update dynamic flight geometry for this frame.
+    /// Update dynamic flight geometry for the next frame.
     ///
-    /// Generates ball + ball glow + trail glow vertices for each active flight
-    /// and uploads them to the pre-allocated dynamic buffers. Also caches
-    /// RT scene data for per-frame TLAS rebuild.
+    /// Builds ball + ball glow + trail vertices for each active flight; the
+    /// next `draw_frame` uploads them. Rebuilds the RT scene when the
+    /// reflected ball or trail changed.
     pub fn update_flight_geometry(&mut self, flights: &[FlightRenderData], camera: &Camera) {
         use crate::rt_offscreen::RtTrail;
-        use cf_scene::tee::{generate_ball_at, generate_ball_glow_at};
-        use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, generate_trail_glow, generate_trail_line};
-
-        self.ball_on_tee_box = flights.is_empty();
+        use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
         let tee = TeeBox::default();
-        let mut line_verts: Vec<GridVertex> = Vec::new();
-        let mut fill_verts: Vec<GridVertex> = Vec::new();
-        let mut glow_verts: Vec<GridVertex> = Vec::new();
+        flight_vertices(flights, camera.position, &tee, &mut self.content);
 
         // Track RT scene state: reflections show the newest flight's ball +
-        // trail, the flight the HUD and chase camera follow.
+        // trail, the flight the HUD and chase camera follow. The reflected
+        // trail is the part of the trail the raster tracer still draws, so
+        // the reflection disappears in sync with the visible tracer.
         let mut new_rt_ball =
             glam::Vec3::new(0.0, cf_scene::tee::TEE_ELEVATION + tee.ball_radius, 0.0);
         let mut new_rt_trail = RtTrail::default();
-
-        for (i, flight) in flights.iter().enumerate() {
-            // Ball mesh at flight position
-            fill_verts.extend(generate_ball_at(flight.ball_pos, tee.ball_radius, 8, 16));
-
-            // Ball glow at flight position
-            glow_verts.extend(generate_ball_glow_at(
-                flight.ball_pos,
-                tee.ball_radius,
-                8,
-                16,
-            ));
-
-            // Trail glow ribbon (with endcap) + wireframe centerline
-            if flight.trail_points.len() >= 2 {
-                glow_verts.extend(generate_trail_glow(
-                    &flight.trail_points,
-                    flight.current_time,
-                    DEFAULT_TRAIL_LIFETIME,
-                    camera.position,
-                    tee.ball_radius,
-                ));
-                line_verts.extend(generate_trail_line(
-                    &flight.trail_points,
-                    flight.current_time,
-                    DEFAULT_TRAIL_LIFETIME,
-                ));
-            }
-
-            // Use the newest flight for RT reflections. The reflected trail is
-            // the part of the trail the raster tracer still draws, so the
-            // reflection disappears in sync with the visible tracer.
-            if i + 1 == flights.len() {
-                new_rt_ball = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
-                new_rt_trail = RtTrail::new(
-                    &flight.trail_points,
-                    flight.current_time,
-                    DEFAULT_TRAIL_LIFETIME,
-                );
-            }
+        if let Some(flight) = flights.last() {
+            new_rt_ball = flight.ball_pos + glam::Vec3::new(0.0, tee.ball_radius, 0.0);
+            new_rt_trail = RtTrail::new(
+                &flight.trail_points,
+                flight.current_time,
+                DEFAULT_TRAIL_LIFETIME,
+            );
         }
 
         // The tail fade value changes as the trail ages, even between TLAS
@@ -700,10 +595,6 @@ impl Renderer {
             self.rt_needs_update = true;
         }
 
-        self.flight_line_count = self.flight_line_buffer.write(&line_verts);
-        self.flight_fill_count = self.flight_fill_buffer.write(&fill_verts);
-        self.flight_glow_count = self.flight_glow_buffer.write(&glow_verts);
-
         // Rebuild RT TLAS if scene changed.
         if self.rt_needs_update {
             if let Some(ref mut rt_pipeline) = self.rt_pipeline {
@@ -717,10 +608,12 @@ impl Renderer {
         }
     }
 
-    /// Update HUD overlay geometry for this frame.
+    /// Update HUD overlay geometry (pixel coordinates) for the next frame.
     pub fn update_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
-        self.hud_line_count = self.hud_line_buffer.write(lines);
-        self.hud_fill_count = self.hud_fill_buffer.write(fills);
+        self.content.hud_lines.clear();
+        self.content.hud_lines.extend_from_slice(lines);
+        self.content.hud_fills.clear();
+        self.content.hud_fills.extend_from_slice(fills);
     }
 
     // ── Private helpers ──
@@ -885,14 +778,10 @@ impl Drop for Renderer {
                 &mut self.vertex_buffer,
                 &mut self.fill_buffer,
                 &mut self.glow_buffer,
-                &mut self.flight_line_buffer,
-                &mut self.flight_fill_buffer,
-                &mut self.flight_glow_buffer,
-                &mut self.hud_line_buffer,
-                &mut self.hud_fill_buffer,
             ] {
                 ManuallyDrop::take(buffer).destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
+            ManuallyDrop::take(&mut self.frame).destroy(&self.gpu.device, &mut self.gpu.allocator);
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }

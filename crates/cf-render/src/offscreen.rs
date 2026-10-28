@@ -1,7 +1,6 @@
 use std::mem::ManuallyDrop;
 
 use ash::vk;
-use gpu_allocator::MemoryLocation;
 
 use cf_scene::camera::Camera;
 use cf_scene::color;
@@ -16,6 +15,8 @@ use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 use crate::composite::CompositePass;
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
+use crate::flight::flight_vertices;
+use crate::frame::{FrameContent, FrameResources};
 use crate::framebuffer::OffscreenTarget;
 use crate::gpu::{HostBuffer, push_constants};
 use crate::green::GreenEdge;
@@ -43,11 +44,10 @@ pub struct OffscreenRenderer {
     /// Trail centerline (LINE_LIST, always visible regardless of viewing angle).
     trail_line_buffer: Option<HostBuffer>,
     trail_line_count: u32,
-    // Optional HUD overlay.
-    hud_line_buffer: Option<HostBuffer>,
-    hud_line_count: u32,
-    hud_fill_buffer: Option<HostBuffer>,
-    hud_fill_count: u32,
+    /// Next frame's flights and HUD, uploaded into `frame` by `render`.
+    content: FrameContent,
+    /// Per-frame flight and HUD buffers.
+    frame: ManuallyDrop<FrameResources>,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
 
@@ -63,15 +63,6 @@ pub struct OffscreenRenderer {
     /// Optional chase camera for split viewport (right 20%).
     chase_camera: Option<Camera>,
 
-    // Dynamic per-frame flight geometry (pre-allocated for streaming use).
-    flight_line_buffer: Option<HostBuffer>,
-    flight_line_count: u32,
-    flight_fill_buffer: Option<HostBuffer>,
-    flight_fill_count: u32,
-    flight_glow_buffer: Option<HostBuffer>,
-    flight_glow_count: u32,
-    /// When true, draw the static ball on tee. When false, draw from dynamic flight buffers.
-    ball_on_tee_box: bool,
     /// Edge of the range's green, if any (see [`OffscreenRenderer::set_green`]).
     green_edge: Option<GreenEdge>,
 }
@@ -149,6 +140,8 @@ impl OffscreenRenderer {
             "ball glow",
         )?;
 
+        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
+
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
         let fence_info = vk::FenceCreateInfo::default();
@@ -184,10 +177,8 @@ impl OffscreenRenderer {
             glow_count,
             trail_line_buffer: None,
             trail_line_count: 0,
-            hud_line_buffer: None,
-            hud_line_count: 0,
-            hud_fill_buffer: None,
-            hud_fill_count: 0,
+            content: FrameContent::default(),
+            frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
 
@@ -198,13 +189,6 @@ impl OffscreenRenderer {
             rt_trail_tail_t: 0.0,
             chase_camera: None,
 
-            flight_line_buffer: None,
-            flight_line_count: 0,
-            flight_fill_buffer: None,
-            flight_fill_count: 0,
-            flight_glow_buffer: None,
-            flight_glow_count: 0,
-            ball_on_tee_box: true,
             green_edge: None,
         })
     }
@@ -315,6 +299,8 @@ impl OffscreenRenderer {
             (Some(buffer), trail_line_verts.len() as u32)
         };
 
+        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
+
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
         let fence_info = vk::FenceCreateInfo::default();
@@ -339,10 +325,8 @@ impl OffscreenRenderer {
             glow_count,
             trail_line_buffer,
             trail_line_count,
-            hud_line_buffer: None,
-            hud_line_count: 0,
-            hud_fill_buffer: None,
-            hud_fill_count: 0,
+            content: FrameContent::default(),
+            frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
 
@@ -353,13 +337,6 @@ impl OffscreenRenderer {
             rt_trail_tail_t: 0.0,
             chase_camera: None,
 
-            flight_line_buffer: None,
-            flight_line_count: 0,
-            flight_fill_buffer: None,
-            flight_fill_count: 0,
-            flight_glow_buffer: None,
-            flight_glow_count: 0,
-            ball_on_tee_box: true,
             green_edge: None,
         })
     }
@@ -559,6 +536,8 @@ impl OffscreenRenderer {
             (tfc, tbc, bc, fb, gc, gb, None, 0u32)
         };
 
+        let frame = FrameResources::new(&gpu.device, &mut gpu.allocator)?;
+
         let command_buffer = Self::allocate_command_buffer(&gpu)?;
 
         let fence_info = vk::FenceCreateInfo::default();
@@ -592,10 +571,8 @@ impl OffscreenRenderer {
             glow_count,
             trail_line_buffer,
             trail_line_count,
-            hud_line_buffer: None,
-            hud_line_count: 0,
-            hud_fill_buffer: None,
-            hud_fill_count: 0,
+            content: FrameContent::default(),
+            frame: ManuallyDrop::new(frame),
             command_buffer,
             fence,
 
@@ -606,13 +583,6 @@ impl OffscreenRenderer {
             rt_trail_tail_t: trail.tail_t,
             chase_camera: None,
 
-            flight_line_buffer: None,
-            flight_line_count: 0,
-            flight_fill_buffer: None,
-            flight_fill_count: 0,
-            flight_glow_buffer: None,
-            flight_glow_count: 0,
-            ball_on_tee_box: true,
             green_edge: None,
         })
     }
@@ -684,7 +654,7 @@ impl OffscreenRenderer {
             );
             device.cmd_draw(cb, self.tee_border_count, 1, self.tee_fill_count, 0);
 
-            if self.ball_on_tee_box {
+            if self.frame.ball_on_tee() {
                 // Static ball: trail + glow + ball from construction-time buffers.
                 if let Some(trail_buf) = &self.trail_line_buffer {
                     device.cmd_bind_pipeline(
@@ -732,62 +702,9 @@ impl OffscreenRenderer {
                     0,
                 );
             } else {
-                // Dynamic flight geometry from pre-allocated streaming buffers.
-                if let Some(flight_line_buf) = &self.flight_line_buffer {
-                    if self.flight_line_count > 0 {
-                        device.cmd_bind_pipeline(
-                            cb,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.line,
-                        );
-                        device.cmd_set_line_width(cb, 1.0);
-                        device.cmd_bind_vertex_buffers(cb, 0, &[flight_line_buf.handle()], &[0]);
-                        push_constants(
-                            device,
-                            cb,
-                            self.pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            &pc_magenta,
-                        );
-                        device.cmd_draw(cb, self.flight_line_count, 1, 0, 0);
-                    }
-                }
-                if let Some(flight_glow_buf) = &self.flight_glow_buffer {
-                    if self.flight_glow_count > 0 {
-                        device.cmd_bind_pipeline(
-                            cb,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.glow,
-                        );
-                        device.cmd_bind_vertex_buffers(cb, 0, &[flight_glow_buf.handle()], &[0]);
-                        push_constants(
-                            device,
-                            cb,
-                            self.pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            &pc_magenta,
-                        );
-                        device.cmd_draw(cb, self.flight_glow_count, 1, 0, 0);
-                    }
-                }
-                if let Some(flight_fill_buf) = &self.flight_fill_buffer {
-                    if self.flight_fill_count > 0 {
-                        device.cmd_bind_pipeline(
-                            cb,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.fill,
-                        );
-                        device.cmd_bind_vertex_buffers(cb, 0, &[flight_fill_buf.handle()], &[0]);
-                        push_constants(
-                            device,
-                            cb,
-                            self.pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            &pc_black,
-                        );
-                        device.cmd_draw(cb, self.flight_fill_count, 1, 0, 0);
-                    }
-                }
+                // In-flight trails, glows and balls.
+                self.frame
+                    .draw_flights(device, cb, &self.pipeline, view_proj, 1.0);
             }
         } // unsafe
     }
@@ -826,129 +743,35 @@ impl OffscreenRenderer {
         self.chase_camera = camera;
     }
 
-    /// Add HUD overlay geometry (call before `render()`). Replaces the HUD
-    /// buffers it is given new geometry for.
+    /// Set the HUD overlay geometry (pixel coordinates) for the next
+    /// `render`; the same as [`OffscreenRenderer::update_hud`].
+    ///
+    /// # Errors
+    /// None; the HUD buffers always exist.
     pub fn set_hud(
         &mut self,
         lines: &[GridVertex],
         fills: &[GridVertex],
     ) -> Result<(), RenderError> {
-        if !lines.is_empty() {
-            free_slot(&mut self.gpu, &mut self.hud_line_buffer)?;
-            self.hud_line_buffer = Some(HostBuffer::with_data(
-                &self.gpu.device,
-                &mut self.gpu.allocator,
-                lines,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "hud lines",
-            )?);
-            self.hud_line_count = lines.len() as u32;
-        }
-        if !fills.is_empty() {
-            free_slot(&mut self.gpu, &mut self.hud_fill_buffer)?;
-            self.hud_fill_buffer = Some(HostBuffer::with_data(
-                &self.gpu.device,
-                &mut self.gpu.allocator,
-                fills,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                "hud fill",
-            )?);
-            self.hud_fill_count = fills.len() as u32;
-        }
+        self.update_hud(lines, fills);
         Ok(())
     }
 
-    /// Allocate pre-sized dynamic buffers for streaming use, replacing any
-    /// flight or HUD buffers allocated before.
+    /// Does nothing: the per-frame flight and HUD buffers always exist.
     ///
-    /// Call once after construction to enable `update_flight()` and `update_hud_streaming()`.
-    /// Without this, the renderer only supports static geometry set at construction time.
+    /// # Errors
+    /// None.
     pub fn init_streaming(&mut self) -> Result<(), RenderError> {
-        // Flight line: trail centerlines, ~2000 points × 2 verts × 16 bytes = ~64 KB
-        // Flight fill: up to 5 in-flight balls × 1728 verts = ~140 KB
-        // Flight glow: up to 5 balls × (ball glow + trail glow) ≈ 6 MB
-        // HUD: line and fill buffers sized like the windowed renderer's.
-        let gpu = &mut self.gpu;
-        for (slot, capacity, name) in [
-            (
-                &mut self.flight_line_buffer,
-                128 * 1024,
-                "stream flight line",
-            ),
-            (
-                &mut self.flight_fill_buffer,
-                256 * 1024,
-                "stream flight fill",
-            ),
-            (
-                &mut self.flight_glow_buffer,
-                8 * 1024 * 1024,
-                "stream flight glow",
-            ),
-            (&mut self.hud_line_buffer, 128 * 1024, "stream hud line"),
-            (&mut self.hud_fill_buffer, 4 * 1024, "stream hud fill"),
-        ] {
-            free_slot(gpu, slot)?;
-            *slot = Some(HostBuffer::new(
-                &gpu.device,
-                &mut gpu.allocator,
-                capacity,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                MemoryLocation::CpuToGpu,
-                name,
-            )?);
-        }
         Ok(())
     }
 
-    /// Update dynamic flight geometry for this frame (streaming mode).
-    ///
-    /// Requires `init_streaming()` to have been called first.
+    /// Update dynamic flight geometry for the next `render`, and rebuild the
+    /// RT scene from the newest flight.
     pub fn update_flight(&mut self, flights: &[FlightRenderData], camera: &Camera) {
-        use cf_scene::tee::{generate_ball_at, generate_ball_glow_at};
-        use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, generate_trail_glow, generate_trail_line};
-
-        self.ball_on_tee_box = flights.is_empty();
+        use cf_scene::trail::DEFAULT_TRAIL_LIFETIME;
 
         let tee = TeeBox::default();
-        let mut line_verts: Vec<GridVertex> = Vec::new();
-        let mut fill_verts: Vec<GridVertex> = Vec::new();
-        let mut glow_verts: Vec<GridVertex> = Vec::new();
-
-        for flight in flights {
-            fill_verts.extend(generate_ball_at(flight.ball_pos, tee.ball_radius, 8, 16));
-            glow_verts.extend(generate_ball_glow_at(
-                flight.ball_pos,
-                tee.ball_radius,
-                8,
-                16,
-            ));
-
-            if flight.trail_points.len() >= 2 {
-                glow_verts.extend(generate_trail_glow(
-                    &flight.trail_points,
-                    flight.current_time,
-                    DEFAULT_TRAIL_LIFETIME,
-                    camera.position,
-                    tee.ball_radius,
-                ));
-                line_verts.extend(generate_trail_line(
-                    &flight.trail_points,
-                    flight.current_time,
-                    DEFAULT_TRAIL_LIFETIME,
-                ));
-            }
-        }
-
-        if let Some(buffer) = &mut self.flight_line_buffer {
-            self.flight_line_count = buffer.write(&line_verts);
-        }
-        if let Some(buffer) = &mut self.flight_fill_buffer {
-            self.flight_fill_count = buffer.write(&fill_verts);
-        }
-        if let Some(buffer) = &mut self.flight_glow_buffer {
-            self.flight_glow_count = buffer.write(&glow_verts);
-        }
+        flight_vertices(flights, camera.position, &tee, &mut self.content);
 
         // Rebuild RT TLAS with updated ball/trail positions. Reflections
         // follow the newest flight, the one the HUD and chase camera show,
@@ -973,23 +796,26 @@ impl OffscreenRenderer {
         }
     }
 
-    /// Update HUD overlay geometry for this frame (streaming mode).
-    ///
-    /// Requires `init_streaming()` to have been called first.
+    /// Update HUD overlay geometry (pixel coordinates) for the next `render`.
+    pub fn update_hud(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
+        self.content.hud_lines.clear();
+        self.content.hud_lines.extend_from_slice(lines);
+        self.content.hud_fills.clear();
+        self.content.hud_fills.extend_from_slice(fills);
+    }
+
+    /// Update HUD overlay geometry for the next `render`; the same as
+    /// [`OffscreenRenderer::update_hud`].
     pub fn update_hud_streaming(&mut self, lines: &[GridVertex], fills: &[GridVertex]) {
-        if let Some(buffer) = &mut self.hud_line_buffer {
-            self.hud_line_count = buffer.write(lines);
-        }
-        if let Some(buffer) = &mut self.hud_fill_buffer {
-            self.hud_fill_count = buffer.write(fills);
-        }
+        self.update_hud(lines, fills);
     }
 
     /// Render the grid and read back the result as RGBA8 pixels.
     ///
     /// When RT is enabled, renders the raster scene, traces RT reflection
     /// rays, and composites them onto the rasterized output.
-    pub fn render(&self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
+    pub fn render(&mut self, camera: &Camera) -> Result<FrameBuffers, RenderError> {
+        self.frame.upload(&self.content);
         let target = self.target.as_ref().expect("target exists");
         let device = &self.gpu.device;
         let width = target.width;
@@ -1125,68 +951,14 @@ impl OffscreenRenderer {
             }
 
             // HUD overlay (2D, pixel coordinates)
-            if self.hud_fill_count > 0 || self.hud_line_count > 0 {
-                let w = width as f32;
-                let h = height as f32;
-                let hud_proj = glam::Mat4::orthographic_rh(0.0, w, 0.0, h, -1.0, 1.0);
-
-                if let Some(hud_fill_buf) = &self.hud_fill_buffer {
-                    if self.hud_fill_count > 0 {
-                        let pc_hud_bg = GridPushConstants {
-                            view_proj: hud_proj.to_cols_array_2d(),
-                            color: [0.0, 0.0, 0.0, 0.8],
-                        };
-                        device.cmd_bind_pipeline(
-                            self.command_buffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.fill,
-                        );
-                        device.cmd_bind_vertex_buffers(
-                            self.command_buffer,
-                            0,
-                            &[hud_fill_buf.handle()],
-                            &[0],
-                        );
-                        push_constants(
-                            device,
-                            self.command_buffer,
-                            self.pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            &pc_hud_bg,
-                        );
-                        device.cmd_draw(self.command_buffer, self.hud_fill_count, 1, 0, 0);
-                    }
-                }
-
-                if let Some(hud_line_buf) = &self.hud_line_buffer {
-                    if self.hud_line_count > 0 {
-                        let pc_hud_text = GridPushConstants {
-                            view_proj: hud_proj.to_cols_array_2d(),
-                            color: [1.0, 1.0, 1.0, 1.0],
-                        };
-                        device.cmd_bind_pipeline(
-                            self.command_buffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.pipeline.line,
-                        );
-                        device.cmd_set_line_width(self.command_buffer, 1.0);
-                        device.cmd_bind_vertex_buffers(
-                            self.command_buffer,
-                            0,
-                            &[hud_line_buf.handle()],
-                            &[0],
-                        );
-                        push_constants(
-                            device,
-                            self.command_buffer,
-                            self.pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            &pc_hud_text,
-                        );
-                        device.cmd_draw(self.command_buffer, self.hud_line_count, 1, 0, 0);
-                    }
-                }
-            }
+            self.frame.draw_hud(
+                device,
+                self.command_buffer,
+                self.pipeline.fill,
+                self.pipeline.line,
+                self.pipeline.layout,
+                extent,
+            );
 
             device.cmd_end_render_pass(self.command_buffer);
 
@@ -1406,21 +1178,6 @@ impl OffscreenRenderer {
     }
 }
 
-/// Destroy the buffer in `slot`, if any, once the device is idle.
-fn free_slot(gpu: &mut GpuContext, slot: &mut Option<HostBuffer>) -> Result<(), RenderError> {
-    if let Some(old) = slot.take() {
-        // SAFETY: The wait makes sure no pending work uses the old buffer.
-        unsafe {
-            if let Err(e) = gpu.device.device_wait_idle() {
-                *slot = Some(old);
-                return Err(RenderError::Vulkan(e));
-            }
-            old.destroy(&gpu.device, &mut gpu.allocator);
-        }
-    }
-    Ok(())
-}
-
 impl Drop for OffscreenRenderer {
     fn drop(&mut self) {
         unsafe {
@@ -1439,19 +1196,10 @@ impl Drop for OffscreenRenderer {
             ManuallyDrop::take(&mut self.vertex_buffer).destroy(device, allocator);
             ManuallyDrop::take(&mut self.fill_buffer).destroy(device, allocator);
             ManuallyDrop::take(&mut self.glow_buffer).destroy(device, allocator);
-            for slot in [
-                &mut self.trail_line_buffer,
-                &mut self.hud_line_buffer,
-                &mut self.hud_fill_buffer,
-                // Dynamic flight buffers (streaming mode).
-                &mut self.flight_line_buffer,
-                &mut self.flight_fill_buffer,
-                &mut self.flight_glow_buffer,
-            ] {
-                if let Some(buffer) = slot.take() {
-                    buffer.destroy(device, allocator);
-                }
+            if let Some(buffer) = self.trail_line_buffer.take() {
+                buffer.destroy(device, allocator);
             }
+            ManuallyDrop::take(&mut self.frame).destroy(device, allocator);
 
             if let Some(composite) = self.composite.take() {
                 composite.destroy(&self.gpu.device);
