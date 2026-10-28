@@ -44,6 +44,8 @@ jobs:
         with:
           ref: main
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Bump to next patch version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

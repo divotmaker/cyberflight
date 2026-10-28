@@ -16,8 +16,9 @@ cyberflight receives live shot data from [flighthook](https://github.com/divotma
 ### Supported launch monitors
 
 cyberflight works with any launch monitor flighthook supports. Today that includes the
-FlightScope Mevo+, Mevo Gen2 and Xi, the Square Golf Omni, and the Garmin R10 (alpha); see
-[flighthook's list](https://github.com/divotmaker/flighthook#supported-integrations) for the
+FlightScope Mevo+, Mevo Gen2 and Xi, the Square Golf Omni, the Garmin R10 (alpha) and Uneekor
+(alpha), plus any monitor that speaks GSPro Open Connect through flighthook's OpenConnect
+server; see [flighthook's list](https://github.com/divotmaker/flighthook#supported-integrations) for the
 current set and each device's status.
 
 ### Setup

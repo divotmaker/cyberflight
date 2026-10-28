@@ -48,7 +48,7 @@ out ?= screenshots
 
 # Render every screenshot into $(out)/ (needs a Vulkan GPU).
 screenshots:
-	cargo run -p cyberflight --example screenshot -- --out $(out)
+	cargo run --release -p cyberflight --example screenshot -- --out $(out)
 
 # Compare two screenshot directories, e.g. before and after a change:
 #   make compare base=screenshots-before new=screenshots

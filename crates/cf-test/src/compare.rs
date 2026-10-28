@@ -21,6 +21,8 @@ pub enum CompareError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{}: the diff directory must differ from both input directories", .0.display())]
+    DiffDirIsInput(PathBuf),
     #[error("{path}: {source}")]
     Image {
         path: PathBuf,
@@ -184,7 +186,8 @@ pub fn diff_image(baseline: &RgbaImage, candidate: &RgbaImage) -> RgbImage {
 ///
 /// # Errors
 /// Returns [`CompareError`] if a directory cannot be listed, the diff
-/// directory cannot be created, or a diff image cannot be written. Problems
+/// directory cannot be created or is one of the input directories, or a diff
+/// image cannot be written. Problems
 /// with a single image are reported as [`Verdict::Unreadable`].
 pub fn compare_dirs(
     baseline_dir: &Path,
@@ -198,6 +201,16 @@ pub fn compare_dirs(
             path: dir.clone(),
             source,
         })?;
+        let canonical = |p: &Path| {
+            fs::canonicalize(p).map_err(|source| CompareError::Io {
+                path: p.to_path_buf(),
+                source,
+            })
+        };
+        let diff = canonical(dir)?;
+        if diff == canonical(baseline_dir)? || diff == canonical(candidate_dir)? {
+            return Err(CompareError::DiffDirIsInput(dir.clone()));
+        }
     }
 
     let mut report = Report {
@@ -457,6 +470,31 @@ mod tests {
         assert!(!diffs.join("same.png").exists());
 
         for d in [base, cand, diffs] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn diff_dir_equal_to_an_input_is_refused() {
+        let base = temp_dir("diffin-base");
+        let cand = temp_dir("diffin-cand");
+        card().save(base.join("a.png")).unwrap();
+        let mut tweaked = card();
+        tweaked.put_pixel(1, 2, Rgba([5, 4, 8, 255]));
+        tweaked.save(cand.join("a.png")).unwrap();
+        let before = fs::read(cand.join("a.png")).unwrap();
+
+        for diff_dir in [&base, &cand] {
+            let options = CompareOptions {
+                diff_dir: Some(diff_dir.clone()),
+                ..CompareOptions::default()
+            };
+            let err = compare_dirs(&base, &cand, &options).unwrap_err();
+            assert!(matches!(err, CompareError::DiffDirIsInput(_)), "{err}");
+        }
+        assert_eq!(fs::read(cand.join("a.png")).unwrap(), before);
+
+        for d in [base, cand] {
             let _ = fs::remove_dir_all(d);
         }
     }

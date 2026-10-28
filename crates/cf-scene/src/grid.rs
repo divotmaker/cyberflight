@@ -70,14 +70,6 @@ impl GridConfig {
         let lateral = self.lateral_m();
         (downrange * downrange + lateral * lateral).sqrt()
     }
-
-    /// World-space clip bounds for the grid floor: [min_x, min_z, max_x, max_z].
-    #[must_use]
-    pub fn clip_bounds(&self) -> [f32; 4] {
-        let lat = self.lateral_m();
-        let dr = self.downrange_m();
-        [-lat, 0.0, lat, dr]
-    }
 }
 
 impl Default for GridConfig {
