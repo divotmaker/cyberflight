@@ -1062,6 +1062,8 @@ mod tests {
         assert!(f.prev_chase.is_none());
     }
 
+    /// `ReceivedShot::from_frp` rejects a non-positive speed; this covers a
+    /// zero-speed input reaching the animation directly.
     #[test]
     fn motionless_shot_is_a_single_point() {
         let input = ShotInput {

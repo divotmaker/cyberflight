@@ -41,7 +41,7 @@ pub const MAX_LAUNCH_AZIMUTH_DEG: f64 = 60.0;
 pub const MAX_SPIN_RPM: f64 = 20_000.0;
 
 /// Why an FRP shot cannot be simulated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum RejectReason {
     /// The shot carries no ball flight data.
     #[error("no ball flight data")]
@@ -49,6 +49,9 @@ pub enum RejectReason {
     /// The ball flight has no launch speed.
     #[error("no launch speed")]
     NoLaunchSpeed,
+    /// The launch speed is zero or negative (mph).
+    #[error("launch speed {0:.1} mph is not positive")]
+    NonPositiveLaunchSpeed(f64),
     /// The ball flight has no launch elevation.
     #[error("no launch elevation")]
     NoLaunchElevation,
@@ -130,11 +133,11 @@ fn finite(field: &'static str, value: f64) -> Result<f64, RejectReason> {
 impl ReceivedShot {
     /// Convert an FRP `CompletedShot` into a `ReceivedShot`.
     ///
-    /// The shot needs a ball flight with a launch speed and elevation; a
-    /// missing azimuth is a straight shot (0°). NaN or infinite launch
-    /// values reject the shot, and values outside the physical envelope
-    /// (the `MAX_*`/`MIN_*` constants) are clamped and listed in
-    /// [`clamped`](Self::clamped).
+    /// The shot needs a ball flight with a positive launch speed and a
+    /// launch elevation; a missing azimuth is a straight shot (0°). NaN or
+    /// infinite launch values reject the shot, and values outside the
+    /// physical envelope (the `MAX_*`/`MIN_*` constants) are clamped and
+    /// listed in [`clamped`](Self::clamped).
     ///
     /// Spin comes from the FRP components, or from `total_spin_rpm` +
     /// `spin_axis` when the device sends only that pair. A total spin
@@ -151,13 +154,20 @@ impl ReceivedShot {
     /// Returns why the shot cannot be simulated.
     pub fn from_frp(shot: &flightrelay::CompletedShot) -> Result<Self, RejectReason> {
         let mut ball = shot.ball.clone().ok_or(RejectReason::NoBallFlight)?;
-        if let Some(axis) = ball.spin_axis {
+        // The axis only splits a total spin sent without components.
+        let axis_used = ball.backspin_rpm.is_none()
+            && ball.sidespin_rpm.is_none()
+            && ball.total_spin_rpm.is_some();
+        if let Some(axis) = ball.spin_axis.filter(|_| axis_used) {
             finite("spin_axis", axis)?;
         }
         ball.complete_spin();
 
         let speed = ball.launch_speed.ok_or(RejectReason::NoLaunchSpeed)?;
         let speed = finite("launch_speed", speed.as_mph())?;
+        if speed <= 0.0 {
+            return Err(RejectReason::NonPositiveLaunchSpeed(speed));
+        }
         let elevation = ball
             .launch_elevation
             .ok_or(RejectReason::NoLaunchElevation)?;
@@ -461,12 +471,31 @@ mod tests {
     }
 
     #[test]
-    fn negative_speed_is_a_motionless_ball() {
+    fn rejects_non_positive_speed() {
+        for mph in [-20.0, 0.0, -0.0] {
+            let mut data = sample_completed_shot();
+            ball(&mut data).launch_speed = Some(Velocity::MilesPerHour(mph));
+            assert_eq!(
+                ReceivedShot::from_frp(&data).unwrap_err(),
+                RejectReason::NonPositiveLaunchSpeed(mph)
+            );
+        }
         let mut data = sample_completed_shot();
-        ball(&mut data).launch_speed = Some(Velocity::MilesPerHour(-20.0));
+        ball(&mut data).launch_speed = Some(Velocity::MilesPerHour(0.5));
         let shot = ReceivedShot::from_frp(&data).unwrap();
-        assert_eq!(shot.input.ball_speed_mph, 0.0);
-        assert_eq!(shot.clamped.len(), 1);
+        assert_eq!(shot.input.ball_speed_mph, 0.5);
+        assert!(shot.clamped.is_empty());
+    }
+
+    #[test]
+    fn unused_spin_axis_is_ignored() {
+        let mut data = sample_completed_shot();
+        let b = ball(&mut data);
+        b.total_spin_rpm = Some(2716);
+        b.spin_axis = Some(f64::NAN);
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!((shot.input.backspin_rpm - 2700.0).abs() < 0.01);
+        assert!((shot.input.sidespin_rpm - -300.0).abs() < 0.01);
     }
 
     #[test]
