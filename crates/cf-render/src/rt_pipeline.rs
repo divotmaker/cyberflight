@@ -2,6 +2,8 @@ use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
+use cf_scene::camera::Camera;
+
 use crate::context::GpuContext;
 use crate::error::RenderError;
 
@@ -17,6 +19,49 @@ pub struct RtPushConstants {
     pub grid_params: [f32; 4],
     /// Ball position (xyz), w = trail fade distance in meters.
     pub ball_pos: [f32; 4],
+}
+
+/// Grid line half-width in meters used by the RT floor shader.
+const RT_GRID_LINE_HALF_WIDTH: f32 = 0.15;
+
+impl RtPushConstants {
+    /// Pack push constants for one trace dispatch.
+    ///
+    /// `aspect` is the dispatch viewport's width / height and `viewport_offset`
+    /// its top-left corner in storage-image pixels. `trail_fade_dist` is the
+    /// trail reflection fade distance in meters (0 selects the shader default).
+    #[must_use]
+    pub fn new(
+        camera: &Camera,
+        aspect: f32,
+        viewport_offset: [f32; 2],
+        grid_spacing_m: f32,
+        grid_max_fade_dist: f32,
+        ball_center: glam::Vec3,
+        trail_fade_dist: f32,
+    ) -> Self {
+        let view = camera.view_matrix();
+        let mut proj = camera.projection_matrix(aspect);
+        proj.y_axis.y *= -1.0; // Vulkan Y-flip
+        let inv_view_proj = (proj * view).inverse();
+
+        Self {
+            camera_pos: [
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                viewport_offset[0],
+            ],
+            inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            grid_params: [
+                grid_spacing_m,
+                RT_GRID_LINE_HALF_WIDTH,
+                grid_max_fade_dist,
+                viewport_offset[1],
+            ],
+            ball_pos: [ball_center.x, ball_center.y, ball_center.z, trail_fade_dist],
+        }
+    }
 }
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.

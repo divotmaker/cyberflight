@@ -15,33 +15,15 @@ impl Renderer {
         vp_offset_x: f32,
         vp_offset_y: f32,
     ) -> RtPushConstants {
-        let view = camera.view_matrix();
-        let mut proj = camera.projection_matrix(aspect);
-        proj.y_axis.y *= -1.0; // Vulkan Y-flip
-        let view_proj = proj * view;
-        let inv_view_proj = view_proj.inverse();
-
-        RtPushConstants {
-            camera_pos: [
-                camera.position.x,
-                camera.position.y,
-                camera.position.z,
-                vp_offset_x,
-            ],
-            inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            grid_params: [
-                self.grid_spacing_m,
-                0.15, // line half-width in meters
-                self.grid_max_fade_dist,
-                vp_offset_y,
-            ],
-            ball_pos: [
-                self.rt_ball_center.x,
-                self.rt_ball_center.y,
-                self.rt_ball_center.z,
-                self.rt_trail_fade_dist,
-            ],
-        }
+        RtPushConstants::new(
+            camera,
+            aspect,
+            [vp_offset_x, vp_offset_y],
+            self.grid_spacing_m,
+            self.grid_max_fade_dist,
+            self.rt_ball_center,
+            self.rt_trail_fade_dist,
+        )
     }
 
     /// Record ray tracing commands: trace reflection rays into the storage image,

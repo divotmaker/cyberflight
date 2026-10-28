@@ -67,8 +67,6 @@ pub struct OffscreenRenderer {
     grid_max_fade_dist: f32,
     /// Ball center position for RT push constants (xyz).
     rt_ball_center: glam::Vec3,
-    /// Ball radius for RT push constants.
-    rt_ball_radius: f32,
     /// RT trail fade distance (arc length of trimmed trail, meters).
     rt_trail_fade_dist: f32,
     /// Optional chase camera for split viewport (right 20%).
@@ -256,7 +254,6 @@ impl OffscreenRenderer {
             grid_spacing_m: spacing_m,
             grid_max_fade_dist: max_fade_dist,
             rt_ball_center: ball_center,
-            rt_ball_radius: tee.ball_radius,
             rt_trail_fade_dist: 0.0,
             chase_camera: None,
 
@@ -414,7 +411,6 @@ impl OffscreenRenderer {
             grid_spacing_m: 0.0,
             grid_max_fade_dist: 0.0,
             rt_ball_center: ball_center,
-            rt_ball_radius: tee.ball_radius,
             rt_trail_fade_dist: 0.0,
             chase_camera: None,
 
@@ -706,7 +702,6 @@ impl OffscreenRenderer {
             grid_spacing_m: spacing_m,
             grid_max_fade_dist: max_fade_dist,
             rt_ball_center: ball_center,
-            rt_ball_radius: tee.ball_radius,
             rt_trail_fade_dist: trail_fade_dist,
             chase_camera: None,
 
@@ -1512,30 +1507,16 @@ impl OffscreenRenderer {
                 .base_array_layer(0)
                 .layer_count(1);
 
-            // Build RT push constants.
-            let aspect = width as f32 / height as f32;
-            let view = camera.view_matrix();
-            let mut proj = camera.projection_matrix(aspect);
-            proj.y_axis.y *= -1.0; // Vulkan Y-flip
-            let view_proj = proj * view;
-            let inv_view_proj = view_proj.inverse();
-
-            let pc = RtPushConstants {
-                camera_pos: [camera.position.x, camera.position.y, camera.position.z, 0.0],
-                inv_view_proj: inv_view_proj.to_cols_array_2d(),
-                grid_params: [
-                    self.grid_spacing_m,
-                    0.15, // line half-width in meters
-                    self.grid_max_fade_dist,
-                    self.rt_trail_fade_dist,
-                ],
-                ball_pos: [
-                    self.rt_ball_center.x,
-                    self.rt_ball_center.y,
-                    self.rt_ball_center.z,
-                    self.rt_ball_radius,
-                ],
-            };
+            // Build RT push constants (full-frame dispatch, no viewport offset).
+            let pc = RtPushConstants::new(
+                camera,
+                width as f32 / height as f32,
+                [0.0, 0.0],
+                self.grid_spacing_m,
+                self.grid_max_fade_dist,
+                self.rt_ball_center,
+                self.rt_trail_fade_dist,
+            );
 
             // Step 1: Transition RT storage image: UNDEFINED -> GENERAL
             device.cmd_pipeline_barrier(

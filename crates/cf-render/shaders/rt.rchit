@@ -4,9 +4,9 @@
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 
 layout(push_constant) uniform PushConstants {
-    vec4 camera_pos;
+    vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;
-    vec4 grid_params; // x = spacing_m, y = line_half_width, z = max_fade_dist, w = viewport_y_offset
+    vec4 grid_params; // x = spacing_m, y = line_half_width, z = max_fade_dist, w = viewport Y offset (pixels)
     vec4 ball_pos;    // xyz = ball center, w = trail fade distance (meters)
 } pc;
 
