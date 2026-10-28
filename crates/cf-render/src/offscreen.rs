@@ -34,7 +34,8 @@ impl OffscreenRenderer {
     ///
     /// `RtMode::Off` creates the device without ray tracing; `Auto` requests
     /// it and ray-traces floor reflections when the GPU supports them and
-    /// they set up (otherwise it renders raster and says so on stderr).
+    /// they set up (otherwise it mirrors them across the floor and says so on
+    /// stderr).
     pub fn new(
         width: u32,
         height: u32,
@@ -107,10 +108,26 @@ impl OffscreenRenderer {
         })
     }
 
-    /// `RayTraced` when the renderer draws floor reflections, else `Rasterized`.
+    /// `RayTraced` when the renderer ray-traces its floor reflections, else
+    /// `Rasterized`: they are mirrored across the floor.
     #[must_use]
     pub fn render_mode(&self) -> RenderMode {
         self.recorder.mode()
+    }
+
+    /// Whether the renderer can ray-trace its floor reflections: the GPU
+    /// supports it and the ray tracer is set up and working.
+    #[must_use]
+    pub fn ray_tracing_available(&self) -> bool {
+        self.recorder.has_ray_tracing()
+    }
+
+    /// Switch the floor reflections between ray-traced (`RayTraced`) and
+    /// mirrored (`Rasterized`), from the next `render` on. `RayTraced`
+    /// without ray tracing gives `Rasterized`; check
+    /// [`render_mode`](Self::render_mode) for the result.
+    pub fn set_render_mode(&mut self, mode: RenderMode) {
+        self.recorder.set_mode(&mut self.gpu, mode);
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
@@ -128,9 +145,9 @@ impl OffscreenRenderer {
     }
 
     /// Update dynamic flight geometry for the next `render`. Reflections
-    /// show the newest flight's ball and its tracer, or the ball on the tee when there is no flight. If the
-    /// reflections fail to rebuild, the renderer says so on stderr and
-    /// renders raster from then on.
+    /// show the newest flight's ball and its tracer, or the ball on the tee
+    /// when there is no flight. If the ray tracer fails to rebuild, the
+    /// renderer says so on stderr and mirrors the reflections from then on.
     pub fn update_flight(&mut self, flights: &[FlightRenderData]) {
         self.recorder.update_flight(&mut self.gpu, flights);
     }
@@ -142,8 +159,8 @@ impl OffscreenRenderer {
 
     /// Render a frame seen from `camera` and read it back.
     ///
-    /// In `RayTraced` mode, traces the floor reflections and composites them
-    /// onto the raster scene. The HUD is drawn last, over the scene and its
+    /// Traces (`RayTraced` mode) or mirrors (`Rasterized`) the floor
+    /// reflections and composites them onto the raster scene. The HUD is drawn last, over the scene and its
     /// reflections.
     pub fn render(&mut self, camera: &Camera) -> Result<Frame<'_>, RenderError> {
         let target = &self.target;

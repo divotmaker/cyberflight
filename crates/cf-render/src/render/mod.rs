@@ -45,7 +45,7 @@ impl Renderer {
     /// Create a renderer for `swapchain` on `gpu`, drawing the range
     /// `grid_config` with the ball on the tee. It ray-traces floor
     /// reflections when the GPU supports them and they set up (otherwise it
-    /// renders raster and says so on stderr).
+    /// mirrors them across the floor and says so on stderr).
     ///
     /// # Errors
     /// A part fails to create; what was created, and `swapchain`, are
@@ -56,7 +56,7 @@ impl Renderer {
         grid_config: &GridConfig,
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
-        // Reflections when the device supports them; raster if they fail.
+        // Ray-traced reflections when the device supports them; mirrored if not.
         let recorder = match SceneRecorder::new(
             &mut gpu,
             swapchain.format,
@@ -72,7 +72,7 @@ impl Renderer {
                 return Err(e);
             }
         };
-        if recorder.has_reflections() {
+        if recorder.has_ray_tracing() {
             eprintln!("RT pipeline: initialized (windowed mode)");
         }
 
@@ -104,8 +104,8 @@ impl Renderer {
 
     /// Draw a frame with the current camera.
     ///
-    /// Records the scene, the reflections in `RayTraced` mode and the HUD,
-    /// then submits and presents. Does nothing while the window is minimised
+    /// Records the scene, the reflections (ray-traced in `RayTraced` mode,
+    /// else mirrored) and the HUD, then submits and presents. Does nothing while the window is minimised
     /// (zero extent). An out-of-date swapchain is rebuilt and the frame
     /// skipped; a suboptimal one is rendered and presented, then rebuilt.
     /// After a failed rebuild every frame retries it first, and a frame
@@ -401,11 +401,22 @@ impl Renderer {
         self.recorder.mode()
     }
 
-    /// Switch between raster and ray-traced rendering.
+    /// Whether the renderer can ray-trace its floor reflections: the GPU
+    /// supports it and the ray tracer is set up and working.
+    #[must_use]
+    pub fn ray_tracing_available(&self) -> bool {
+        self.recorder.has_ray_tracing()
+    }
+
+    /// Switch the floor reflections between ray-traced (`RayTraced`) and
+    /// mirrored across the floor plane (`Rasterized`), from the next frame on.
     ///
     /// Falls back to `Rasterized` if RT is requested but not available.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
-        self.recorder.set_mode(mode);
+        // SAFETY: Waiting for the device to go idle, so no frame in flight
+        // reads what the switch rewrites.
+        unsafe { self.gpu.device.device_wait_idle().ok() };
+        self.recorder.set_mode(&mut self.gpu, mode);
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
@@ -426,9 +437,9 @@ impl Renderer {
     ///
     /// Builds ball + ball glow + tracer tube vertices for each active flight; the
     /// next `draw_frame` uploads them. Reflections show the newest flight's
-    /// ball and its tracer, or the ball on the tee; the RT scene is rebuilt
-    /// only when the tracer changed. If that rebuild fails, the renderer says so on stderr and
-    /// renders raster from then on.
+    /// ball and its tracer, or the ball on the tee; in `RayTraced` mode the RT
+    /// scene is rebuilt only when the tracer changed. If that rebuild fails,
+    /// the renderer says so on stderr and mirrors the reflections from then on.
     pub fn update_flight(&mut self, flights: &[FlightRenderData]) {
         self.recorder.update_flight(&mut self.gpu, flights);
     }

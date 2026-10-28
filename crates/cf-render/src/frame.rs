@@ -1,15 +1,21 @@
 //! Per-frame geometry: what `update_*` builds on the CPU and the GPU buffers
 //! a frame is drawn from.
 
+use std::ops::Range;
+
 use ash::vk;
+use glam::Vec3;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::color;
 use cf_scene::grid::GridVertex;
+use cf_scene::tee::TeeBox;
 
 use crate::error::RenderError;
+use crate::flight::tee_ball_centre;
 use crate::gpu::{HostBuffer, push_constants};
+use crate::mirror::MirrorTracer;
 use crate::pipeline::{GridPushConstants, ScenePipelines};
 
 /// The next frame's CPU-side content, built by `update_*` and uploaded when
@@ -27,6 +33,14 @@ pub(crate) struct FrameContent {
     pub(crate) hud_fills: Vec<GridVertex>,
     /// No ball is in flight: draw the ball on the tee.
     pub(crate) ball_on_tee: bool,
+    /// The newest flight's tracer tube in `flight_glows` (a vertex range);
+    /// empty without a flight.
+    pub(crate) newest_tube: Range<usize>,
+    /// The newest flight's tracer centre line in `flight_lines` (a vertex
+    /// range); empty without a flight.
+    pub(crate) newest_line: Range<usize>,
+    /// Centre of the newest flight's ball, or of the ball on the tee.
+    pub(crate) ball_centre: Vec3,
 }
 
 impl Default for FrameContent {
@@ -38,6 +52,9 @@ impl Default for FrameContent {
             hud_lines: Vec::new(),
             hud_fills: Vec::new(),
             ball_on_tee: true,
+            newest_tube: 0..0,
+            newest_line: 0..0,
+            ball_centre: tee_ball_centre(&TeeBox::default()),
         }
     }
 }
@@ -48,6 +65,13 @@ const FLIGHT_GLOWS: usize = 2;
 const HUD_LINES: usize = 3;
 const HUD_FILLS: usize = 4;
 const SLOTS: usize = 5;
+
+/// The part of the vertex `range` that lies within the first `count`
+/// vertices of a buffer.
+fn uploaded(range: &Range<usize>, count: u32) -> Range<u32> {
+    let clip = |v: usize| u32::try_from(v).map_or(count, |v| v.min(count));
+    clip(range.start)..clip(range.end)
+}
 
 /// Capacity in bytes and allocation name of each buffer, by slot.
 /// Each holds 16-byte `GridVertex`es: 8,192 flight lines, 16,384 flight
@@ -65,6 +89,10 @@ pub(crate) struct FrameResources {
     buffers: [HostBuffer; SLOTS],
     counts: [u32; SLOTS],
     ball_on_tee: bool,
+    /// The newest flight's tube in the glow buffer, and its centre line in
+    /// the line buffer, as far as they were uploaded.
+    newest_tube: Range<u32>,
+    newest_line: Range<u32>,
 }
 
 impl FrameResources {
@@ -101,6 +129,8 @@ impl FrameResources {
                 buffers,
                 counts: [0; SLOTS],
                 ball_on_tee: true,
+                newest_tube: 0..0,
+                newest_line: 0..0,
             }),
             Err(made) => {
                 for buffer in made {
@@ -129,6 +159,19 @@ impl FrameResources {
             *count = buffer.write(data);
         }
         self.ball_on_tee = content.ball_on_tee;
+        self.newest_tube = uploaded(&content.newest_tube, self.counts[FLIGHT_GLOWS]);
+        self.newest_line = uploaded(&content.newest_line, self.counts[FLIGHT_LINES]);
+    }
+
+    /// The newest flight's tracer as uploaded: the buffers and vertex ranges
+    /// the mirror draws.
+    pub(crate) fn newest_tracer(&self) -> MirrorTracer {
+        MirrorTracer {
+            tube_buffer: self.buffers[FLIGHT_GLOWS].handle(),
+            tube: self.newest_tube.clone(),
+            line_buffer: self.buffers[FLIGHT_LINES].handle(),
+            line: self.newest_line.clone(),
+        }
     }
 
     /// No ball is in flight in the uploaded content.
@@ -260,5 +303,18 @@ impl FrameResources {
             // SAFETY: The caller guarantees the buffers are unused.
             unsafe { buffer.destroy(device, allocator) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_range_is_clipped_to_what_was_uploaded() {
+        assert_eq!(uploaded(&(10..20), 100), 10..20);
+        assert_eq!(uploaded(&(10..20), 15), 10..15);
+        assert_eq!(uploaded(&(10..20), 5), 5..5);
+        assert_eq!(uploaded(&(0..0), 0), 0..0);
     }
 }

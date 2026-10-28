@@ -4,7 +4,7 @@
 use glam::Vec3;
 
 use cf_scene::grid::GridVertex;
-use cf_scene::tee::{TeeBox, generate_ball_at, generate_ball_glow_at};
+use cf_scene::tee::{TEE_ELEVATION, TeeBox, generate_ball_at, generate_ball_glow_at};
 use cf_scene::trail::{
     DEFAULT_TRAIL_LIFETIME, TrailPoint, generate_trail_line, generate_trail_tube,
 };
@@ -24,8 +24,13 @@ pub struct FlightRenderData {
 /// fill and its glow.
 pub(crate) const FLIGHT_BALL_MESH: (u32, u32) = (8, 16);
 
-/// The tracer tube of `flight`: the triangles both the raster pass and the
-/// ray-traced reflections draw. Empty without at least two trail points.
+/// The centre of the ball resting on `tee`'s tee box.
+pub(crate) fn tee_ball_centre(tee: &TeeBox) -> Vec3 {
+    Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0)
+}
+
+/// The tracer tube of `flight`: the triangles the raster pass and the
+/// reflections draw. Empty without at least two trail points.
 pub(crate) fn flight_trail_tube(flight: &FlightRenderData, tee: &TeeBox) -> Vec<GridVertex> {
     generate_trail_tube(
         &flight.trail_points,
@@ -35,9 +40,8 @@ pub(crate) fn flight_trail_tube(flight: &FlightRenderData, tee: &TeeBox) -> Vec<
     )
 }
 
-/// The tracer's centre line of `flight` (LINE_LIST): the segments both the
-/// raster pass and the ray-traced reflections draw. Empty without at least
-/// two trail points.
+/// The tracer's centre line of `flight` (LINE_LIST): the segments the raster
+/// pass and the reflections draw. Empty without at least two trail points.
 pub(crate) fn flight_trail_line(flight: &FlightRenderData) -> Vec<GridVertex> {
     generate_trail_line(
         &flight.trail_points,
@@ -49,14 +53,18 @@ pub(crate) fn flight_trail_line(flight: &FlightRenderData) -> Vec<GridVertex> {
 /// Build the raster geometry of `flights` into `out`'s flight vertices: per
 /// flight the ball and its glow, centred one ball radius above `ball_pos`,
 /// and the trail's tube ([`flight_trail_tube`]) and centre line
-/// ([`flight_trail_line`]). With no
-/// flight, the ball is on the tee.
+/// ([`flight_trail_line`]). With no flight, the ball is on the tee. The
+/// newest (last) flight's tube, centre line and ball centre are noted: the
+/// reflections show them.
 pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &mut FrameContent) {
     let (rings, segments) = FLIGHT_BALL_MESH;
     out.flight_lines.clear();
     out.flight_fills.clear();
     out.flight_glows.clear();
     out.ball_on_tee = flights.is_empty();
+    out.newest_tube = 0..0;
+    out.newest_line = 0..0;
+    out.ball_centre = tee_ball_centre(tee);
 
     for flight in flights {
         let centre = flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0);
@@ -68,8 +76,13 @@ pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &
             rings,
             segments,
         ));
+        let tube_start = out.flight_glows.len();
         out.flight_glows.extend(flight_trail_tube(flight, tee));
+        out.newest_tube = tube_start..out.flight_glows.len();
+        let line_start = out.flight_lines.len();
         out.flight_lines.extend(flight_trail_line(flight));
+        out.newest_line = line_start..out.flight_lines.len();
+        out.ball_centre = centre;
     }
 }
 
@@ -115,6 +128,63 @@ mod tests {
         assert_eq!(as_bytes(&out.flight_fills), as_bytes(&fills));
         assert_eq!(as_bytes(&out.flight_glows), as_bytes(&glows));
         assert_eq!(as_bytes(&out.flight_lines), as_bytes(&lines));
+    }
+
+    #[test]
+    fn the_newest_flights_tracer_is_noted_by_range() {
+        let tee = TeeBox::default();
+        let older = FlightRenderData {
+            ball_pos: Vec3::new(0.0, 5.0, 10.0),
+            trail_points: trail(),
+            current_time: 1.5,
+        };
+        let newest = FlightRenderData {
+            ball_pos: Vec3::new(0.0, 19.0, 38.0),
+            trail_points: trail(),
+            current_time: 1.9,
+        };
+        let mut out = FrameContent::default();
+        flight_vertices(&[older, newest], &tee, &mut out);
+
+        let newest = FlightRenderData {
+            ball_pos: Vec3::new(0.0, 19.0, 38.0),
+            trail_points: trail(),
+            current_time: 1.9,
+        };
+        let tube = flight_trail_tube(&newest, &tee);
+        let line = flight_trail_line(&newest);
+        assert!(!tube.is_empty() && !line.is_empty());
+        assert_eq!(out.flight_glows[out.newest_tube.clone()], tube[..]);
+        assert_eq!(out.flight_lines[out.newest_line.clone()], line[..]);
+        assert_eq!(
+            out.newest_tube.end,
+            out.flight_glows.len(),
+            "last in its buffer"
+        );
+        assert_eq!(
+            out.newest_line.end,
+            out.flight_lines.len(),
+            "last in its buffer"
+        );
+        assert_eq!(
+            out.ball_centre,
+            newest.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0)
+        );
+    }
+
+    #[test]
+    fn no_flight_has_no_tracer_and_the_ball_on_the_tee() {
+        let tee = TeeBox::default();
+        let mut out = FrameContent::default();
+        let flight = FlightRenderData {
+            ball_pos: Vec3::ONE,
+            trail_points: trail(),
+            current_time: 1.0,
+        };
+        flight_vertices(&[flight], &tee, &mut out);
+        flight_vertices(&[], &tee, &mut out);
+        assert!(out.newest_tube.is_empty() && out.newest_line.is_empty());
+        assert_eq!(out.ball_centre, tee_ball_centre(&tee));
     }
 
     #[test]

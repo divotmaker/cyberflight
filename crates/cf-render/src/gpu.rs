@@ -8,6 +8,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use cf_scene::grid::GridVertex;
 
 use crate::error::RenderError;
+use crate::mirror::{FloorPushConstants, TracerPushConstants};
 use crate::pipeline::GridPushConstants;
 use crate::rt_pipeline::RtPushConstants;
 
@@ -35,6 +36,15 @@ const _: () = assert!(size_of::<GridVertex>() == 16);
 // 80 bytes of `f32`, no padding.
 unsafe impl GpuData for GridPushConstants {}
 const _: () = assert!(size_of::<GridPushConstants>() == 80);
+
+// SAFETY: `#[repr(C)]` with `view_proj: [[f32; 4]; 4]`: 64 bytes of `f32`, no padding.
+unsafe impl GpuData for TracerPushConstants {}
+const _: () = assert!(size_of::<TracerPushConstants>() == 64);
+
+// SAFETY: `#[repr(C)]` with `view_proj: [[f32; 4]; 4]`, `camera_pos: [f32; 4]`
+// and `ball_pos: [f32; 4]`: 96 bytes of `f32`, no padding.
+unsafe impl GpuData for FloorPushConstants {}
+const _: () = assert!(size_of::<FloorPushConstants>() == 96);
 
 // SAFETY: `#[repr(C)]` with `camera_pos: [f32; 4]`, `inv_view_proj:
 // [[f32; 4]; 4]`, `ball_pos: [f32; 4]` and `pixel_size: f32`: 100 bytes of `f32`, no padding.

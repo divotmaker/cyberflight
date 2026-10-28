@@ -15,7 +15,7 @@ use crate::flight::{FlightRenderData, flight_vertices};
 use crate::frame::{FrameContent, FrameResources};
 use crate::mode::{RenderMode, RtMode};
 use crate::pipeline::ScenePipelines;
-use crate::reflections::{Reflections, RtSceneState, TraceView};
+use crate::reflections::{ReflectionFrame, Reflections, RtTracer, TraceView};
 use crate::scene::SceneGeometry;
 
 /// Fraction of the frame width the chase-camera inset takes (right side).
@@ -94,8 +94,7 @@ pub(crate) struct FrameTarget {
 
 /// Everything both renderers draw a frame with, apart from the output image
 /// and its synchronisation: the passes and pipelines, the static scene, the
-/// next frame's flights and HUD, the optional reflections and the chase
-/// camera.
+/// next frame's flights and HUD, the floor reflections and the chase camera.
 pub(crate) struct SceneRecorder {
     pipelines: ScenePipelines,
     geometry: SceneGeometry,
@@ -115,11 +114,12 @@ impl SceneRecorder {
     /// `color_format` that the HUD pass leaves in `output_layout`, and the
     /// scene of `grid` with the default tee box and the ball on the tee.
     ///
-    /// With `RtMode::Auto` and a device that supports ray tracing, it adds
-    /// reflections of the ball on the tee and starts in `RayTraced` mode. If
-    /// they fail to set up, it says so on stderr and renders without them,
-    /// in `Rasterized` mode, as it does with `RtMode::Off` or without device
-    /// support.
+    /// It adds reflections of the ball on the tee, mirrored across the floor
+    /// ([`RenderMode::Rasterized`]); with `RtMode::Auto` and a device that
+    /// supports ray tracing, it also adds ray-traced ones and starts in
+    /// `RayTraced` mode. If the ray tracer fails to set up, it says so on
+    /// stderr and keeps the mirror. If the reflections fail to set up, it
+    /// says so on stderr and renders without them.
     ///
     /// # Errors
     /// Any other part fails to create; what was created is destroyed first.
@@ -154,20 +154,19 @@ impl SceneRecorder {
                 return Err(e);
             }
         };
-        let reflections = match rt {
-            RtMode::Auto if gpu.rt_supported => {
-                let scene = RtSceneState::on_tee(&tee);
-                match Reflections::new(gpu, color_format, extent, grid, &tee, scene) {
-                    Ok(reflections) => Some(reflections),
-                    Err(e) => {
-                        eprintln!("RT setup failed, rendering without ray tracing: {e}");
-                        None
-                    }
-                }
+        let ray_tracing = rt == RtMode::Auto && gpu.rt_supported;
+        let reflections = match Reflections::new(gpu, color_format, extent, grid, &tee, ray_tracing)
+        {
+            Ok(reflections) => Some(reflections),
+            Err(e) => {
+                eprintln!("Reflections setup failed, rendering without them: {e}");
+                None
             }
-            _ => None,
         };
-        let mode = if reflections.is_some() {
+        let mode = if reflections
+            .as_ref()
+            .is_some_and(Reflections::has_ray_tracing)
+        {
             RenderMode::RayTraced
         } else {
             RenderMode::Rasterized
@@ -185,9 +184,11 @@ impl SceneRecorder {
         })
     }
 
-    /// Whether the recorder has reflections.
-    pub(crate) fn has_reflections(&self) -> bool {
-        self.reflections.is_some()
+    /// Whether the recorder can ray-trace its reflections.
+    pub(crate) fn has_ray_tracing(&self) -> bool {
+        self.reflections
+            .as_ref()
+            .is_some_and(Reflections::has_ray_tracing)
     }
 
     /// Draw the edge of `green` as one ring on the range floor, faded like
@@ -210,14 +211,19 @@ impl SceneRecorder {
         self.chase = camera;
     }
 
-    /// Switch between raster and ray-traced frames; `RayTraced` without
-    /// reflections gives `Rasterized`.
-    pub(crate) fn set_mode(&mut self, mode: RenderMode) {
-        self.mode = if mode == RenderMode::RayTraced && self.reflections.is_none() {
+    /// Switch the reflections between ray-traced and mirrored; `RayTraced`
+    /// without a ray tracer gives `Rasterized`. The path switched to shows
+    /// the current scene from the next frame on.
+    ///
+    /// If the ray tracer fails to rebuild its scene, it says so on stderr,
+    /// is destroyed and the mode is `Rasterized` from then on.
+    pub(crate) fn set_mode(&mut self, gpu: &mut GpuContext, mode: RenderMode) {
+        self.mode = if mode == RenderMode::RayTraced && !self.has_ray_tracing() {
             RenderMode::Rasterized
         } else {
             mode
         };
+        self.show_scene(gpu);
     }
 
     pub(crate) fn mode(&self) -> RenderMode {
@@ -225,28 +231,47 @@ impl SceneRecorder {
     }
 
     /// Build the next frame's flight geometry from `flights` and point the
-    /// reflections at the newest flight ([`RtSceneState::from_flights`]).
+    /// reflections at the newest flight: its ball, and its tracer as drawn
+    /// in the raster pass.
     ///
-    /// If the reflections fail to rebuild, it says so on stderr, destroys
-    /// them and renders in `Rasterized` mode from then on.
+    /// If the ray tracer fails to rebuild, it says so on stderr, is
+    /// destroyed and the reflections are mirrored from then on.
     pub(crate) fn update_flight(&mut self, gpu: &mut GpuContext, flights: &[FlightRenderData]) {
         flight_vertices(flights, &self.tee, &mut self.content);
+        self.show_scene(gpu);
+    }
+
+    /// Point the reflections at the newest flight in `content`. The mirror
+    /// draws it from the frame's buffers; only the ray tracer, when it draws,
+    /// needs its acceleration structures rebuilt.
+    fn show_scene(&mut self, gpu: &mut GpuContext) {
+        let ray_traced = self.mode == RenderMode::RayTraced;
+        let Some(reflections) = &mut self.reflections else {
+            return;
+        };
+        reflections.set_ball(self.content.ball_centre);
+        let failed = if ray_traced {
+            let tracer = RtTracer::from_content(&self.content);
+            reflections
+                .set_tracer(gpu, tracer, &self.grid, &self.tee)
+                .err()
+        } else {
+            reflections.mirror_drew();
+            None
+        };
+        if let Some(e) = failed {
+            self.lose_ray_tracing(gpu, &e);
+        }
+    }
+
+    /// The ray tracer failed with `error`: say so, destroy it and mirror the
+    /// reflections from now on.
+    fn lose_ray_tracing(&mut self, gpu: &mut GpuContext, error: &RenderError) {
+        eprintln!("RT scene update failed, using mirror reflections: {error}");
+        self.mode = RenderMode::Rasterized;
         if let Some(reflections) = &mut self.reflections {
-            let scene = RtSceneState::from_flights(flights, &self.tee);
-            if let Err(e) = reflections.set_scene(gpu, scene, &self.grid, &self.tee) {
-                eprintln!("RT scene update failed, rendering without ray tracing: {e}");
-                self.mode = RenderMode::Rasterized;
-                if let Some(reflections) = self.reflections.take() {
-                    // SAFETY: Nothing records with the reflections any more.
-                    // The failed rebuild waited for the device to go idle
-                    // first; this wait covers a failure inside a build
-                    // submission.
-                    unsafe {
-                        gpu.device.device_wait_idle().ok();
-                        reflections.destroy(&gpu.device, &mut gpu.allocator);
-                    }
-                }
-            }
+            // SAFETY: Nothing records with the ray tracer any more.
+            unsafe { reflections.drop_ray_tracing(gpu) };
         }
     }
 
@@ -258,7 +283,7 @@ impl SceneRecorder {
         self.content.hud_fills.extend_from_slice(fills);
     }
 
-    /// Size the reflections' storage image to `extent`.
+    /// Size the reflection image to `extent`.
     ///
     /// # Safety
     /// The device is idle; framebuffers of the old extent are not in use.
@@ -286,9 +311,10 @@ impl SceneRecorder {
     }
 
     /// Upload the next frame's content and record the frame seen from
-    /// `camera`: the scene pass (with the chase inset), then, in
-    /// `RayTraced` mode, the reflections of the main view and the inset,
-    /// then the HUD pass, which leaves the colour image in the output layout.
+    /// `camera`: the scene pass (with the chase inset), then the reflections
+    /// of the main view and the inset, ray-traced in `RayTraced` mode and
+    /// mirrored otherwise, then the HUD pass, which leaves the colour image
+    /// in the output layout.
     ///
     /// The upload is a host write into the per-frame buffers, which every
     /// frame shares; a frame the GPU has not finished may draw a mix of old
@@ -390,33 +416,45 @@ impl SceneRecorder {
             }
             device.cmd_end_render_pass(cb);
 
-            // Ray-traced reflections: main view, plus the chase inset when set.
-            if self.mode == RenderMode::RayTraced
-                && let Some(reflections) = &self.reflections
-            {
+            // Floor reflections: main view, plus the chase inset when set.
+            if let Some(reflections) = &self.reflections {
+                let ray_traced = self.mode == RenderMode::RayTraced;
+                let tracer = self.frame.newest_tracer();
                 let main_view = TraceView {
                     camera: *camera,
                     offset: [0, 0],
                     extent,
                 };
-                match chase {
+                let with_chase;
+                let main_only;
+                let views: &[TraceView] = match chase {
                     Some((chase_camera, chase_vp)) => {
-                        let chase_view = TraceView {
-                            camera: chase_camera,
-                            offset: [chase_vp.x, 0],
-                            extent: vk::Extent2D {
-                                width: chase_vp.width,
-                                height: extent.height,
+                        with_chase = [
+                            main_view,
+                            TraceView {
+                                camera: chase_camera,
+                                offset: [chase_vp.x, 0],
+                                extent: vk::Extent2D {
+                                    width: chase_vp.width,
+                                    height: extent.height,
+                                },
                             },
-                        };
-                        let views = [main_view, chase_view];
-                        reflections.record(device, cb, &views, target.overlay, extent);
+                        ];
+                        &with_chase
                     }
                     None => {
-                        let views = [main_view];
-                        reflections.record(device, cb, &views, target.overlay, extent);
+                        main_only = [main_view];
+                        &main_only
                     }
-                }
+                };
+                let frame = ReflectionFrame {
+                    views,
+                    tracer: &tracer,
+                    overlay: target.overlay,
+                    extent,
+                    ray_traced,
+                };
+                reflections.record(device, cb, &frame);
             }
 
             // HUD pass: the HUD over everything; ends in the output layout.

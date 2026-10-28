@@ -64,7 +64,14 @@ clean:
 RT_SHADERS := $(SHADER_DIR)/rt.rgen.spv $(SHADER_DIR)/rt.rmiss.spv $(SHADER_DIR)/rt.rchit.spv \
 	$(SHADER_DIR)/rt_trail.rahit.spv $(SHADER_DIR)/rt_line.rint.spv $(SHADER_DIR)/rt_line.rahit.spv
 COMPOSITE_SHADERS := $(SHADER_DIR)/composite.vert.spv $(SHADER_DIR)/composite.frag.spv
-shaders: $(SHADER_DIR)/grid.vert.spv $(SHADER_DIR)/grid.frag.spv $(RT_SHADERS) $(COMPOSITE_SHADERS)
+MIRROR_SHADERS := $(SHADER_DIR)/mirror.vert.spv $(SHADER_DIR)/mirror.frag.spv \
+	$(SHADER_DIR)/mirror_floor.vert.spv $(SHADER_DIR)/mirror_floor.frag.spv
+shaders: $(SHADER_DIR)/grid.vert.spv $(SHADER_DIR)/grid.frag.spv $(RT_SHADERS) $(COMPOSITE_SHADERS) \
+	$(MIRROR_SHADERS)
+
+# The floor material is included by the ray-traced floor and the mirror's.
+$(SHADER_DIR)/rt.rgen.spv $(SHADER_DIR)/rt.rchit.spv $(SHADER_DIR)/mirror.frag.spv \
+	$(SHADER_DIR)/mirror_floor.frag.spv: $(SHADER_DIR)/floor_shading.glsl
 
 $(SHADER_DIR)/%.vert.spv: $(SHADER_DIR)/%.vert
 	glslc $< -o $@

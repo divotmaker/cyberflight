@@ -7,6 +7,7 @@
 //!   - `cyberflight.png` — **HERO**: the hero shot mid-flight from the tee
 //!     box, chase camera + HUD, ray-traced when supported, 2× supersampled
 //!   - `driving_range.png` — empty range with ball on tee box
+//!     (the plain `.png` views have the floor's reflections mirrored)
 //!   - `flight.png` — 7-iron mid-flight with tracer trail (close side view)
 //!   - `flight_tee.png` — 7-iron mid-flight from tee box (golfer's view)
 //!   - `flight_wide.png` — 7-iron full tracer in frame (wide side view)
@@ -216,7 +217,8 @@ struct Shot {
 }
 
 /// The screenshots of the empty range and the 7-iron `snap`: the raster
-/// set, and the ray-traced set (`_rt`) for GPUs that ray-trace.
+/// set (mirrored reflections), and the ray-traced set (`_rt`) for GPUs that
+/// ray-trace.
 fn range_shots(snap: &FlightSnapshot) -> (Vec<Shot>, Vec<Shot>) {
     use RtMode::{Auto, Off};
 

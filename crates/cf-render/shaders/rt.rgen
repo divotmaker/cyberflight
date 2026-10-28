@@ -1,5 +1,8 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "floor_shading.glsl"
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba16f) uniform image2D outputImage;
@@ -11,9 +14,6 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(location = 0) rayPayloadEXT vec4 payload; // rgb + alpha (1 = hit floor, 0 = miss)
-
-// Upper bound of the stored colour, well above the brightest reflection.
-const float MAX_RADIANCE = 64.0;
 
 void main() {
     ivec2 local_pixel = ivec2(gl_LaunchIDEXT.xy);
@@ -56,11 +56,8 @@ void main() {
         0           // payload location
     );
 
-    // Colour in [0, MAX_RADIANCE] (emissive reflections are brighter than
-    // display white; the composite's target clips them) and zero where no
-    // floor was hit; alpha 1 on the floor, 0 elsewhere. NaN is stored as 0,
-    // so the composite never adds unbounded or NaN values.
-    vec4 color = clamp(mix(payload, vec4(0.0), isnan(payload)), vec4(0.0),
-                       vec4(vec3(MAX_RADIANCE), 1.0));
+    // The reflection image's texel: the floor's colour, zero where no floor
+    // was hit (alpha 1 on the floor, 0 elsewhere).
+    vec4 color = reflection_texel(payload);
     imageStore(outputImage, pixel, color);
 }

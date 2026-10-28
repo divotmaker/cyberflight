@@ -5,7 +5,7 @@ use cf_scene::camera::Camera;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::{DeviceBuffer, HostBuffer, Image2d, Image2dDesc, load_shader, push_constants};
+use crate::gpu::{DeviceBuffer, HostBuffer, load_shader, push_constants};
 
 /// Push constants for the ray tracing pipeline.
 #[repr(C)]
@@ -59,15 +59,6 @@ impl RtPushConstants {
         }
     }
 }
-
-/// Format of the RT reflection storage image (`rgba16f` in `rt.rgen`).
-///
-/// It holds linear colour up to `MAX_RADIANCE` in `rt.rgen`, which the
-/// composite pass reads one texel per pixel and blends into an sRGB target,
-/// so it needs more range than [0, 1] for emissive reflections and more
-/// precision than 8 bits for dark tones. Vulkan requires storage and sampled
-/// support for this format.
-const STORAGE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
 pub const GEOM_FLOOR: u32 = 0;
@@ -372,9 +363,6 @@ pub struct RtPipeline {
     // Scratch buffers of the current BLAS/TLAS build, freed with the AS on the
     // next `update_scene` or on drop.
     scratch_buffers: Vec<DeviceBuffer>,
-
-    // Storage image for RT output
-    pub(crate) storage: Image2d,
 }
 
 /// What an [`RtGeometry`]'s positions describe.
@@ -437,14 +425,15 @@ fn line_aabbs(positions: &[f32], pad: f32) -> Vec<f32> {
 }
 
 impl RtPipeline {
-    /// Create the RT pipeline and build acceleration structures from the given geometry.
+    /// Create the RT pipeline, writing `storage_view` (the reflection image,
+    /// `rgba16f`, `STORAGE` usage), and build acceleration structures from the
+    /// given geometry.
     ///
     /// # Errors
     /// A part fails to create or build; what was created is destroyed first.
     pub fn new(
         gpu: &mut GpuContext,
-        width: u32,
-        height: u32,
+        storage_view: vk::ImageView,
         geometries: &[RtGeometry],
     ) -> Result<Self, RenderError> {
         let accel_loader =
@@ -473,20 +462,14 @@ impl RtPipeline {
             }
         };
 
-        let storage = objects.create_descriptor_set(&gpu.device).and_then(|()| {
-            Self::create_storage_image(&gpu.device, &mut gpu.allocator, width, height)
-        });
-        let storage = match storage {
-            Ok(storage) => storage,
-            Err(e) => {
-                // SAFETY: Just created; no GPU work has used them.
-                unsafe {
-                    sbt.destroy(&gpu.device, &mut gpu.allocator);
-                    objects.destroy(&gpu.device);
-                }
-                return Err(e);
+        if let Err(e) = objects.create_descriptor_set(&gpu.device) {
+            // SAFETY: Just created; no GPU work has used them.
+            unsafe {
+                sbt.destroy(&gpu.device, &mut gpu.allocator);
+                objects.destroy(&gpu.device);
             }
-        };
+            return Err(e);
+        }
 
         let mut pipeline = Self {
             accel_loader,
@@ -503,10 +486,9 @@ impl RtPipeline {
             line_vertices: None,
             instance_buffer: None,
             scratch_buffers: Vec::new(),
-            storage,
         };
         // SAFETY: The set was just allocated and no command buffer uses it.
-        unsafe { pipeline.write_storage_descriptor(&gpu.device) };
+        unsafe { pipeline.bind_storage(&gpu.device, storage_view) };
         if let Err(e) = pipeline.build_accel_structures(gpu, geometries) {
             // SAFETY: No command buffer has traced with the pipeline. The
             // wait covers a failure inside a build submission.
@@ -588,40 +570,15 @@ impl RtPipeline {
         Ok((sbt, [raygen_region, miss_region, hit_region]))
     }
 
-    /// Resize the RT storage image to new dimensions.
-    ///
-    /// Creates a new storage image/view and destroys the old one, then updates
-    /// the RT descriptor set (binding 1) to point at the new image.
-    /// The device must be idle before calling this.
-    pub fn resize_storage(
-        &mut self,
-        device: &ash::Device,
-        allocator: &mut Allocator,
-        width: u32,
-        height: u32,
-    ) -> Result<(), RenderError> {
-        if self.storage.extent() == (vk::Extent2D { width, height }) {
-            return Ok(());
-        }
-
-        let new = Self::create_storage_image(device, allocator, width, height)?;
-        let old = std::mem::replace(&mut self.storage, new);
-        // SAFETY: Device is idle (caller guarantees).
-        unsafe {
-            old.destroy(device, allocator);
-            self.write_storage_descriptor(device);
-        }
-
-        Ok(())
-    }
-
-    /// Point the descriptor set's binding 1 at the storage image.
+    /// Point the descriptor set's binding 1 at `storage_view`, e.g. after
+    /// the reflection image was recreated at a new size.
     ///
     /// # Safety
-    /// No pending GPU work uses the descriptor set.
-    unsafe fn write_storage_descriptor(&self, device: &ash::Device) {
+    /// No pending GPU work uses the descriptor set; `storage_view` is a live
+    /// view of an `rgba16f` image with `STORAGE` usage.
+    pub(crate) unsafe fn bind_storage(&self, device: &ash::Device, storage_view: vk::ImageView) {
         let image_info = vk::DescriptorImageInfo::default()
-            .image_view(self.storage.view())
+            .image_view(storage_view)
             .image_layout(vk::ImageLayout::GENERAL);
         let image_infos = [image_info];
         let write = vk::WriteDescriptorSet::default()
@@ -629,12 +586,13 @@ impl RtPipeline {
             .dst_binding(1)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&image_infos);
-        // SAFETY: The image view is live; the caller guarantees the set is unused.
+        // SAFETY: The caller guarantees the view is live and the set unused.
         unsafe { device.update_descriptor_sets(&[write], &[]) };
     }
 
     /// Record one ray-trace dispatch of `dispatch_w × dispatch_h` rays into
-    /// the storage image (smaller than the image for a sub-viewport trace).
+    /// the bound storage image (smaller than the image for a sub-viewport
+    /// trace).
     ///
     /// # Safety
     /// `cb` is recording, outside a render pass; the storage image is in
@@ -1083,29 +1041,6 @@ impl RtPipeline {
         Ok(tlas_accel)
     }
 
-    // ── Storage image ──
-
-    fn create_storage_image(
-        device: &ash::Device,
-        allocator: &mut Allocator,
-        width: u32,
-        height: u32,
-    ) -> Result<Image2d, RenderError> {
-        Image2d::new(
-            device,
-            allocator,
-            &Image2dDesc {
-                extent: vk::Extent2D { width, height },
-                format: STORAGE_FORMAT,
-                usage: vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_SRC
-                    | vk::ImageUsageFlags::SAMPLED,
-                aspect: vk::ImageAspectFlags::COLOR,
-                name: "rt storage image",
-            },
-        )
-    }
-
     /// Rebuild all acceleration structures with new geometry.
     ///
     /// Waits for device idle, destroys old AS resources, builds new ones,
@@ -1217,7 +1152,7 @@ impl RtPipeline {
 
     /// Destroy acceleration structures and their backing resources.
     ///
-    /// Leaves pipeline, SBT, descriptors, storage image intact.
+    /// Leaves pipeline, SBT and descriptors intact.
     ///
     /// # Safety
     /// Device must be idle. All resources must not be in use.
@@ -1263,9 +1198,6 @@ impl RtPipeline {
         // SAFETY: No resource is in use (caller guarantees device idle).
         unsafe {
             self.destroy_accel_structures(device, allocator);
-
-            // Storage image
-            self.storage.destroy(device, allocator);
 
             // SBT
             self.sbt.destroy(device, allocator);
