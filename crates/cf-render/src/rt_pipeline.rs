@@ -1,12 +1,11 @@
 use ash::vk;
-use gpu_allocator::MemoryLocation;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::{DeviceBuffer, HostBuffer, load_shader};
+use crate::gpu::{DeviceBuffer, HostBuffer, Image2d, Image2dDesc, load_shader};
 
 /// Push constants for the ray tracing pipeline.
 #[repr(C)]
@@ -116,11 +115,7 @@ pub struct RtPipeline {
     scratch_buffers: Vec<DeviceBuffer>,
 
     // Storage image for RT output
-    pub storage_image: vk::Image,
-    pub storage_view: vk::ImageView,
-    storage_allocation: Option<Allocation>,
-    width: u32,
-    height: u32,
+    pub(crate) storage: Image2d,
 }
 
 /// Triangle geometry for BLAS building.
@@ -346,8 +341,7 @@ impl RtPipeline {
         };
 
         // ── Storage image ──
-        let (storage_image, storage_view, storage_allocation) =
-            Self::create_storage_image(&gpu.device, &mut gpu.allocator, width, height)?;
+        let storage = Self::create_storage_image(&gpu.device, &mut gpu.allocator, width, height)?;
 
         // ── Build acceleration structures ──
         let (blas_list, geometry_buffers, scratch_buffers) =
@@ -365,7 +359,7 @@ impl RtPipeline {
             .acceleration_structures(std::slice::from_ref(&tlas_handle));
 
         let image_info = vk::DescriptorImageInfo::default()
-            .image_view(storage_view)
+            .image_view(storage.view())
             .image_layout(vk::ImageLayout::GENERAL);
         let image_infos = [image_info];
 
@@ -408,17 +402,13 @@ impl RtPipeline {
             geometry_buffers,
             instance_buffer: Some(instance_buffer),
             scratch_buffers: all_scratch,
-            storage_image,
-            storage_view,
-            storage_allocation: Some(storage_allocation),
-            width,
-            height,
+            storage,
         })
     }
 
     /// Resize the RT storage image to new dimensions.
     ///
-    /// Destroys the old storage image/view and creates a new one, then updates
+    /// Creates a new storage image/view and destroys the old one, then updates
     /// the RT descriptor set (binding 1) to point at the new image.
     /// The device must be idle before calling this.
     pub fn resize_storage(
@@ -428,26 +418,15 @@ impl RtPipeline {
         width: u32,
         height: u32,
     ) -> Result<(), RenderError> {
-        if width == self.width && height == self.height {
+        if self.storage.extent() == (vk::Extent2D { width, height }) {
             return Ok(());
         }
 
+        let new = Self::create_storage_image(device, allocator, width, height)?;
+        let old = std::mem::replace(&mut self.storage, new);
         // SAFETY: Device is idle (caller guarantees).
-        unsafe {
-            device.destroy_image_view(self.storage_view, None);
-            device.destroy_image(self.storage_image, None);
-        }
-        if let Some(alloc) = self.storage_allocation.take() {
-            let _ = allocator.free(alloc);
-        }
-
-        let (image, view, allocation) =
-            Self::create_storage_image(device, allocator, width, height)?;
-        self.storage_image = image;
-        self.storage_view = view;
-        self.storage_allocation = Some(allocation);
-        self.width = width;
-        self.height = height;
+        unsafe { old.destroy(device, allocator) };
+        let view = self.storage.view();
 
         // Update RT descriptor set binding 1 (storage image).
         let image_info = vk::DescriptorImageInfo::default()
@@ -854,75 +833,20 @@ impl RtPipeline {
         allocator: &mut Allocator,
         width: u32,
         height: u32,
-    ) -> Result<(vk::Image, vk::ImageView, Allocation), RenderError> {
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(STORAGE_FORMAT)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(
-                vk::ImageUsageFlags::STORAGE
+    ) -> Result<Image2d, RenderError> {
+        Image2d::new(
+            device,
+            allocator,
+            &Image2dDesc {
+                extent: vk::Extent2D { width, height },
+                format: STORAGE_FORMAT,
+                usage: vk::ImageUsageFlags::STORAGE
                     | vk::ImageUsageFlags::TRANSFER_SRC
                     | vk::ImageUsageFlags::SAMPLED,
-            )
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        // SAFETY: Creating storage image.
-        let image = unsafe {
-            device
-                .create_image(&image_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // SAFETY: Querying image memory requirements.
-        let reqs = unsafe { device.get_image_memory_requirements(image) };
-
-        let allocation = allocator
-            .allocate(&AllocationCreateDesc {
+                aspect: vk::ImageAspectFlags::COLOR,
                 name: "rt storage image",
-                requirements: reqs,
-                location: MemoryLocation::GpuOnly,
-                linear: false,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })
-            .map_err(|e| RenderError::Allocator(e.to_string()))?;
-
-        // SAFETY: Binding memory.
-        unsafe {
-            device
-                .bind_image_memory(image, allocation.memory(), allocation.offset())
-                .map_err(RenderError::Vulkan)?;
-        }
-
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(STORAGE_FORMAT)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            );
-
-        // SAFETY: Creating image view.
-        let view = unsafe {
-            device
-                .create_image_view(&view_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        Ok((image, view, allocation))
+            },
+        )
     }
 
     /// Rebuild all acceleration structures with new geometry.
@@ -1023,11 +947,7 @@ impl RtPipeline {
             self.destroy_accel_structures(device, allocator);
 
             // Storage image
-            device.destroy_image_view(self.storage_view, None);
-            device.destroy_image(self.storage_image, None);
-            if let Some(alloc) = self.storage_allocation.take() {
-                let _ = allocator.free(alloc);
-            }
+            self.storage.destroy(device, allocator);
 
             // SBT
             self.sbt.destroy(device, allocator);

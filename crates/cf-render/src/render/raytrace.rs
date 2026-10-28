@@ -62,7 +62,7 @@ impl Renderer {
                     .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::GENERAL)
-                    .image(rt.storage_image)
+                    .image(rt.storage.image())
                     .subresource_range(subresource_range)],
             );
 
@@ -104,7 +104,7 @@ impl Renderer {
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .old_layout(vk::ImageLayout::GENERAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(rt.storage_image)
+                    .image(rt.storage.image())
                     .subresource_range(subresource_range)],
             );
         }

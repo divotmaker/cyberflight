@@ -6,7 +6,7 @@ use std::mem::ManuallyDrop;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
@@ -24,7 +24,7 @@ pub struct FlightRenderData {
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::gpu::{HostBuffer, load_shader};
+use crate::gpu::{HostBuffer, Image2d, Image2dDesc, load_shader};
 use crate::green::GreenEdge;
 use crate::mode::RenderMode;
 use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
@@ -78,10 +78,8 @@ pub struct Renderer {
     pub(super) hud_line_count: u32,
     pub(super) hud_fill_buffer: ManuallyDrop<HostBuffer>,
     pub(super) hud_fill_count: u32,
-    // Depth/stencil image for depth testing.
-    depth_stencil_image: vk::Image,
-    depth_stencil_view: vk::ImageView,
-    depth_stencil_allocation: Option<Allocation>,
+    // Depth/stencil image for depth testing (`None` only after a failed rebuild).
+    depth_stencil: Option<Image2d>,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available: Vec<vk::Semaphore>,
     render_finished: Vec<vk::Semaphore>,
@@ -127,19 +125,14 @@ impl Renderer {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         )?;
 
-        let (depth_stencil_image, depth_stencil_view, depth_stencil_allocation) =
-            Self::create_depth_stencil(
-                &gpu.device,
-                &mut gpu.allocator,
-                swapchain.extent.width,
-                swapchain.extent.height,
-            )?;
+        let depth_stencil =
+            Self::create_depth_stencil(&gpu.device, &mut gpu.allocator, swapchain.extent)?;
 
         let framebuffers = Self::create_framebuffers(
             &gpu.device,
             &swapchain,
             pipeline.render_pass,
-            depth_stencil_view,
+            depth_stencil.view(),
         )?;
 
         // HUD render pass: color-only overlay, preserves scene content, transitions to PRESENT_SRC.
@@ -269,7 +262,7 @@ impl Renderer {
             Some(Self::create_composite_pass(
                 &gpu.device,
                 &swapchain,
-                rtp.storage_view,
+                rtp.storage.view(),
             )?)
         } else {
             None
@@ -305,9 +298,7 @@ impl Renderer {
             hud_line_count: 0,
             hud_fill_buffer: ManuallyDrop::new(hud_fill_buffer),
             hud_fill_count: 0,
-            depth_stencil_image,
-            depth_stencil_view,
-            depth_stencil_allocation: Some(depth_stencil_allocation),
+            depth_stencil: Some(depth_stencil),
             hud_render_pass,
             hud_framebuffers,
             hud_fill_pipeline,
@@ -554,17 +545,9 @@ impl Renderer {
             // SAFETY: HUD framebuffers are no longer in use (waited idle above).
             unsafe { self.gpu.device.destroy_framebuffer(fb, None) };
         }
-        // SAFETY: Depth/stencil no longer in use (waited idle above).
-        unsafe {
-            self.gpu
-                .device
-                .destroy_image_view(self.depth_stencil_view, None);
-            self.gpu
-                .device
-                .destroy_image(self.depth_stencil_image, None);
-        }
-        if let Some(alloc) = self.depth_stencil_allocation.take() {
-            let _ = self.gpu.allocator.free(alloc);
+        if let Some(depth_stencil) = self.depth_stencil.take() {
+            // SAFETY: Depth/stencil no longer in use (waited idle above).
+            unsafe { depth_stencil.destroy(&self.gpu.device, &mut self.gpu.allocator) };
         }
 
         self.swapchain.recreate(
@@ -580,21 +563,19 @@ impl Renderer {
         let actual_w = self.swapchain.extent.width;
         let actual_h = self.swapchain.extent.height;
 
-        let (ds_image, ds_view, ds_alloc) = Self::create_depth_stencil(
+        let depth_stencil = Self::create_depth_stencil(
             &self.gpu.device,
             &mut self.gpu.allocator,
-            actual_w,
-            actual_h,
+            self.swapchain.extent,
         )?;
-        self.depth_stencil_image = ds_image;
-        self.depth_stencil_view = ds_view;
-        self.depth_stencil_allocation = Some(ds_alloc);
+        let depth_stencil_view = depth_stencil.view();
+        self.depth_stencil = Some(depth_stencil);
 
         self.framebuffers = Self::create_framebuffers(
             &self.gpu.device,
             &self.swapchain,
             self.pipeline.render_pass,
-            self.depth_stencil_view,
+            depth_stencil_view,
         )?;
         self.hud_framebuffers =
             Self::create_hud_framebuffers(&self.gpu.device, &self.swapchain, self.hud_render_pass)?;
@@ -621,7 +602,7 @@ impl Renderer {
             // Update composite descriptor set to point at the resized RT storage image.
             if let Some(ref rtp) = self.rt_pipeline {
                 let image_info = vk::DescriptorImageInfo::default()
-                    .image_view(rtp.storage_view)
+                    .image_view(rtp.storage.view())
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .sampler(composite.sampler);
                 let image_infos = [image_info];
@@ -850,73 +831,19 @@ impl Renderer {
     fn create_depth_stencil(
         device: &ash::Device,
         allocator: &mut Allocator,
-        width: u32,
-        height: u32,
-    ) -> Result<(vk::Image, vk::ImageView, Allocation), RenderError> {
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(DEPTH_STENCIL_FORMAT)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        // SAFETY: Creating depth/stencil image.
-        let image = unsafe {
-            device
-                .create_image(&image_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        // SAFETY: Querying image memory requirements.
-        let requirements = unsafe { device.get_image_memory_requirements(image) };
-
-        let allocation = allocator
-            .allocate(&AllocationCreateDesc {
+        extent: vk::Extent2D,
+    ) -> Result<Image2d, RenderError> {
+        Image2d::new(
+            device,
+            allocator,
+            &Image2dDesc {
+                extent,
+                format: DEPTH_STENCIL_FORMAT,
+                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                aspect: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
                 name: "depth stencil",
-                requirements,
-                location: MemoryLocation::GpuOnly,
-                linear: false,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })
-            .map_err(|e| RenderError::Allocator(e.to_string()))?;
-
-        // SAFETY: Binding memory to image.
-        unsafe {
-            device
-                .bind_image_memory(image, allocation.memory(), allocation.offset())
-                .map_err(RenderError::Vulkan)?;
-        }
-
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(DEPTH_STENCIL_FORMAT)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            );
-
-        // SAFETY: Creating image view.
-        let view = unsafe {
-            device
-                .create_image_view(&view_info, None)
-                .map_err(RenderError::Vulkan)?
-        };
-
-        Ok((image, view, allocation))
+            },
+        )
     }
 
     /// Create the composite pass for blending RT reflections onto the rasterized scene.
@@ -1199,14 +1126,8 @@ impl Drop for Renderer {
             ] {
                 ManuallyDrop::take(buffer).destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
-            self.gpu
-                .device
-                .destroy_image_view(self.depth_stencil_view, None);
-            self.gpu
-                .device
-                .destroy_image(self.depth_stencil_image, None);
-            if let Some(alloc) = self.depth_stencil_allocation.take() {
-                let _ = self.gpu.allocator.free(alloc);
+            if let Some(depth_stencil) = self.depth_stencil.take() {
+                depth_stencil.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
             if let Some(ref mut composite) = self.composite {

@@ -187,8 +187,8 @@ impl OffscreenRenderer {
             let composite = Self::create_composite_pass(
                 &gpu.device,
                 OFFSCREEN_FORMAT,
-                target.view,
-                rtp.storage_view,
+                target.color.view(),
+                rtp.storage.view(),
                 width,
                 height,
             )?;
@@ -644,8 +644,8 @@ impl OffscreenRenderer {
             let composite = Self::create_composite_pass(
                 &gpu.device,
                 OFFSCREEN_FORMAT,
-                target.view,
-                rtp.storage_view,
+                target.color.view(),
+                rtp.storage.view(),
                 width,
                 height,
             )?;
@@ -1352,7 +1352,7 @@ impl OffscreenRenderer {
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                 .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .image(target.image)
+                .image(target.color.image())
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1393,7 +1393,7 @@ impl OffscreenRenderer {
 
             device.cmd_copy_image_to_buffer(
                 self.command_buffer,
-                target.image,
+                target.color.image(),
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 target.staging.handle(),
                 &[region],
@@ -1490,7 +1490,7 @@ impl OffscreenRenderer {
                     .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::GENERAL)
-                    .image(rt.storage_image)
+                    .image(rt.storage.image())
                     .subresource_range(subresource_range)],
             );
 
@@ -1510,7 +1510,7 @@ impl OffscreenRenderer {
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .old_layout(vk::ImageLayout::GENERAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(rt.storage_image)
+                    .image(rt.storage.image())
                     .subresource_range(subresource_range)],
             );
 

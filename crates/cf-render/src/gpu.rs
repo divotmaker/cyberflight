@@ -1,5 +1,5 @@
 //! GPU helpers shared by both renderers: the byte view of GPU-facing data,
-//! push constants, shader modules and buffers.
+//! push constants, shader modules, buffers and images.
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -347,6 +347,136 @@ impl DeviceBuffer {
     pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: The caller guarantees the buffer is unused.
         unsafe { device.destroy_buffer(self.buffer, None) };
+        let _ = allocator.free(self.allocation);
+    }
+}
+
+/// What to create a 2D image (one mip level, one layer, optimal tiling,
+/// device-local) and its view with.
+pub(crate) struct Image2dDesc {
+    pub extent: vk::Extent2D,
+    pub format: vk::Format,
+    pub usage: vk::ImageUsageFlags,
+    /// Aspect of the view.
+    pub aspect: vk::ImageAspectFlags,
+    pub name: &'static str,
+}
+
+/// A device-local 2D image with one view over all of it.
+pub(crate) struct Image2d {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
+    extent: vk::Extent2D,
+}
+
+impl Image2d {
+    /// Create the image, bind memory and create its view, in `UNDEFINED` layout.
+    ///
+    /// # Errors
+    /// Image, allocation or view creation fails; whatever was created is
+    /// destroyed first.
+    pub(crate) fn new(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        desc: &Image2dDesc,
+    ) -> Result<Self, RenderError> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(desc.format)
+            .extent(vk::Extent3D {
+                width: desc.extent.width,
+                height: desc.extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(desc.usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        // SAFETY: Valid create info; the image is destroyed below on error or
+        // by `destroy`.
+        let image = unsafe {
+            device
+                .create_image(&image_info, None)
+                .map_err(RenderError::Vulkan)?
+        };
+        // SAFETY: `image` was just created on `device`.
+        let requirements = unsafe { device.get_image_memory_requirements(image) };
+        let allocation = match allocator.allocate(&AllocationCreateDesc {
+            name: desc.name,
+            requirements,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        }) {
+            Ok(allocation) => allocation,
+            Err(e) => {
+                // SAFETY: `image` is unused.
+                unsafe { device.destroy_image(image, None) };
+                return Err(RenderError::Allocator(e.to_string()));
+            }
+        };
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(desc.format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(desc.aspect)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        // SAFETY: `allocation` satisfies `image`'s requirements and is unbound;
+        // the view covers the whole image in its own format.
+        let view = unsafe {
+            device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())
+                .and_then(|()| device.create_image_view(&view_info, None))
+        };
+        match view {
+            Ok(view) => Ok(Self {
+                image,
+                view,
+                allocation,
+                extent: desc.extent,
+            }),
+            Err(e) => {
+                // SAFETY: `image` is unused.
+                unsafe { device.destroy_image(image, None) };
+                let _ = allocator.free(allocation);
+                Err(RenderError::Vulkan(e))
+            }
+        }
+    }
+
+    pub(crate) fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    pub(crate) fn view(&self) -> vk::ImageView {
+        self.view
+    }
+
+    pub(crate) fn extent(&self) -> vk::Extent2D {
+        self.extent
+    }
+
+    /// Destroy the view and the image and free its memory.
+    ///
+    /// # Safety
+    /// No pending GPU work uses the image; `device` and `allocator` are the
+    /// ones it was created with.
+    pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+        // SAFETY: The caller guarantees the image is unused.
+        unsafe {
+            device.destroy_image_view(self.view, None);
+            device.destroy_image(self.image, None);
+        }
         let _ = allocator.free(self.allocation);
     }
 }
