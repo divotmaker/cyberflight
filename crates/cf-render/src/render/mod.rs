@@ -120,6 +120,10 @@ pub struct Renderer {
     render_finished: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
+    /// Last window size passed to `resize` (0×0 while minimised).
+    window_extent: vk::Extent2D,
+    /// Swapchain must be rebuilt before the next acquire (out of date or suboptimal).
+    swapchain_stale: bool,
     // HUD overlay pass (color-only, no depth/stencil).
     pub(super) hud_render_pass: vk::RenderPass,
     pub(super) hud_framebuffers: Vec<vk::Framebuffer>,
@@ -288,6 +292,7 @@ impl Renderer {
             None
         };
 
+        let window_extent = swapchain.extent;
         let image_count = framebuffers.len();
         let command_buffers = Self::allocate_command_buffers(&gpu, image_count as u32)?;
         let (image_available, render_finished, in_flight_fences) =
@@ -343,6 +348,8 @@ impl Renderer {
             render_finished,
             in_flight_fences,
             current_frame: 0,
+            window_extent,
+            swapchain_stale: false,
             render_mode,
             rt_pipeline,
             composite,
@@ -363,19 +370,29 @@ impl Renderer {
     /// Draw a frame with the current camera.
     ///
     /// Dispatches to the raster or RT scene recording, then overlays HUD,
-    /// submits, and presents.
+    /// submits, and presents. Does nothing while the window is minimised
+    /// (zero extent). An out-of-date swapchain is rebuilt and the frame
+    /// skipped; a suboptimal one is rendered and presented, then rebuilt.
+    ///
+    /// The in-flight fence is reset only immediately before the submit that
+    /// signals it, so every early return leaves it signalled.
     pub fn draw_frame(&mut self, camera: &Camera) -> Result<(), RenderError> {
-        let device = &self.gpu.device;
+        if self.window_extent.width == 0 || self.window_extent.height == 0 {
+            return Ok(());
+        }
+        if self.swapchain_stale && !self.recreate_swapchain()? {
+            // Surface still has a zero extent (minimised).
+            return Ok(());
+        }
+
         let frame = self.current_frame;
 
         // Wait for this frame's previous use to complete
         // SAFETY: Waiting on a valid fence.
         unsafe {
-            device
+            self.gpu
+                .device
                 .wait_for_fences(&[self.in_flight_fences[frame]], true, u64::MAX)
-                .map_err(RenderError::Vulkan)?;
-            device
-                .reset_fences(&[self.in_flight_fences[frame]])
                 .map_err(RenderError::Vulkan)?;
         }
 
@@ -390,18 +407,22 @@ impl Renderer {
             ) {
                 Ok(result) => result,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.resize_to_surface()?;
+                    // No image acquired and the semaphore is not signalled.
+                    // Rebuild now; the next frame renders.
+                    self.swapchain_stale = true;
+                    self.recreate_swapchain()?;
                     return Ok(());
                 }
                 Err(e) => return Err(RenderError::Vulkan(e)),
             }
         };
 
+        // A suboptimal image is still presentable: render it, rebuild after present.
         if suboptimal {
-            self.resize_to_surface()?;
-            return Ok(());
+            self.swapchain_stale = true;
         }
 
+        let device = &self.gpu.device;
         let cb = self.command_buffers[image_index as usize];
 
         // SAFETY: Recording commands into a valid command buffer.
@@ -447,8 +468,12 @@ impl Renderer {
             .command_buffers(&command_buffers_arr)
             .signal_semaphores(&signal_semaphores);
 
-        // SAFETY: Submitting to a valid queue with valid sync objects.
+        // SAFETY: Resetting a fence that is signalled (waited above) and
+        // submitting to a valid queue with valid sync objects.
         unsafe {
+            device
+                .reset_fences(&[self.in_flight_fences[frame]])
+                .map_err(RenderError::Vulkan)?;
             device
                 .queue_submit(
                     self.gpu.graphics_queue,
@@ -473,20 +498,28 @@ impl Renderer {
                 .swapchain_loader
                 .queue_present(self.gpu.graphics_queue, &present_info)
             {
-                Ok(_) => {}
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {
-                    self.resize_to_surface()?;
+                Ok(false) => {}
+                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.swapchain_stale = true;
                 }
                 Err(e) => return Err(RenderError::Vulkan(e)),
             }
         }
 
         self.current_frame = (self.current_frame + 1) % self.image_available.len();
+
+        if self.swapchain_stale {
+            self.recreate_swapchain()?;
+        }
         Ok(())
     }
 
-    /// Query the current surface extent and resize the swapchain to match.
-    fn resize_to_surface(&mut self) -> Result<(), RenderError> {
+    /// Rebuild the swapchain at the current surface extent, even if the size
+    /// is unchanged.
+    ///
+    /// Returns `Ok(false)` without rebuilding (leaving the swapchain marked
+    /// stale) while the surface extent is zero, e.g. when minimised.
+    fn recreate_swapchain(&mut self) -> Result<bool, RenderError> {
         // SAFETY: Querying surface capabilities for current extent.
         let caps = unsafe {
             self.swapchain
@@ -497,11 +530,26 @@ impl Renderer {
                 )
                 .map_err(RenderError::Vulkan)?
         };
-        self.resize(caps.current_extent.width, caps.current_extent.height)
+        // u32::MAX means the surface size is set by the swapchain: use the window size.
+        let extent = if caps.current_extent.width == u32::MAX {
+            self.window_extent
+        } else {
+            caps.current_extent
+        };
+        if extent.width == 0 || extent.height == 0 {
+            return Ok(false);
+        }
+        self.rebuild_swapchain_resources(extent.width, extent.height)?;
+        self.swapchain_stale = false;
+        Ok(true)
     }
 
     /// Handle window resize.
+    ///
+    /// A zero width or height (minimised) pauses rendering until a non-zero
+    /// size arrives.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+        self.window_extent = vk::Extent2D { width, height };
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -511,6 +559,13 @@ impl Renderer {
             return Ok(());
         }
 
+        self.rebuild_swapchain_resources(width, height)?;
+        self.swapchain_stale = false;
+        Ok(())
+    }
+
+    /// Destroy and recreate the swapchain and every resource sized to it.
+    fn rebuild_swapchain_resources(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         // SAFETY: Wait idle before rebuilding swapchain resources.
         unsafe {
             self.gpu
