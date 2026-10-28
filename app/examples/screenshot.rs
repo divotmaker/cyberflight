@@ -25,6 +25,7 @@ use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
 use cf_scene::grid::GridConfig;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
+use cf_scene::range::Range;
 use cf_scene::trail::{DEFAULT_TRAIL_LIFETIME, TrailPoint};
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
@@ -56,10 +57,13 @@ fn traj_to_scene(p: glam::DVec3) -> Vec3 {
     physics_to_scene(p).as_vec3()
 }
 
-fn render_driving_range(grid: &GridConfig, camera: &Camera) -> Result<()> {
+fn render_driving_range(range: &Range, camera: &Camera) -> Result<()> {
     eprintln!("Rendering driving range...");
-    let renderer =
-        OffscreenRenderer::new(WIDTH, HEIGHT, grid).context("failed to create renderer")?;
+    let mut renderer =
+        OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid).context("failed to create renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
     let frame = renderer.render(camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/driving_range.png"))
 }
@@ -203,7 +207,7 @@ fn simulate_seven_iron() -> FlightSnapshot {
     }
 }
 
-fn render_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (side view)...");
 
     // Side-on camera 8m away to show the tracer arc clearly.
@@ -216,10 +220,10 @@ fn render_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         far: 600.0,
     };
 
-    let renderer = OffscreenRenderer::new_with_flight(
+    let mut renderer = OffscreenRenderer::new_with_flight(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -227,12 +231,15 @@ fn render_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         &flight_camera,
     )
     .context("failed to create flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
 
     let frame = renderer.render(&flight_camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight.png"))
 }
 
-fn render_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (wide side view)...");
 
     // Camera to the side, far enough to frame the entire tracer + ball.
@@ -256,10 +263,10 @@ fn render_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         far: 600.0,
     };
 
-    let renderer = OffscreenRenderer::new_with_flight(
+    let mut renderer = OffscreenRenderer::new_with_flight(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -267,12 +274,15 @@ fn render_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         &wide_camera,
     )
     .context("failed to create flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
 
     let frame = renderer.render(&wide_camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide.png"))
 }
 
-fn render_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (wide 45° overhead view)...");
 
     // Camera above and to the side, looking down at ~45° onto the flight arc.
@@ -295,10 +305,10 @@ fn render_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
         far: 600.0,
     };
 
-    let renderer = OffscreenRenderer::new_with_flight(
+    let mut renderer = OffscreenRenderer::new_with_flight(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -306,18 +316,21 @@ fn render_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
         &wide45_camera,
     )
     .context("failed to create flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
 
     let frame = renderer.render(&wide45_camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide_45.png"))
 }
 
-fn render_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (tee box view)...");
 
-    let renderer = OffscreenRenderer::new_with_flight(
+    let mut renderer = OffscreenRenderer::new_with_flight(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -325,6 +338,9 @@ fn render_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         &Camera::driving_range(),
     )
     .context("failed to create flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
 
     let frame = renderer
         .render(&Camera::driving_range())
@@ -332,7 +348,7 @@ fn render_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_tee.png"))
 }
 
-fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (tee box view + HUD)...");
 
     let telemetry = ShotTelemetry {
@@ -372,7 +388,7 @@ fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     let mut renderer = OffscreenRenderer::new_with_flight(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -380,6 +396,9 @@ fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         &Camera::driving_range(),
     )
     .context("failed to create flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
 
     renderer
         .set_hud(&hud.lines, &hud.fills)
@@ -391,7 +410,7 @@ fn render_flight_hud(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_hud.png"))
 }
 
-fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering hero screenshot (tee box + chase camera + HUD, RT)...");
 
     // Chase camera: behind and above the ball, looking toward the landing zone
@@ -450,7 +469,7 @@ fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
     let mut renderer = OffscreenRenderer::new_with_flight_rt(
         render_w,
         render_h,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -458,6 +477,9 @@ fn render_hero(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         &main_camera,
     )
     .context("failed to create hero renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
 
     renderer.set_chase_camera(Some(chase));
     renderer
@@ -493,10 +515,13 @@ fn rt_available() -> bool {
         .unwrap_or(false)
 }
 
-fn render_rt_driving_range(grid: &GridConfig, camera: &Camera) -> Result<()> {
+fn render_rt_driving_range(range: &Range, camera: &Camera) -> Result<()> {
     eprintln!("Rendering driving range (RT)...");
-    let renderer =
-        OffscreenRenderer::new_rt(WIDTH, HEIGHT, grid).context("failed to create RT renderer")?;
+    let mut renderer = OffscreenRenderer::new_rt(WIDTH, HEIGHT, &range.grid)
+        .context("failed to create RT renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
     eprintln!(
         "  RT compositing: {}",
         if renderer.has_rt() {
@@ -509,7 +534,7 @@ fn render_rt_driving_range(grid: &GridConfig, camera: &Camera) -> Result<()> {
     save_png(&frame, &format!("{OUTPUT_DIR}/driving_range_rt.png"))
 }
 
-fn render_rt_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, side view)...");
     let flight_camera = Camera {
         position: Vec3::new(8.0, snap.ball_pos.y, snap.ball_pos.z),
@@ -519,10 +544,10 @@ fn render_rt_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         near: 0.01,
         far: 600.0,
     };
-    let renderer = OffscreenRenderer::new_with_flight_rt(
+    let mut renderer = OffscreenRenderer::new_with_flight_rt(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -530,17 +555,20 @@ fn render_rt_flight(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
         &flight_camera,
     )
     .context("failed to create RT flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
     let frame = renderer.render(&flight_camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_rt.png"))
 }
 
-fn render_rt_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_rt_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, tee box view)...");
     let camera = Camera::driving_range();
-    let renderer = OffscreenRenderer::new_with_flight_rt(
+    let mut renderer = OffscreenRenderer::new_with_flight_rt(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -548,11 +576,14 @@ fn render_rt_flight_tee(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> 
         &camera,
     )
     .context("failed to create RT flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_tee_rt.png"))
 }
 
-fn render_rt_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_rt_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, wide side view)...");
     let tail_start = snap
         .trail_points
@@ -570,10 +601,10 @@ fn render_rt_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
         near: 0.01,
         far: 600.0,
     };
-    let renderer = OffscreenRenderer::new_with_flight_rt(
+    let mut renderer = OffscreenRenderer::new_with_flight_rt(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -581,11 +612,14 @@ fn render_rt_flight_wide(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()>
         &wide_camera,
     )
     .context("failed to create RT flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
     let frame = renderer.render(&wide_camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide_rt.png"))
 }
 
-fn render_rt_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<()> {
+fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     eprintln!("Rendering flight (RT, wide 45 overhead view)...");
     let tail_start = snap
         .trail_points
@@ -603,10 +637,10 @@ fn render_rt_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<
         near: 0.01,
         far: 600.0,
     };
-    let renderer = OffscreenRenderer::new_with_flight_rt(
+    let mut renderer = OffscreenRenderer::new_with_flight_rt(
         WIDTH,
         HEIGHT,
-        grid,
+        &range.grid,
         snap.ball_pos,
         &snap.trail_points,
         snap.elapsed,
@@ -614,12 +648,15 @@ fn render_rt_flight_wide_45(grid: &GridConfig, snap: &FlightSnapshot) -> Result<
         &wide45_camera,
     )
     .context("failed to create RT flight renderer")?;
+    renderer
+        .set_targets(&range.targets, &range.grid)
+        .context("failed to upload target rings")?;
     let frame = renderer.render(&wide45_camera).context("render failed")?;
     save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide_45_rt.png"))
 }
 
 fn main() -> Result<()> {
-    let grid = GridConfig::default();
+    let range = Range::new();
     let camera = Camera::driving_range();
 
     fs::create_dir_all(OUTPUT_DIR).context("failed to create screenshots dir")?;
@@ -628,28 +665,28 @@ fn main() -> Result<()> {
     // ── Hero screenshot (7-iron, tee box + chase camera + HUD) ──
     eprintln!("Simulating hero shot (7-iron)...");
     let hero_snap = simulate_hero_shot();
-    render_hero(&grid, &hero_snap)?;
+    render_hero(&range, &hero_snap)?;
 
     // ── Rasterized screenshots ──
-    render_driving_range(&grid, &camera)?;
+    render_driving_range(&range, &camera)?;
 
     eprintln!("Simulating 7-iron...");
     let snap = simulate_seven_iron();
-    render_flight(&grid, &snap)?;
-    render_flight_tee(&grid, &snap)?;
-    render_flight_wide(&grid, &snap)?;
-    render_flight_wide_45(&grid, &snap)?;
-    render_flight_hud(&grid, &snap)?;
+    render_flight(&range, &snap)?;
+    render_flight_tee(&range, &snap)?;
+    render_flight_wide(&range, &snap)?;
+    render_flight_wide_45(&range, &snap)?;
+    render_flight_hud(&range, &snap)?;
 
     // ── Ray-traced screenshots (if hardware supports it) ──
     eprintln!("Checking ray tracing support...");
     if rt_available() {
         eprintln!("Ray tracing supported — generating RT screenshots");
-        render_rt_driving_range(&grid, &camera)?;
-        render_rt_flight(&grid, &snap)?;
-        render_rt_flight_tee(&grid, &snap)?;
-        render_rt_flight_wide(&grid, &snap)?;
-        render_rt_flight_wide_45(&grid, &snap)?;
+        render_rt_driving_range(&range, &camera)?;
+        render_rt_flight(&range, &snap)?;
+        render_rt_flight_tee(&range, &snap)?;
+        render_rt_flight_wide(&range, &snap)?;
+        render_rt_flight_wide_45(&range, &snap)?;
     } else {
         eprintln!("Ray tracing not supported — skipping RT screenshots");
     }

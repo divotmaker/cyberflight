@@ -62,6 +62,15 @@ impl GridConfig {
         self.unit.to_meters(f64::from(self.lateral)) as f32
     }
 
+    /// Distance from the tee at which grid lines have faded out (m): the far
+    /// corner of the grid. [`GridVertex::fade`] is distance over this.
+    #[must_use]
+    pub fn fade_distance_m(&self) -> f32 {
+        let downrange = self.downrange_m();
+        let lateral = self.lateral_m();
+        (downrange * downrange + lateral * lateral).sqrt()
+    }
+
     /// World-space clip bounds for the grid floor: [min_x, min_z, max_x, max_z].
     #[must_use]
     pub fn clip_bounds(&self) -> [f32; 4] {
@@ -88,7 +97,7 @@ pub fn generate_grid_vertices(config: &GridConfig) -> Vec<GridVertex> {
     let lateral = config.lateral_m();
     let spacing = config.spacing_m();
 
-    let max_dist = (downrange * downrange + lateral * lateral).sqrt();
+    let max_dist = config.fade_distance_m();
     let mut verts = Vec::new();
 
     // Lines parallel to X axis (lateral lines, at Z intervals along downrange)

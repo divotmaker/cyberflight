@@ -90,8 +90,11 @@ impl App {
             size.height,
         )
         .context("failed to create swapchain")?;
-        let renderer =
+        let mut renderer =
             Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
+        renderer
+            .set_targets(&self.range.targets, &self.range.grid)
+            .context("failed to upload target rings")?;
         eprintln!(
             "Renderer initialized: {}x{}",
             renderer.swapchain.extent.width, renderer.swapchain.extent.height

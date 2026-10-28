@@ -36,7 +36,8 @@ not yet validated against measured data and may change between releases.
   `Surface::GREEN` inside a target's outer radius and `Surface::FAIRWAY`
   everywhere else. dimple samples it under the ball at every step, so a
   ball that runs onto a target rolls on as a green and one that runs off it
-  finishes on fairway.
+  finishes on fairway. Each target is drawn as concentric orange rings; the
+  brightest, outermost ring is the edge of the green.
 - **Animation.** The rendered path is dimple's flight points followed by its
   ground points. Both carry absolute shot times, so the app plays the
   combined list back against the clock. A ball that dimple does not bring

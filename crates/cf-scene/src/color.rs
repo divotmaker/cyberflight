@@ -18,6 +18,10 @@ pub const WHITE: Vec4 = Vec4::new(1.0, 1.0, 1.0, 1.0);
 /// Hot orange — warning, fade shot trails.
 pub const ORANGE: Vec4 = Vec4::new(1.0, 0.533, 0.0, 1.0);
 
+/// Target rings — the orange accent held below full strength, so rings read
+/// against the cyan grid without competing with the ball tracer.
+pub const TARGET_RING: Vec4 = Vec4::new(1.0, 0.533, 0.0, 0.6);
+
 /// Cool blue — draw shot trails.
 pub const BLUE: Vec4 = Vec4::new(0.0, 0.5, 1.0, 1.0);
 

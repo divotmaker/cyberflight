@@ -9,4 +9,5 @@ pub mod render;
 pub mod rt_offscreen;
 pub mod rt_pipeline;
 pub mod stream;
+mod targets;
 pub mod window;

@@ -9,6 +9,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use cf_scene::camera::Camera;
 use cf_scene::color;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
+use cf_scene::target::Target;
 use cf_scene::tee::{
     TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill,
 };
@@ -26,6 +27,7 @@ use crate::mode::RenderMode;
 use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
+use crate::targets::TargetRings;
 use crate::window::Swapchain;
 
 /// Clip bounds that effectively disable clipping (huge region).
@@ -143,6 +145,8 @@ pub struct Renderer {
     rt_needs_update: bool,
     /// Optional chase camera for the right 20% viewport (set per-frame).
     pub(super) chase_camera: Option<Camera>,
+    /// Rings of the range's targets (see [`Renderer::set_targets`]).
+    pub(super) target_rings: Option<TargetRings>,
 }
 
 impl Renderer {
@@ -364,6 +368,7 @@ impl Renderer {
             rt_trail_fade_dist: 0.0,
             rt_needs_update: false,
             chase_camera: None,
+            target_rings: None,
         })
     }
 
@@ -688,6 +693,33 @@ impl Renderer {
         } else {
             self.render_mode = mode;
         }
+    }
+
+    /// Draw `targets` as concentric rings on the range floor, faded like
+    /// `grid`. Replaces any rings set before.
+    pub fn set_targets(
+        &mut self,
+        targets: &[Target],
+        grid: &GridConfig,
+    ) -> Result<(), RenderError> {
+        if let Some(old) = self.target_rings.take() {
+            // SAFETY: Waiting idle so the old ring buffer is no longer in use.
+            unsafe {
+                self.gpu
+                    .device
+                    .device_wait_idle()
+                    .map_err(RenderError::Vulkan)?;
+                old.destroy(&self.gpu.device, &mut self.gpu.allocator);
+            }
+        }
+        self.target_rings = TargetRings::new(
+            &self.gpu.device,
+            &mut self.gpu.allocator,
+            Self::create_vertex_buffer,
+            targets,
+            grid,
+        )?;
+        Ok(())
     }
 
     /// Set or clear the chase camera for the right 20% viewport.
@@ -1311,6 +1343,10 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.gpu.device.device_wait_idle().ok();
+
+            if let Some(rings) = self.target_rings.take() {
+                rings.destroy(&self.gpu.device, &mut self.gpu.allocator);
+            }
 
             for &sem in &self.image_available {
                 self.gpu.device.destroy_semaphore(sem, None);
