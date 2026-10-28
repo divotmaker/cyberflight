@@ -91,10 +91,11 @@ Compiled SPIR-V shaders are checked in. After editing a shader in
 ### Screenshots
 
 The `screenshot` example renders a fixed set of views headless (needs a Vulkan GPU): the hero
-shot with chase camera and HUD, the empty range, a 7-iron from five views (one with the HUD; the floor's reflections mirrored),
-ray-traced versions of the range and four of the 7-iron views on GPUs that ray-trace, and
-two frames (in flight, then idle) through the calls `--stream` makes. `cf-test` compares two
-sets, so a change can be checked for visual differences:
+shot with chase camera and HUD, the empty range, a 7-iron from five views (one with the HUD;
+the floor's reflections mirrored), ray-traced versions of the range and four of the 7-iron
+views on GPUs that ray-trace, and two frames (in flight, then idle) through the calls
+`--stream` makes. `cf-test` compares two sets, so a change can be checked for visual
+differences:
 
 ```bash
 cargo run --release -p cyberflight --example screenshot -- --out before
