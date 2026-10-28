@@ -14,6 +14,44 @@ pub struct TrailPoint {
     pub time: f64,
 }
 
+/// Length of the tracer tail as a fraction of the elapsed time `t`: the tail
+/// window is `[t - TRAIL_TAIL_FRACTION · t, t]`, clipped at time 0.
+pub const TRAIL_TAIL_FRACTION: f64 = 1.2;
+
+/// The tracer tail at time `t` from a ball's position `samples` (oldest
+/// first, scene frame): the samples inside the tail window
+/// `[t - TRAIL_TAIL_FRACTION · t, t]`, every `subsample`-th of them
+/// (counted from the window's start; `0` counts as `1`), ending at `ball`.
+/// `ball` is appended at time `t` unless the last kept sample lies within
+/// 1 cm of it, so the trail always reaches the ball.
+#[must_use]
+pub fn tracer_tail(
+    samples: impl IntoIterator<Item = TrailPoint>,
+    t: f64,
+    ball: Vec3,
+    subsample: usize,
+) -> Vec<TrailPoint> {
+    let subsample = subsample.max(1);
+    let tail_start = (t - t * TRAIL_TAIL_FRACTION).max(0.0);
+    let mut tail: Vec<TrailPoint> = samples
+        .into_iter()
+        .filter(|p| p.time >= tail_start && p.time <= t)
+        .enumerate()
+        .filter(|(i, _)| i % subsample == 0)
+        .map(|(_, p)| p)
+        .collect();
+    if tail
+        .last()
+        .is_none_or(|last| (last.position - ball).length() > 0.01)
+    {
+        tail.push(TrailPoint {
+            position: ball,
+            time: t,
+        });
+    }
+    tail
+}
+
 /// Generate a trail glow ribbon matching the ball glow aesthetic.
 ///
 /// Uses the same shell technique as `generate_ball_glow_at` — same shell count,
@@ -248,6 +286,68 @@ pub fn generate_trail_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn samples(n: usize) -> Vec<TrailPoint> {
+        (0..n)
+            .map(|i| TrailPoint {
+                position: Vec3::new(0.0, 0.0, i as f32),
+                time: i as f64 * 0.1,
+            })
+            .collect()
+    }
+
+    fn times(tail: &[TrailPoint]) -> Vec<f64> {
+        tail.iter().map(|p| p.time).collect()
+    }
+
+    #[test]
+    fn tracer_tail_keeps_the_window_and_ends_at_the_ball() {
+        // At t = 0.5 the window starts at max(0.5 - 0.6, 0) = 0: samples 0..=5.
+        let ball = Vec3::new(0.0, 0.0, 5.5);
+        let tail = tracer_tail(samples(10), 0.5, ball, 1);
+        assert_eq!(tail.len(), 7);
+        assert_eq!(tail[5].time, samples(10)[5].time);
+        assert_eq!(tail[6].position, ball);
+        assert_eq!(tail[6].time, 0.5);
+    }
+
+    #[test]
+    fn tracer_tail_subsamples_from_the_window_start() {
+        let ball = Vec3::new(0.0, 0.0, 7.0);
+        let all = samples(10);
+        let tail = tracer_tail(all.clone(), 0.7, ball, 3);
+        // Samples 0, 3, 6 of 0..=7, then the ball (sample 6 is 1 m away).
+        assert_eq!(
+            times(&tail),
+            vec![all[0].time, all[3].time, all[6].time, 0.7]
+        );
+    }
+
+    #[test]
+    fn tracer_tail_does_not_repeat_a_ball_on_the_last_sample() {
+        let all = samples(10);
+        let tail = tracer_tail(all.clone(), all[4].time, all[4].position, 1);
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail[4].position, all[4].position);
+    }
+
+    #[test]
+    fn tracer_tail_treats_subsample_zero_as_one() {
+        let ball = Vec3::new(0.0, 0.0, 9.5);
+        let all = samples(10);
+        assert_eq!(
+            times(&tracer_tail(all.clone(), 0.95, ball, 0)),
+            times(&tracer_tail(all, 0.95, ball, 1))
+        );
+    }
+
+    #[test]
+    fn tracer_tail_without_samples_is_the_ball() {
+        let ball = Vec3::new(1.0, 2.0, 3.0);
+        let tail = tracer_tail([], 1.0, ball, 1);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].position, ball);
+    }
 
     fn make_trail(n: usize) -> Vec<TrailPoint> {
         (0..n)

@@ -4,7 +4,8 @@
 //! Run: `cargo run -p cyberflight --example screenshot [-- --out <dir>]`
 //!
 //! Output, in `screenshots/` or the `--out` directory:
-//!   - `cyberflight.png` — **HERO**: driver mid-flight, chase camera + HUD
+//!   - `cyberflight.png` — **HERO**: the hero shot mid-flight from the tee
+//!     box, chase camera + HUD, ray-traced when supported, 2× supersampled
 //!   - `driving_range.png` — empty range with ball on tee box
 //!   - `flight.png` — 7-iron mid-flight with tracer trail (close side view)
 //!   - `flight_tee.png` — 7-iron mid-flight from tee box (golfer's view)
@@ -39,7 +40,7 @@ use cf_scene::frame::physics_to_scene;
 use cf_scene::grid::GridConfig;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::range::Range;
-use cf_scene::trail::TrailPoint;
+use cf_scene::trail::{TrailPoint, tracer_tail};
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
 use dimple::trajectory::{ShotInput, simulate_flight};
@@ -101,16 +102,9 @@ fn traj_to_scene(p: glam::DVec3) -> Vec3 {
     physics_to_scene(p).as_vec3()
 }
 
-fn render_driving_range(range: &Range, camera: &Camera) -> Result<()> {
-    eprintln!("Rendering driving range...");
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
-        .context("failed to create renderer")?;
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-    let frame = renderer.render(camera).context("render failed")?;
-    save_png(&frame, &out_path("driving_range.png"))
-}
+/// Every how many trajectory samples (10 ms apart) a tracer point is kept:
+/// 30 ms apart, so the glow ribbons don't overlap additively.
+const TRAIL_SUBSAMPLE: usize = 3;
 
 /// Simulated flight snapshot: ball position, tracer tail, and shot data for HUD.
 struct FlightSnapshot {
@@ -124,9 +118,67 @@ struct FlightSnapshot {
     elapsed: f64,
 }
 
-impl FlightSnapshot {}
+impl FlightSnapshot {
+    /// The snapshot as the renderers' per-frame flight input.
+    fn render_data(&self) -> FlightRenderData {
+        FlightRenderData {
+            ball_pos: self.ball_pos,
+            trail_points: self.trail_points.clone(),
+            current_time: self.elapsed,
+        }
+    }
 
-fn simulate_hero_shot() -> FlightSnapshot {
+    /// Where the tracer starts (its oldest point).
+    fn tail_start(&self) -> Vec3 {
+        self.trail_points
+            .first()
+            .map(|p| p.position)
+            .unwrap_or(Vec3::ZERO)
+    }
+}
+
+/// Simulate `input` (flight phase only) and freeze it at `frac` of its
+/// flight time, with the tracer tail the live renderers draw.
+fn snapshot(input: ShotInput, frac: f64) -> FlightSnapshot {
+    let result = simulate_flight(&input, &BallModel::TOUR, &Environment::SEA_LEVEL);
+    eprintln!(
+        "  Flight: {:.1} yards carry, {:.1}m apex, {:.2}s total",
+        result.carry_yards, result.apex_m, result.flight_time
+    );
+
+    let t_current = result.flight_time * frac;
+    let ball_pos = dimple::trajectory::interpolate_trajectory(&result.points, t_current)
+        .map(traj_to_scene)
+        .unwrap_or(Vec3::ZERO);
+    let samples = result.points.iter().map(|p| TrailPoint {
+        position: traj_to_scene(p.pos),
+        time: p.time,
+    });
+    let trail_points = tracer_tail(samples, t_current, ball_pos, TRAIL_SUBSAMPLE);
+
+    eprintln!(
+        "  Ball at ({:.1}, {:.1}, {:.1}) with {} trail points",
+        ball_pos.x,
+        ball_pos.y,
+        ball_pos.z,
+        trail_points.len()
+    );
+
+    FlightSnapshot {
+        ball_pos,
+        trail_points,
+        input,
+        carry_yards: result.carry_yards,
+        apex_m: result.apex_m,
+        lateral_m: result.lateral_m,
+        flight_time: result.flight_time,
+        elapsed: t_current,
+    }
+}
+
+/// The hero shot: a slight draw, sampled at 55 % of its flight (past the
+/// apex, descending toward the target).
+fn hero_shot() -> FlightSnapshot {
     let input = ShotInput {
         ball_speed_mph: 110.0,
         launch_angle_deg: 18.0,
@@ -134,316 +186,113 @@ fn simulate_hero_shot() -> FlightSnapshot {
         backspin_rpm: 6500.0,
         sidespin_rpm: -250.0, // draw spin
     };
-    let result = simulate_flight(&input, &BallModel::TOUR, &Environment::SEA_LEVEL);
-    eprintln!(
-        "  Flight: {:.1} yards carry, {:.1}m apex, {:.2}s total",
-        result.carry_yards, result.apex_m, result.flight_time
-    );
-
-    // Sample at 55% of flight — past apex, descending toward target
-    let t_current = result.flight_time * 0.55;
-
-    let ball_pos = dimple::trajectory::interpolate_trajectory(&result.points, t_current)
-        .map(traj_to_scene)
-        .unwrap_or(Vec3::ZERO);
-
-    let tail_duration = t_current * 1.2;
-    let tail_start = (t_current - tail_duration).max(0.0);
-    let mut trail_points: Vec<TrailPoint> = result
-        .points
-        .iter()
-        .filter(|p| p.time >= tail_start && p.time <= t_current)
-        .enumerate()
-        .filter(|(i, _)| i % 3 == 0)
-        .map(|(_, p)| TrailPoint {
-            position: traj_to_scene(p.pos),
-            time: p.time,
-        })
-        .collect();
-    if trail_points
-        .last()
-        .is_none_or(|last| (last.position - ball_pos).length() > 0.01)
-    {
-        trail_points.push(TrailPoint {
-            position: ball_pos,
-            time: t_current,
-        });
-    }
-
-    eprintln!(
-        "  Ball at ({:.1}, {:.1}, {:.1}) with {} trail points",
-        ball_pos.x,
-        ball_pos.y,
-        ball_pos.z,
-        trail_points.len()
-    );
-
-    FlightSnapshot {
-        ball_pos,
-        trail_points,
-        input,
-        carry_yards: result.carry_yards,
-        apex_m: result.apex_m,
-        lateral_m: result.lateral_m,
-        flight_time: result.flight_time,
-        elapsed: t_current,
-    }
+    snapshot(input, 0.55)
 }
 
-fn simulate_seven_iron() -> FlightSnapshot {
-    let input = ShotInput::seven_iron();
-    let result = simulate_flight(&input, &BallModel::TOUR, &Environment::SEA_LEVEL);
-    eprintln!(
-        "  Flight: {:.1} yards carry, {:.1}m apex, {:.2}s total",
-        result.carry_yards, result.apex_m, result.flight_time
-    );
-
-    // Sample at 40% of flight time (ascending, approaching apex)
-    let t_current = result.flight_time * 0.40;
-
-    let ball_pos = dimple::trajectory::interpolate_trajectory(&result.points, t_current)
-        .map(traj_to_scene)
-        .unwrap_or(Vec3::ZERO);
-
-    // Tracer tail: last 120% of elapsed flight time (long tail visible at distance).
-    // Subsample every 3rd point (30ms intervals) so ribbons don't overlap additively.
-    let tail_duration = t_current * 1.2;
-    let tail_start = (t_current - tail_duration).max(0.0);
-    let mut trail_points: Vec<TrailPoint> = result
-        .points
-        .iter()
-        .filter(|p| p.time >= tail_start && p.time <= t_current)
-        .enumerate()
-        .filter(|(i, _)| i % 3 == 0)
-        .map(|(_, p)| TrailPoint {
-            position: traj_to_scene(p.pos),
-            time: p.time,
-        })
-        .collect();
-    // Ensure the trail ends exactly at the ball (connects to ball glow).
-    if trail_points
-        .last()
-        .is_none_or(|last| (last.position - ball_pos).length() > 0.01)
-    {
-        trail_points.push(TrailPoint {
-            position: ball_pos,
-            time: t_current,
-        });
-    }
-
-    eprintln!(
-        "  Ball at ({:.1}, {:.1}, {:.1}) with {} trail points",
-        ball_pos.x,
-        ball_pos.y,
-        ball_pos.z,
-        trail_points.len()
-    );
-
-    FlightSnapshot {
-        ball_pos,
-        trail_points,
-        input,
-        carry_yards: result.carry_yards,
-        apex_m: result.apex_m,
-        lateral_m: result.lateral_m,
-        flight_time: result.flight_time,
-        elapsed: t_current,
-    }
+/// A 7-iron sampled at 40 % of its flight (ascending, approaching the apex).
+fn seven_iron() -> FlightSnapshot {
+    snapshot(ShotInput::seven_iron(), 0.40)
 }
 
-fn render_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (side view)...");
-
-    // Side-on camera 8m away to show the tracer arc clearly.
-    let flight_camera = Camera {
-        position: Vec3::new(8.0, snap.ball_pos.y, snap.ball_pos.z),
-        target: snap.ball_pos,
+/// A camera at `position` looking at `target`, 45° field of view.
+fn look_at(position: Vec3, target: Vec3) -> Camera {
+    Camera {
+        position,
+        target,
         up: Vec3::Y,
         fov_y: std::f32::consts::FRAC_PI_4,
         near: 0.01,
         far: 600.0,
-    };
-
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
-        .context("failed to create flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &flight_camera,
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-
-    let frame = renderer.render(&flight_camera).context("render failed")?;
-    save_png(&frame, &out_path("flight.png"))
+    }
 }
 
-fn render_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (wide side view)...");
+/// One 1920×1080 screenshot: file name, camera, whether it may ray-trace,
+/// and whether it shows the 7-iron snapshot and the HUD.
+struct Shot {
+    name: &'static str,
+    camera: Camera,
+    rt: RtMode,
+    flight: bool,
+    hud: bool,
+}
 
-    // Camera to the side, far enough to frame the entire tracer + ball.
-    // Trail goes from oldest point to ball_pos — center the view on the midpoint.
-    let tail_start = snap
-        .trail_points
-        .first()
-        .map(|p| p.position)
-        .unwrap_or(Vec3::ZERO);
+/// The screenshots of the empty range and the 7-iron `snap`: the raster
+/// set, and the ray-traced set (`_rt`) for GPUs that ray-trace.
+fn range_shots(snap: &FlightSnapshot) -> (Vec<Shot>, Vec<Shot>) {
+    use RtMode::{Auto, Off};
+
+    // Side-on camera 8 m away to show the tracer arc clearly.
+    let side = look_at(
+        Vec3::new(8.0, snap.ball_pos.y, snap.ball_pos.z),
+        snap.ball_pos,
+    );
+    // Cameras that frame the whole tracer, centred on its midpoint: to the
+    // side, and above and to the side (a 45° down angle).
+    let tail_start = snap.tail_start();
     let mid = (tail_start + snap.ball_pos) * 0.5;
-    let trail_len = (snap.ball_pos - tail_start).length();
-    // Distance = enough to fit the trail in frame with 45° FOV
-    let dist = trail_len * 0.9;
-
-    let wide_camera = Camera {
-        position: Vec3::new(mid.x + dist, mid.y, mid.z),
-        target: mid,
-        up: Vec3::Y,
-        fov_y: std::f32::consts::FRAC_PI_4,
-        near: 0.01,
-        far: 600.0,
-    };
-
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
-        .context("failed to create flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &wide_camera,
+    let dist = (snap.ball_pos - tail_start).length() * 0.9;
+    let wide = look_at(Vec3::new(mid.x + dist, mid.y, mid.z), mid);
+    let wide_45 = look_at(
+        Vec3::new(mid.x + dist * 0.7, mid.y + dist * 0.7, mid.z),
+        mid,
     );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
+    let tee = Camera::driving_range();
 
-    let frame = renderer.render(&wide_camera).context("render failed")?;
-    save_png(&frame, &out_path("flight_wide.png"))
+    let table = |rows: &[(&'static str, Camera, RtMode, bool, bool)]| {
+        rows.iter()
+            .map(|&(name, camera, rt, flight, hud)| Shot {
+                name,
+                camera,
+                rt,
+                flight,
+                hud,
+            })
+            .collect()
+    };
+    let raster = table(&[
+        ("driving_range", tee, Auto, false, false),
+        ("flight", side, Off, true, false),
+        ("flight_tee", tee, Off, true, false),
+        ("flight_wide", wide, Off, true, false),
+        ("flight_wide_45", wide_45, Off, true, false),
+        ("flight_hud", tee, Off, true, true),
+    ]);
+    let ray_traced = table(&[
+        ("driving_range_rt", tee, Auto, false, false),
+        ("flight_rt", side, Auto, true, false),
+        ("flight_tee_rt", tee, Auto, true, false),
+        ("flight_wide_rt", wide, Auto, true, false),
+        ("flight_wide_45_rt", wide_45, Auto, true, false),
+    ]);
+    (raster, ray_traced)
 }
 
-fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (wide 45° overhead view)...");
-
-    // Camera above and to the side, looking down at ~45° onto the flight arc.
-    let tail_start = snap
-        .trail_points
-        .first()
-        .map(|p| p.position)
-        .unwrap_or(Vec3::ZERO);
-    let mid = (tail_start + snap.ball_pos) * 0.5;
-    let trail_len = (snap.ball_pos - tail_start).length();
-    let dist = trail_len * 0.9;
-
-    // Position: offset laterally (+X) and above (+Y) by equal amounts → 45° down angle
-    let wide45_camera = Camera {
-        position: Vec3::new(mid.x + dist * 0.7, mid.y + dist * 0.7, mid.z),
-        target: mid,
-        up: Vec3::Y,
-        fov_y: std::f32::consts::FRAC_PI_4,
-        near: 0.01,
-        far: 600.0,
-    };
-
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
-        .context("failed to create flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &wide45_camera,
-    );
+/// Render `shot` of `snap` (or of the empty range) on its own renderer.
+fn render_shot(range: &Range, snap: &FlightSnapshot, shot: &Shot) -> Result<()> {
+    eprintln!("Rendering {}...", shot.name);
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, shot.rt)
+        .context("failed to create renderer")?;
+    if shot.flight {
+        renderer.update_flight(&[snap.render_data()], &shot.camera);
+    }
     renderer
         .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
-
-    let frame = renderer.render(&wide45_camera).context("render failed")?;
-    save_png(&frame, &out_path("flight_wide_45.png"))
-}
-
-fn render_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (tee box view)...");
-
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
-        .context("failed to create flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &Camera::driving_range(),
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-
-    let frame = renderer
-        .render(&Camera::driving_range())
-        .context("render failed")?;
-    save_png(&frame, &out_path("flight_tee.png"))
-}
-
-fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (tee box view + HUD)...");
-
-    let telemetry = ShotTelemetry {
-        club_speed_mph: Some(snap.input.ball_speed_mph / 1.33),
-        ball_speed_mph: snap.input.ball_speed_mph,
-        smash_factor: Some(1.33),
-        launch_angle_deg: snap.input.launch_angle_deg,
-        launch_azimuth_deg: snap.input.launch_azimuth_deg,
-        backspin_rpm: Some(snap.input.backspin_rpm),
-        sidespin_rpm: Some(snap.input.sidespin_rpm),
-        club_path_deg: Some(-1.8),
-        attack_angle_deg: Some(-4.2),
-        face_angle_deg: Some(0.5),
-        dynamic_loft_deg: Some(21.3),
-        apex_m: snap.apex_m,
-        carry_yards: snap.carry_yards,
-        lm_carry_yards: None,
-        total_yards: snap.carry_yards,
-        downrange_yards: snap.carry_yards,
-        lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
-        flight_time_s: snap.flight_time,
-        elapsed_s: snap.elapsed,
-    };
-
-    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
-    let hud = build_hud(
-        Some(&telemetry),
-        UnitSystem::Imperial,
-        false,
-        &lm,
-        true,
-        WIDTH as f32,
-        HEIGHT as f32,
-    );
-
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Off)
-        .context("failed to create flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &Camera::driving_range(),
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-
-    renderer.update_hud(&hud.lines, &hud.fills);
-
-    let frame = renderer
-        .render(&Camera::driving_range())
-        .context("render failed")?;
-    save_png(&frame, &out_path("flight_hud.png"))
+    if shot.hud {
+        let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
+        let hud = build_hud(
+            Some(&telemetry(snap, false)),
+            UnitSystem::Imperial,
+            false,
+            &lm,
+            true,
+            WIDTH as f32,
+            HEIGHT as f32,
+        );
+        renderer.update_hud(&hud.lines, &hud.fills);
+    }
+    let frame = renderer.render(&shot.camera).context("render failed")?;
+    save_png(&frame, &out_path(&format!("{}.png", shot.name)))
 }
 
 /// Chase camera of the hero shot: behind and above the ball, looking toward the landing zone.
@@ -461,10 +310,16 @@ fn hero_chase_camera(snap: &FlightSnapshot) -> Camera {
     Camera::chase(snap.ball_pos, velocity, landing_pos)
 }
 
-/// HUD telemetry of the hero shot, with live carry at the snapshot time.
-fn hero_telemetry(snap: &FlightSnapshot) -> ShotTelemetry {
+/// HUD telemetry of `snap`, with the full carry, or with `live` the carry
+/// so far.
+fn telemetry(snap: &FlightSnapshot, live: bool) -> ShotTelemetry {
+    let carry_yards = if live {
+        snap.carry_yards * (snap.elapsed / snap.flight_time)
+    } else {
+        snap.carry_yards
+    };
     ShotTelemetry {
-        club_speed_mph: Some(snap.input.ball_speed_mph / 1.33), // 7-iron smash ~1.33
+        club_speed_mph: Some(snap.input.ball_speed_mph / 1.33), // smash ~1.33
         ball_speed_mph: snap.input.ball_speed_mph,
         smash_factor: Some(1.33),
         launch_angle_deg: snap.input.launch_angle_deg,
@@ -476,10 +331,10 @@ fn hero_telemetry(snap: &FlightSnapshot) -> ShotTelemetry {
         face_angle_deg: Some(0.5),
         dynamic_loft_deg: Some(21.3),
         apex_m: snap.apex_m,
-        carry_yards: snap.carry_yards * (snap.elapsed / snap.flight_time), // live
+        carry_yards,
         lm_carry_yards: None,
-        total_yards: snap.carry_yards * (snap.elapsed / snap.flight_time),
-        downrange_yards: snap.carry_yards * (snap.elapsed / snap.flight_time),
+        total_yards: carry_yards,
+        downrange_yards: carry_yards,
         lateral_yards: dimple::units::meters_to_yards(snap.lateral_m),
         flight_time_s: snap.flight_time,
         elapsed_s: snap.elapsed,
@@ -491,7 +346,6 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
 
     let chase = hero_chase_camera(snap);
     let main_camera = Camera::driving_range();
-    let telemetry = hero_telemetry(snap);
 
     // Render at 2x resolution for supersampled anti-aliasing, then downscale
     let render_w = WIDTH * HERO_SCALE;
@@ -499,7 +353,7 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
 
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
     let hud = build_hud(
-        Some(&telemetry),
+        Some(&telemetry(snap, true)),
         UnitSystem::Imperial,
         true,
         &lm,
@@ -508,17 +362,10 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         render_h as f32,
     );
 
-    // Use RT variant for reflections, main camera at tee box, chase camera on right 20%
+    // Reflections, main camera at the tee box, chase camera on the right 20%
     let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.grid, RtMode::Auto)
         .context("failed to create hero renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &main_camera,
-    );
+    renderer.update_flight(&[snap.render_data()], &main_camera);
     renderer
         .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
@@ -555,142 +402,6 @@ fn rt_available() -> bool {
         .unwrap_or(false)
 }
 
-fn render_rt_driving_range(range: &Range, camera: &Camera) -> Result<()> {
-    eprintln!("Rendering driving range (RT)...");
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
-        .context("failed to create RT renderer")?;
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-    eprintln!(
-        "  RT compositing: {}",
-        if renderer.render_mode() == RenderMode::RayTraced {
-            "enabled"
-        } else {
-            "fallback to raster"
-        }
-    );
-    let frame = renderer.render(camera).context("render failed")?;
-    save_png(&frame, &out_path("driving_range_rt.png"))
-}
-
-fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (RT, side view)...");
-    let flight_camera = Camera {
-        position: Vec3::new(8.0, snap.ball_pos.y, snap.ball_pos.z),
-        target: snap.ball_pos,
-        up: Vec3::Y,
-        fov_y: std::f32::consts::FRAC_PI_4,
-        near: 0.01,
-        far: 600.0,
-    };
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
-        .context("failed to create RT flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &flight_camera,
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-    let frame = renderer.render(&flight_camera).context("render failed")?;
-    save_png(&frame, &out_path("flight_rt.png"))
-}
-
-fn render_rt_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (RT, tee box view)...");
-    let camera = Camera::driving_range();
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
-        .context("failed to create RT flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &camera,
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-    let frame = renderer.render(&camera).context("render failed")?;
-    save_png(&frame, &out_path("flight_tee_rt.png"))
-}
-
-fn render_rt_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (RT, wide side view)...");
-    let tail_start = snap
-        .trail_points
-        .first()
-        .map(|p| p.position)
-        .unwrap_or(Vec3::ZERO);
-    let mid = (tail_start + snap.ball_pos) * 0.5;
-    let trail_len = (snap.ball_pos - tail_start).length();
-    let dist = trail_len * 0.9;
-    let wide_camera = Camera {
-        position: Vec3::new(mid.x + dist, mid.y, mid.z),
-        target: mid,
-        up: Vec3::Y,
-        fov_y: std::f32::consts::FRAC_PI_4,
-        near: 0.01,
-        far: 600.0,
-    };
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
-        .context("failed to create RT flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &wide_camera,
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-    let frame = renderer.render(&wide_camera).context("render failed")?;
-    save_png(&frame, &out_path("flight_wide_rt.png"))
-}
-
-fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
-    eprintln!("Rendering flight (RT, wide 45 overhead view)...");
-    let tail_start = snap
-        .trail_points
-        .first()
-        .map(|p| p.position)
-        .unwrap_or(Vec3::ZERO);
-    let mid = (tail_start + snap.ball_pos) * 0.5;
-    let trail_len = (snap.ball_pos - tail_start).length();
-    let dist = trail_len * 0.9;
-    let wide45_camera = Camera {
-        position: Vec3::new(mid.x + dist * 0.7, mid.y + dist * 0.7, mid.z),
-        target: mid,
-        up: Vec3::Y,
-        fov_y: std::f32::consts::FRAC_PI_4,
-        near: 0.01,
-        far: 600.0,
-    };
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
-        .context("failed to create RT flight renderer")?;
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &wide45_camera,
-    );
-    renderer
-        .set_green(range.green.as_ref())
-        .context("failed to upload the green")?;
-    let frame = renderer.render(&wide45_camera).context("render failed")?;
-    save_png(&frame, &out_path("flight_wide_45_rt.png"))
-}
-
 /// Render the hero shot, then the idle range, through the streaming calls on
 /// one renderer set up exactly like `--stream`.
 fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -704,17 +415,10 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .set_green(range.green.as_ref())
         .context("failed to upload the green")?;
 
-    renderer.update_flight(
-        &[FlightRenderData {
-            ball_pos: snap.ball_pos,
-            trail_points: snap.trail_points.clone(),
-            current_time: snap.elapsed,
-        }],
-        &camera,
-    );
+    renderer.update_flight(&[snap.render_data()], &camera);
     renderer.set_chase_camera(Some(hero_chase_camera(snap)));
     let hud = build_hud(
-        Some(&hero_telemetry(snap)),
+        Some(&telemetry(snap, true)),
         UnitSystem::Imperial,
         true,
         &lm,
@@ -754,35 +458,29 @@ fn main() -> Result<()> {
     }
 
     let range = Range::new();
-    let camera = Camera::driving_range();
 
     eprintln!("Initializing offscreen renderers ({WIDTH}x{HEIGHT})...");
 
-    // ── Hero screenshot (7-iron, tee box + chase camera + HUD) ──
-    eprintln!("Simulating hero shot (7-iron)...");
-    let hero_snap = simulate_hero_shot();
+    // ── Hero screenshot (tee box + chase camera + HUD) ──
+    eprintln!("Simulating hero shot...");
+    let hero_snap = hero_shot();
     render_hero(&range, &hero_snap)?;
 
     // ── Rasterized screenshots ──
-    render_driving_range(&range, &camera)?;
-
     eprintln!("Simulating 7-iron...");
-    let snap = simulate_seven_iron();
-    render_flight(&range, &snap)?;
-    render_flight_tee(&range, &snap)?;
-    render_flight_wide(&range, &snap)?;
-    render_flight_wide_45(&range, &snap)?;
-    render_flight_hud(&range, &snap)?;
+    let snap = seven_iron();
+    let (raster, ray_traced) = range_shots(&snap);
+    for shot in &raster {
+        render_shot(&range, &snap, shot)?;
+    }
 
     // ── Ray-traced screenshots (if hardware supports it) ──
     eprintln!("Checking ray tracing support...");
     if rt_available() {
         eprintln!("Ray tracing supported — generating RT screenshots");
-        render_rt_driving_range(&range, &camera)?;
-        render_rt_flight(&range, &snap)?;
-        render_rt_flight_tee(&range, &snap)?;
-        render_rt_flight_wide(&range, &snap)?;
-        render_rt_flight_wide_45(&range, &snap)?;
+        for shot in &ray_traced {
+            render_shot(&range, &snap, shot)?;
+        }
     } else {
         eprintln!("Ray tracing not supported — skipping RT screenshots");
     }

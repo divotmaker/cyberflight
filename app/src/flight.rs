@@ -13,7 +13,7 @@ use cf_scene::green::GreenConfig;
 use cf_scene::ground;
 use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
-use cf_scene::trail::TrailPoint;
+use cf_scene::trail::{TrailPoint, tracer_tail};
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
 use dimple::ground::Termination;
@@ -32,8 +32,6 @@ pub const CHASE_LINGER_TIME: f64 = 5.0;
 pub const CHASE_CAM_SMOOTHING_TAU: f64 = 0.3;
 /// Default subsample stride: every Nth trajectory sample is used as a trail point.
 pub const DEFAULT_TRAIL_SUBSAMPLE: usize = 1;
-/// Trail tail as a fraction of elapsed flight time.
-pub const TRAIL_TAIL_FRACTION: f64 = 1.2;
 /// Longest a ball that dimple did not bring to rest keeps moving on the
 /// ground after landing (seconds). Shots that come to rest animate to the end.
 pub const MAX_UNSETTLED_GROUND_TIME_S: f64 = 8.0;
@@ -234,29 +232,11 @@ impl AnimatedFlight {
 
         let ball_pos = interpolate_timeline(&self.timeline, t_clamped).map(to_scene)?;
 
-        let tail_duration = t_clamped * TRAIL_TAIL_FRACTION;
-        let tail_start = (t_clamped - tail_duration).max(0.0);
-        let mut trail_points: Vec<TrailPoint> = self
-            .timeline
-            .iter()
-            .filter(|p| p.time >= tail_start && p.time <= t_clamped)
-            .enumerate()
-            .filter(|(i, _)| i % trail_subsample == 0)
-            .map(|(_, p)| TrailPoint {
-                position: to_scene(p.pos),
-                time: p.time,
-            })
-            .collect();
-
-        if trail_points
-            .last()
-            .is_none_or(|last| (last.position - ball_pos).length() > 0.01)
-        {
-            trail_points.push(TrailPoint {
-                position: ball_pos,
-                time: t_clamped,
-            });
-        }
+        let samples = self.timeline.iter().map(|p| TrailPoint {
+            position: to_scene(p.pos),
+            time: p.time,
+        });
+        let trail_points = tracer_tail(samples, t_clamped, ball_pos, trail_subsample);
 
         Some(FlightRenderData {
             ball_pos,
