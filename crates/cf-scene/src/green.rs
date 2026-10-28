@@ -3,13 +3,15 @@
 //! A [`Range`](crate::range::Range) has at most one green. Inside it the
 //! range floor is [`Surface::GREEN`](dimple::ground::Surface::GREEN), and
 //! the renderers draw its edge as a single ring ([`generate_green_edge`]).
-//! The default range has none ([`DEFAULT_GREEN`] is `None`), so the whole
-//! floor is fairway.
+//! A new range has none ([`DEFAULT_GREEN`] is `None`), so the whole floor
+//! is fairway.
 //!
-//! To play a green, set [`DEFAULT_GREEN`] to a [`GreenConfig`], e.g.
-//! `Some(GreenConfig { distance_m: 137.16, diameter_m: 30.0 })` for a 30 m
-//! green 150 yd out, or set [`Range::green`](crate::range::Range::green)
-//! on a range before it is drawn and played.
+//! [`Range::green`](crate::range::Range::green) is the knob: set it to a
+//! [`GreenConfig`] before the range is drawn and played, e.g.
+//! `range.green = Some(GreenConfig { distance_m: 137.16, diameter_m: 30.0 })`
+//! for a 30 m green 150 yd out. [`DEFAULT_GREEN`] is the value
+//! [`Range::new`](crate::range::Range::new) starts with; changing it
+//! changes the default for every range.
 
 use glam::Vec3;
 
@@ -17,6 +19,9 @@ use crate::grid::{GridConfig, GridVertex};
 use crate::target::push_ring;
 
 /// A circular green centred on the target line.
+///
+/// `diameter_m` must be positive and finite (checked by a debug assertion
+/// when the radius is taken); `distance_m` must be finite.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GreenConfig {
     /// Distance downrange from the tee to the green's centre, in metres.
@@ -33,6 +38,11 @@ impl GreenConfig {
     /// Radius of the green in metres: half the diameter.
     #[must_use]
     pub fn radius_m(&self) -> f32 {
+        debug_assert!(
+            self.diameter_m.is_finite() && self.diameter_m > 0.0,
+            "green diameter must be positive and finite: {}",
+            self.diameter_m
+        );
         self.diameter_m * 0.5
     }
 
@@ -77,8 +87,14 @@ mod tests {
     use crate::target::RING_SEGMENTS;
 
     #[test]
-    fn default_range_has_no_green() {
-        assert_eq!(DEFAULT_GREEN, None);
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "positive and finite")]
+    fn non_positive_diameter_is_rejected() {
+        let green = GreenConfig {
+            distance_m: 100.0,
+            diameter_m: -10.0,
+        };
+        let _ = green.radius_m();
     }
 
     #[test]

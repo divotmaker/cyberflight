@@ -40,10 +40,14 @@ not yet validated against measured data and may change between releases.
   diameter (`diameter_m`); inside it the floor is `Surface::GREEN`, and its
   edge is drawn as one orange ring. dimple samples the floor under the ball
   at every step, so a ball that runs onto the green rolls on as a green and
-  one that runs off it finishes on fairway. The default range has no green
+  one that runs off it finishes on fairway. A new range has no green
   (`cf_scene::green::DEFAULT_GREEN` is `None`), so every shot plays on
-  fairway; setting `DEFAULT_GREEN` (or `Range::green`) to a `GreenConfig`
-  adds one. The targets are aiming marks drawn as concentric orange rings
+  fairway; setting `Range::green` to a `GreenConfig` before the range is
+  played and drawn adds one, e.g.
+  `range.green = Some(GreenConfig { distance_m: 137.16, diameter_m: 30.0 })`.
+  `DEFAULT_GREEN` is the value every new range starts with; changing it
+  changes the default for all of them. `diameter_m` must be positive and
+  finite. The targets are aiming marks drawn as concentric orange rings
   and do not change the floor.
 - **Animation.** The rendered path is dimple's flight points followed by its
   ground points. Both carry absolute shot times, so the app plays the

@@ -95,35 +95,40 @@ mod tests {
         })
     }
 
+    fn push() -> ShotInput {
+        ShotInput {
+            launch_azimuth_deg: 4.0,
+            ..ShotInput::seven_iron()
+        }
+    }
+
+    fn hook() -> ShotInput {
+        ShotInput {
+            launch_azimuth_deg: -1.0,
+            sidespin_rpm: -900.0,
+            ..ShotInput::seven_iron()
+        }
+    }
+
     fn landing(input: &ShotInput) -> DVec3 {
         let flight = simulate_flight(input, &BallModel::TOUR, &Environment::SEA_LEVEL);
         flight.points.last().expect("flight has points").pos
     }
 
-    /// A shot landing `|lateral|` m off the target line misses a green on
-    /// the line narrower than that and is caught by a wider one.
-    fn assert_green_catches_only_when_wide_enough(input: &ShotInput, land: DVec3) {
-        let off = land.z.abs();
-        let narrow = shot(input, green_at(land, off - 2.0));
-        let wide = shot(input, green_at(land, off + 2.0));
-        assert_eq!(narrow.ground.contacts[0].surface, Surface::FAIRWAY);
-        assert_eq!(wide.ground.contacts[0].surface, Surface::GREEN);
-    }
-
     #[test]
-    fn default_range_is_all_fairway() {
+    fn no_green_is_all_fairway() {
         let range = Range::new();
-        assert_eq!(range.green, None);
-        assert_eq!(surface_at(0.0, 0.0, range.green), Surface::FAIRWAY);
+        let green = None;
+        assert_eq!(surface_at(0.0, 0.0, green), Surface::FAIRWAY);
         for t in &range.targets {
             let (x, z) = (f64::from(t.center[0]), f64::from(t.center[2]));
-            assert_eq!(surface_at(x, z, range.green), Surface::FAIRWAY);
+            assert_eq!(surface_at(x, z, green), Surface::FAIRWAY);
             let r = f64::from(t.outer_radius_m());
-            assert_eq!(surface_at(x + r * 0.5, z, range.green), Surface::FAIRWAY);
+            assert_eq!(surface_at(x + r * 0.5, z, green), Surface::FAIRWAY);
         }
         for z in (0..300).step_by(5) {
             for x in (-60..=60).step_by(5) {
-                let s = surface_at(f64::from(x), f64::from(z), range.green);
+                let s = surface_at(f64::from(x), f64::from(z), green);
                 assert_eq!(s, Surface::FAIRWAY, "({x}, {z})");
             }
         }
@@ -140,7 +145,7 @@ mod tests {
             dx.hypot(dz) < f64::from(t.outer_radius_m())
         });
         assert!(on_target, "seven iron lands on a target: {land:?}");
-        let result = shot(&input, Range::new().green);
+        let result = shot(&input, None);
         assert!(
             result
                 .ground
@@ -238,49 +243,36 @@ mod tests {
     }
 
     #[test]
-    fn pushed_shot_lands_right_of_the_green() {
-        let input = ShotInput {
-            launch_azimuth_deg: 4.0,
-            ..ShotInput::seven_iron()
-        };
-        let land = landing(&input);
+    fn pushed_shot_lands_right_of_the_target_line() {
+        let land = landing(&push());
         assert!(
             land.z > 5.0,
             "pushed shot should land right: z={:.2}",
             land.z
         );
         assert!(physics_to_scene(land).x < -5.0);
-        assert_green_catches_only_when_wide_enough(&input, land);
     }
 
     #[test]
-    fn pulled_shot_lands_left_of_the_green() {
-        let input = ShotInput {
-            launch_azimuth_deg: -4.0,
-            ..ShotInput::seven_iron()
-        };
-        let land = landing(&input);
-        assert!(
-            land.z < -5.0,
-            "pulled shot should land left: z={:.2}",
-            land.z
-        );
-        assert!(physics_to_scene(land).x > 5.0);
-        assert_green_catches_only_when_wide_enough(&input, land);
-    }
-
-    #[test]
-    fn hook_lands_left_of_the_green() {
-        let input = ShotInput {
-            launch_azimuth_deg: -1.0,
-            sidespin_rpm: -900.0,
-            ..ShotInput::seven_iron()
-        };
-        let land = landing(&input);
+    fn hook_lands_left_of_the_target_line() {
+        let land = landing(&hook());
         assert!(land.z < -5.0, "hook should land left: z={:.2}", land.z);
         let c = physics_to_scene(land);
         assert!(screen_x(c) < 0.0, "hook lands on the left of the screen");
-        assert_green_catches_only_when_wide_enough(&input, land);
+    }
+
+    // A green on the target line is symmetric about it, so this checks the
+    // size of the lateral miss, not its side (the side is asserted above).
+    #[test]
+    fn green_catches_a_shot_only_if_wider_than_its_lateral_miss() {
+        for input in [push(), hook()] {
+            let land = landing(&input);
+            let off = land.z.abs();
+            let narrow = shot(&input, green_at(land, off - 2.0));
+            let wide = shot(&input, green_at(land, off + 2.0));
+            assert_eq!(narrow.ground.contacts[0].surface, Surface::FAIRWAY);
+            assert_eq!(wide.ground.contacts[0].surface, Surface::GREEN);
+        }
     }
 
     // LATERAL SIGN: a slice (positive azimuth and sidespin) finishes right

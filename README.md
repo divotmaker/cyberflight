@@ -7,6 +7,7 @@ A (very) digital driving range for golf simulators.
 > (bounce and roll after landing, so run and total distance) is **beta** and not yet validated
 > against measured data. See [docs/AERO.md](docs/AERO.md).
 > The whole range plays as fairway; the orange target rings are aiming marks only.
+> An optional circular green is off by default; see [docs/AERO.md](docs/AERO.md) for how to enable it.
 
 ![Empty Range](./screens/empty_range.png "Empty Range")
 
