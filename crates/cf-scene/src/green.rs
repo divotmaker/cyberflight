@@ -2,9 +2,10 @@
 //!
 //! A [`Range`](crate::range::Range) has at most one green. Inside it the
 //! range floor is [`Surface::GREEN`](dimple::ground::Surface::GREEN), and
-//! the renderers draw its edge as a single ring ([`generate_green_edge`]).
-//! A new range has none ([`DEFAULT_GREEN`] is `None`), so the whole floor
-//! is fairway.
+//! the renderers draw its edge as a single ring ([`generate_green_edge`]),
+//! the only circle on the range floor. A new range has none
+//! ([`DEFAULT_GREEN`] is `None`), so the whole floor is fairway and no
+//! circle is drawn.
 //!
 //! [`Range::green`](crate::range::Range::green) is the knob: set it to a
 //! [`GreenConfig`] before the range is drawn and played, e.g.
@@ -16,7 +17,6 @@
 use glam::Vec3;
 
 use crate::grid::{GridConfig, GridVertex};
-use crate::target::push_ring;
 
 /// A circular green centred on the target line.
 ///
@@ -63,28 +63,42 @@ impl GreenConfig {
     }
 }
 
+/// Line segments in the green's edge.
+pub const RING_SEGMENTS: u32 = 96;
+
 /// The edge of `green` as `LINE_LIST` vertex pairs on the range floor:
-/// one full-strength ring of [`GreenConfig::radius_m`] with
-/// [`RING_SEGMENTS`](crate::target::RING_SEGMENTS) segments, 1 cm above
-/// Y = 0 and faded like `grid`, in the style of the target rings
-/// ([`generate_target_rings`](crate::target::generate_target_rings)).
+/// one ring of [`GreenConfig::radius_m`] with [`RING_SEGMENTS`] segments,
+/// 1 cm above Y = 0 so it draws over the grid, with the grid's distance
+/// fade over `grid`'s [`fade_distance_m`](GridConfig::fade_distance_m)
+/// (see [`GridVertex`]).
 #[must_use]
 pub fn generate_green_edge(green: &GreenConfig, grid: &GridConfig) -> Vec<GridVertex> {
-    let mut verts = Vec::new();
-    push_ring(
-        &mut verts,
-        green.center_vec3(),
-        green.radius_m(),
-        1.0,
-        grid.fade_distance_m(),
-    );
+    let center = green.center_vec3();
+    let radius = green.radius_m();
+    let fade_dist = grid.fade_distance_m();
+    let point = |seg: u32| {
+        let angle = (seg as f32 / RING_SEGMENTS as f32) * std::f32::consts::TAU;
+        let p = Vec3::new(
+            center.x + radius * angle.cos(),
+            0.01,
+            center.z + radius * angle.sin(),
+        );
+        GridVertex {
+            position: p.into(),
+            fade: (p.length() / fade_dist).min(1.0),
+        }
+    };
+    let mut verts = Vec::with_capacity(2 * RING_SEGMENTS as usize);
+    for seg in 0..RING_SEGMENTS {
+        verts.push(point(seg));
+        verts.push(point(seg + 1));
+    }
     verts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::RING_SEGMENTS;
 
     #[test]
     #[cfg(debug_assertions)]
@@ -114,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_is_one_full_strength_ring_of_half_the_diameter() {
+    fn edge_is_one_ring_of_half_the_diameter() {
         let green = GreenConfig {
             distance_m: 140.0,
             diameter_m: 28.0,
@@ -129,7 +143,7 @@ mod tests {
             assert!(p.y > 0.0, "edge should be slightly above Y=0");
             let r = Vec3::new(p.x - center.x, 0.0, p.z - center.z).length();
             assert!((r - 14.0).abs() < 1e-3, "radius {r}");
-            // Full strength: the plain grid distance fade.
+            // The grid's distance fade.
             let expected = (p.length() / fade_dist).min(1.0);
             assert!((v.fade - expected).abs() < 1e-6);
         }

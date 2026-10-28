@@ -5,8 +5,7 @@
 //! a dimple [`Surface`] preset, and [`RangeTerrain`] serves those to
 //! dimple's ground physics, which samples the terrain under the ball at
 //! every step: a ball that lands short of the green and runs onto it rolls
-//! on as a green, and one that runs off it rolls out on fairway. Targets
-//! are aiming marks only and do not change the floor.
+//! on as a green, and one that runs off it rolls out on fairway.
 
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
@@ -80,7 +79,6 @@ mod tests {
     use super::*;
     use crate::frame::screen_x;
     use crate::range::Range;
-    use crate::target::default_targets;
 
     fn shot(input: &ShotInput, green: Option<GreenConfig>) -> ShotResult {
         simulate_shot(input, &BallModel::TOUR, &Environment::SEA_LEVEL, green)
@@ -117,15 +115,7 @@ mod tests {
 
     #[test]
     fn no_green_is_all_fairway() {
-        let range = Range::new();
         let green = None;
-        assert_eq!(surface_at(0.0, 0.0, green), Surface::FAIRWAY);
-        for t in &range.targets {
-            let (x, z) = (f64::from(t.center[0]), f64::from(t.center[2]));
-            assert_eq!(surface_at(x, z, green), Surface::FAIRWAY);
-            let r = f64::from(t.outer_radius_m());
-            assert_eq!(surface_at(x + r * 0.5, z, green), Surface::FAIRWAY);
-        }
         for z in (0..300).step_by(5) {
             for x in (-60..=60).step_by(5) {
                 let s = surface_at(f64::from(x), f64::from(z), green);
@@ -135,17 +125,10 @@ mod tests {
     }
 
     #[test]
-    fn targets_do_not_change_the_floor() {
-        // A shot landing on the 150 yd target rolls out on fairway.
-        let input = ShotInput::seven_iron();
-        let land = physics_to_scene(landing(&input));
-        let on_target = default_targets().iter().any(|t| {
-            let dx = land.x - f64::from(t.center[0]);
-            let dz = land.z - f64::from(t.center[2]);
-            dx.hypot(dz) < f64::from(t.outer_radius_m())
-        });
-        assert!(on_target, "seven iron lands on a target: {land:?}");
-        let result = shot(&input, None);
+    fn default_range_plays_as_fairway() {
+        let green = Range::new().green;
+        assert_eq!(green, None);
+        let result = shot(&ShotInput::seven_iron(), green);
         assert!(
             result
                 .ground

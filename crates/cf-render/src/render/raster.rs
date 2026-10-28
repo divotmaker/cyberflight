@@ -158,7 +158,7 @@ impl Renderer {
     /// Draw all scene geometry with the given view-projection matrix.
     ///
     /// Assumes viewport and scissor are already set. Binds pipelines, sets
-    /// push constants, and issues draw calls for grid, target rings, tee
+    /// push constants, and issues draw calls for grid, green edge, tee
     /// box, ball, and in-flight geometry.
     ///
     /// # Safety
@@ -190,9 +190,9 @@ impl Renderer {
             device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
 
-            // Target rings (LINE_LIST, orange, 1px)
-            if let Some(rings) = &self.target_rings {
-                rings.record(device, cb, &self.pipeline, view_proj);
+            // Green edge (LINE_LIST, orange, 1px)
+            if let Some(edge) = &self.green_edge {
+                edge.record(device, cb, &self.pipeline, view_proj);
             }
 
             // Tee box fill (black quad — masks grid lines under the tee box)

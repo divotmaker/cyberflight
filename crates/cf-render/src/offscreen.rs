@@ -6,7 +6,6 @@ use cf_scene::camera::Camera;
 use cf_scene::color;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
-use cf_scene::target::Target;
 use cf_scene::tee::{
     TeeBox, generate_ball, generate_ball_at, generate_ball_glow, generate_ball_glow_at,
     generate_tee_border, generate_tee_fill,
@@ -16,12 +15,12 @@ use cf_scene::trail::{TrailPoint, generate_trail_glow, generate_trail_line};
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
 use crate::framebuffer::OffscreenTarget;
+use crate::green::GreenEdge;
 use crate::pipeline::{GridPipeline, GridPushConstants};
 use crate::readback::FrameBuffers;
 use crate::render::FlightRenderData;
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::{RtPipeline, RtPushConstants};
-use crate::targets::TargetRings;
 
 /// Offscreen renderer for headless PNG generation.
 pub struct OffscreenRenderer {
@@ -90,9 +89,8 @@ pub struct OffscreenRenderer {
     flight_glow_capacity: vk::DeviceSize,
     /// When true, draw the static ball on tee. When false, draw from dynamic flight buffers.
     ball_on_tee_box: bool,
-    /// Rings of the range's targets and the green's edge (see
-    /// [`OffscreenRenderer::set_targets`]).
-    target_rings: Option<TargetRings>,
+    /// Edge of the range's green, if any (see [`OffscreenRenderer::set_green`]).
+    green_edge: Option<GreenEdge>,
 }
 
 /// Offscreen image format (RGBA8 sRGB for correct gamma in PNG output).
@@ -271,7 +269,7 @@ impl OffscreenRenderer {
             flight_glow_count: 0,
             flight_glow_capacity: 0,
             ball_on_tee_box: true,
-            target_rings: None,
+            green_edge: None,
         })
     }
 
@@ -427,7 +425,7 @@ impl OffscreenRenderer {
             flight_glow_count: 0,
             flight_glow_capacity: 0,
             ball_on_tee_box: true,
-            target_rings: None,
+            green_edge: None,
         })
     }
 
@@ -714,7 +712,7 @@ impl OffscreenRenderer {
             flight_glow_count: 0,
             flight_glow_capacity: 0,
             ball_on_tee_box: true,
-            target_rings: None,
+            green_edge: None,
         })
     }
 
@@ -728,7 +726,7 @@ impl OffscreenRenderer {
         (proj * view).to_cols_array_2d()
     }
 
-    /// Draw all scene geometry (grid, target rings, tee box, ball, glow) with
+    /// Draw all scene geometry (grid, green edge, tee box, ball, glow) with
     /// the given view-projection.
     ///
     /// Assumes viewport and scissor are already set, and we're inside a render pass.
@@ -780,9 +778,9 @@ impl OffscreenRenderer {
             device.cmd_bind_vertex_buffers(cb, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cb, self.vertex_count, 1, 0, 0);
 
-            // Target rings (LINE_LIST, orange)
-            if let Some(rings) = &self.target_rings {
-                rings.record(device, cb, &self.pipeline, view_proj);
+            // Green edge (LINE_LIST, orange)
+            if let Some(edge) = &self.green_edge {
+                edge.record(device, cb, &self.pipeline, view_proj);
             }
 
             // Tee box fill (black)
@@ -933,17 +931,15 @@ impl OffscreenRenderer {
         self.rt_pipeline.is_some()
     }
 
-    /// Draw `targets` as concentric rings and the edge of `green` (if any)
-    /// as one ring on the range floor, faded like `grid`. Replaces any rings
-    /// set before.
-    pub fn set_targets(
+    /// Draw the edge of `green` as one ring on the range floor, faded like
+    /// `grid`; `None` draws nothing. Replaces any green set before.
+    pub fn set_green(
         &mut self,
-        targets: &[Target],
         green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<(), RenderError> {
-        if let Some(old) = self.target_rings.take() {
-            // SAFETY: Waiting idle so the old ring buffer is no longer in use.
+        if let Some(old) = self.green_edge.take() {
+            // SAFETY: Waiting idle so the old edge buffer is no longer in use.
             unsafe {
                 self.gpu
                     .device
@@ -952,11 +948,10 @@ impl OffscreenRenderer {
                 old.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
         }
-        self.target_rings = TargetRings::new(
+        self.green_edge = GreenEdge::new(
             &self.gpu.device,
             &mut self.gpu.allocator,
             Self::create_vertex_buffer,
-            targets,
             green,
             grid,
         )?;
@@ -2017,8 +2012,8 @@ impl Drop for OffscreenRenderer {
         unsafe {
             self.gpu.device.device_wait_idle().ok();
 
-            if let Some(rings) = self.target_rings.take() {
-                rings.destroy(&self.gpu.device, &mut self.gpu.allocator);
+            if let Some(edge) = self.green_edge.take() {
+                edge.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
             self.gpu.device.destroy_fence(self.fence, None);

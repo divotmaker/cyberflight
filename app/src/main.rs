@@ -116,12 +116,8 @@ impl App {
         let mut renderer =
             Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
         renderer
-            .set_targets(
-                &self.range.targets,
-                self.range.green.as_ref(),
-                &self.range.grid,
-            )
-            .context("failed to upload target rings")?;
+            .set_green(self.range.green.as_ref(), &self.range.grid)
+            .context("failed to upload the green")?;
         eprintln!(
             "Renderer initialized: {}x{}",
             renderer.swapchain.extent.width, renderer.swapchain.extent.height

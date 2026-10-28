@@ -9,7 +9,6 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use cf_scene::camera::Camera;
 use cf_scene::green::GreenConfig;
 use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
-use cf_scene::target::Target;
 use cf_scene::tee::{
     TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill,
 };
@@ -23,11 +22,11 @@ pub struct FlightRenderData {
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
+use crate::green::GreenEdge;
 use crate::mode::RenderMode;
 use crate::pipeline::{DEPTH_STENCIL_FORMAT, GridPipeline};
 use crate::rt_offscreen::build_scene_geometry;
 use crate::rt_pipeline::RtPipeline;
-use crate::targets::TargetRings;
 use crate::window::Swapchain;
 
 /// Fraction of screen width used by the chase camera viewport (right side).
@@ -121,9 +120,8 @@ pub struct Renderer {
     rt_needs_update: bool,
     /// Optional chase camera for the right 20% viewport (set per-frame).
     pub(super) chase_camera: Option<Camera>,
-    /// Rings of the range's targets and the green's edge (see
-    /// [`Renderer::set_targets`]).
-    pub(super) target_rings: Option<TargetRings>,
+    /// Edge of the range's green, if any (see [`Renderer::set_green`]).
+    pub(super) green_edge: Option<GreenEdge>,
 }
 
 impl Renderer {
@@ -344,7 +342,7 @@ impl Renderer {
             rt_trail_fade_dist: 0.0,
             rt_needs_update: false,
             chase_camera: None,
-            target_rings: None,
+            green_edge: None,
         })
     }
 
@@ -673,17 +671,15 @@ impl Renderer {
         }
     }
 
-    /// Draw `targets` as concentric rings and the edge of `green` (if any)
-    /// as one ring on the range floor, faded like `grid`. Replaces any rings
-    /// set before.
-    pub fn set_targets(
+    /// Draw the edge of `green` as one ring on the range floor, faded like
+    /// `grid`; `None` draws nothing. Replaces any green set before.
+    pub fn set_green(
         &mut self,
-        targets: &[Target],
         green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<(), RenderError> {
-        if let Some(old) = self.target_rings.take() {
-            // SAFETY: Waiting idle so the old ring buffer is no longer in use.
+        if let Some(old) = self.green_edge.take() {
+            // SAFETY: Waiting idle so the old edge buffer is no longer in use.
             unsafe {
                 self.gpu
                     .device
@@ -692,11 +688,10 @@ impl Renderer {
                 old.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
         }
-        self.target_rings = TargetRings::new(
+        self.green_edge = GreenEdge::new(
             &self.gpu.device,
             &mut self.gpu.allocator,
             Self::create_vertex_buffer,
-            targets,
             green,
             grid,
         )?;
@@ -1325,8 +1320,8 @@ impl Drop for Renderer {
         unsafe {
             self.gpu.device.device_wait_idle().ok();
 
-            if let Some(rings) = self.target_rings.take() {
-                rings.destroy(&self.gpu.device, &mut self.gpu.allocator);
+            if let Some(edge) = self.green_edge.take() {
+                edge.destroy(&self.gpu.device, &mut self.gpu.allocator);
             }
 
             for &sem in &self.image_available {

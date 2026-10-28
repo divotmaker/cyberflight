@@ -8,6 +8,5 @@ pub mod hud;
 pub mod hud_font;
 pub mod range;
 pub mod shot;
-pub mod target;
 pub mod tee;
 pub mod trail;

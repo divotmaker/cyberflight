@@ -99,8 +99,8 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         .init_streaming()
         .context("failed to initialize streaming buffers")?;
     renderer
-        .set_targets(&range.targets, range.green.as_ref(), &range.grid)
-        .context("failed to upload target rings")?;
+        .set_green(range.green.as_ref(), &range.grid)
+        .context("failed to upload the green")?;
 
     // Start ffmpeg encoder.
     let mut encoder =

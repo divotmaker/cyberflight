@@ -1,6 +1,6 @@
-//! Range rings: the targets' concentric neon circles and the green's edge
-//! on the range floor, drawn by both the windowed and the offscreen
-//! renderer with the grid's line pipeline.
+//! The edge of the range's optional green: the one circle on the range
+//! floor, drawn by both the windowed and the offscreen renderer with the
+//! grid's line pipeline. With no green nothing is drawn.
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator};
@@ -8,7 +8,6 @@ use gpu_allocator::vulkan::{Allocation, Allocator};
 use cf_scene::color;
 use cf_scene::green::{GreenConfig, generate_green_edge};
 use cf_scene::grid::{GridConfig, GridVertex};
-use cf_scene::target::{Target, generate_target_rings};
 
 use crate::error::RenderError;
 use crate::pipeline::{GridPipeline, GridPushConstants};
@@ -20,28 +19,29 @@ pub(crate) type CreateVertexBuffer = fn(
     &[GridVertex],
 ) -> Result<(vk::Buffer, Allocation), RenderError>;
 
-/// Uploaded ring geometry for a range's targets and green.
-pub(crate) struct TargetRings {
+/// Edge vertices of `green`: one ring, or none when there is no green.
+fn edge_vertices(green: Option<&GreenConfig>, grid: &GridConfig) -> Vec<GridVertex> {
+    green.map_or_else(Vec::new, |green| generate_green_edge(green, grid))
+}
+
+/// Uploaded edge geometry of a range's green.
+pub(crate) struct GreenEdge {
     buffer: vk::Buffer,
     allocation: Allocation,
     count: u32,
 }
 
-impl TargetRings {
-    /// Upload the rings of `targets` and the edge of `green`, faded like
-    /// `grid`. `None` when there is nothing to draw.
+impl GreenEdge {
+    /// Upload the edge of `green`, faded like `grid`. `None` when there is
+    /// no green.
     pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
         create: CreateVertexBuffer,
-        targets: &[Target],
         green: Option<&GreenConfig>,
         grid: &GridConfig,
     ) -> Result<Option<Self>, RenderError> {
-        let mut verts = generate_target_rings(targets, grid);
-        if let Some(green) = green {
-            verts.extend(generate_green_edge(green, grid));
-        }
+        let verts = edge_vertices(green, grid);
         if verts.is_empty() {
             return Ok(None);
         }
@@ -53,7 +53,7 @@ impl TargetRings {
         }))
     }
 
-    /// Record the ring draw: 1 px lines in [`color::TARGET_RING`]. Binds
+    /// Record the edge draw: 1 px lines in [`color::GREEN_EDGE`]. Binds
     /// `pipeline` itself, so any pipeline may be bound before the call.
     ///
     /// # Safety
@@ -68,7 +68,7 @@ impl TargetRings {
     ) {
         let pc = GridPushConstants {
             view_proj,
-            color: color::TARGET_RING.into(),
+            color: color::GREEN_EDGE.into(),
         };
         // SAFETY: Caller guarantees an active render pass; the buffer lives
         // until `destroy`, and the push constants match the pipeline layout.
@@ -101,5 +101,37 @@ impl TargetRings {
             device.destroy_buffer(self.buffer, None);
         }
         let _ = allocator.free(self.allocation);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cf_scene::green::RING_SEGMENTS;
+    use cf_scene::range::Range;
+    use glam::Vec3;
+
+    #[test]
+    fn default_range_draws_no_circle() {
+        let range = Range::new();
+        assert!(edge_vertices(range.green.as_ref(), &range.grid).is_empty());
+    }
+
+    #[test]
+    fn a_green_draws_exactly_one_circle() {
+        let mut range = Range::new();
+        let green = GreenConfig {
+            distance_m: 137.16,
+            diameter_m: 30.0,
+        };
+        range.green = Some(green);
+        let verts = edge_vertices(range.green.as_ref(), &range.grid);
+        assert_eq!(verts.len(), 2 * RING_SEGMENTS as usize);
+        let center = green.center_vec3();
+        for v in &verts {
+            let p = Vec3::from(v.position);
+            let r = Vec3::new(p.x - center.x, 0.0, p.z - center.z).length();
+            assert!((r - green.radius_m()).abs() < 1e-3, "radius {r}");
+        }
     }
 }

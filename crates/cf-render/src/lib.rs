@@ -1,6 +1,7 @@
 pub mod context;
 pub mod error;
 pub mod framebuffer;
+mod green;
 pub mod mode;
 pub mod offscreen;
 pub mod pipeline;
@@ -9,5 +10,4 @@ pub mod render;
 pub mod rt_offscreen;
 pub mod rt_pipeline;
 pub mod stream;
-mod targets;
 pub mod window;
