@@ -1,21 +1,27 @@
 //! Headless screenshot generator for the driving range.
 //!
 //! Renders driving range views to PNG files using offscreen Vulkan rendering.
-//! Run: `cargo run -p cyberflight --example screenshot`
+//! Run: `cargo run -p cyberflight --example screenshot [-- --out <dir>]`
 //!
-//! Output:
-//!   - `screenshots/cyberflight.png` — **HERO**: driver mid-flight, chase camera + HUD
-//!   - `screenshots/driving_range.png` — empty range with ball on tee box
-//!   - `screenshots/flight.png` — 7-iron mid-flight with tracer trail (close side view)
-//!   - `screenshots/flight_tee.png` — 7-iron mid-flight from tee box (golfer's view)
-//!   - `screenshots/flight_wide.png` — 7-iron full tracer in frame (wide side view)
-//!   - `screenshots/flight_wide_45.png` — 7-iron full tracer from 45° overhead angle
-//!   - `screenshots/flight_hud.png` — 7-iron mid-flight from tee box with telemetry HUD
+//! Output, in `screenshots/` or the `--out` directory:
+//!   - `cyberflight.png` — **HERO**: driver mid-flight, chase camera + HUD
+//!   - `driving_range.png` — empty range with ball on tee box
+//!   - `flight.png` — 7-iron mid-flight with tracer trail (close side view)
+//!   - `flight_tee.png` — 7-iron mid-flight from tee box (golfer's view)
+//!   - `flight_wide.png` — 7-iron full tracer in frame (wide side view)
+//!   - `flight_wide_45.png` — 7-iron full tracer from 45° overhead angle
+//!   - `flight_hud.png` — 7-iron mid-flight from tee box with telemetry HUD
+//!   - `driving_range_rt.png`, `flight_rt.png`, `flight_tee_rt.png`,
+//!     `flight_wide_rt.png`, `flight_wide_45_rt.png` — ray-traced versions,
+//!     when the GPU supports ray tracing
+//!
+//! Compare two runs with `cargo run -p cf-test -- compare <dir_a> <dir_b>`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use glam::Vec3;
 use image::{ImageBuffer, Rgba};
 
@@ -35,7 +41,38 @@ const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 /// Hero screenshot renders at 2x then downscales for anti-aliasing.
 const HERO_SCALE: u32 = 2;
-const OUTPUT_DIR: &str = "screenshots";
+/// Output directory used without `--out`, relative to the working directory.
+const DEFAULT_OUTPUT_DIR: &str = "screenshots";
+
+/// Output directory, set once from the command line in `main`.
+static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Path of the screenshot `name` in the output directory.
+fn out_path(name: &str) -> String {
+    let dir = OUTPUT_DIR
+        .get()
+        .map_or(Path::new(DEFAULT_OUTPUT_DIR), PathBuf::as_path);
+    dir.join(name).display().to_string()
+}
+
+/// Parse `--out <dir>` (or `--out=<dir>`). Returns `None` for `--help`.
+fn parse_out_dir(mut args: impl Iterator<Item = String>) -> Result<Option<PathBuf>> {
+    let mut out = PathBuf::from(DEFAULT_OUTPUT_DIR);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(None),
+            "--out" => match args.next() {
+                Some(dir) => out = dir.into(),
+                None => bail!("--out needs a directory"),
+            },
+            _ => match arg.strip_prefix("--out=") {
+                Some(dir) => out = dir.into(),
+                None => bail!("unknown argument '{arg}' (usage: screenshot [--out <dir>])"),
+            },
+        }
+    }
+    Ok(Some(out))
+}
 
 fn save_png(frame: &FrameBuffers, path: &str) -> Result<()> {
     let img: ImageBuffer<Rgba<u8>, _> =
@@ -65,7 +102,7 @@ fn render_driving_range(range: &Range, camera: &Camera) -> Result<()> {
         .set_targets(&range.targets, &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/driving_range.png"))
+    save_png(&frame, &out_path("driving_range.png"))
 }
 
 /// Simulated flight snapshot: ball position, tracer tail, and shot data for HUD.
@@ -236,7 +273,7 @@ fn render_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .context("failed to upload target rings")?;
 
     let frame = renderer.render(&flight_camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight.png"))
+    save_png(&frame, &out_path("flight.png"))
 }
 
 fn render_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -279,7 +316,7 @@ fn render_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .context("failed to upload target rings")?;
 
     let frame = renderer.render(&wide_camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide.png"))
+    save_png(&frame, &out_path("flight_wide.png"))
 }
 
 fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -321,7 +358,7 @@ fn render_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .context("failed to upload target rings")?;
 
     let frame = renderer.render(&wide45_camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide_45.png"))
+    save_png(&frame, &out_path("flight_wide_45.png"))
 }
 
 fn render_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -345,7 +382,7 @@ fn render_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     let frame = renderer
         .render(&Camera::driving_range())
         .context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_tee.png"))
+    save_png(&frame, &out_path("flight_tee.png"))
 }
 
 fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -406,7 +443,7 @@ fn render_flight_hud(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     let frame = renderer
         .render(&Camera::driving_range())
         .context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_hud.png"))
+    save_png(&frame, &out_path("flight_hud.png"))
 }
 
 fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -496,7 +533,7 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         HEIGHT,
         image::imageops::FilterType::Lanczos3,
     );
-    let path = format!("{OUTPUT_DIR}/cyberflight.png");
+    let path = out_path("cyberflight.png");
     downscaled.save(&path).context("failed to save PNG")?;
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     eprintln!(
@@ -529,7 +566,7 @@ fn render_rt_driving_range(range: &Range, camera: &Camera) -> Result<()> {
         }
     );
     let frame = renderer.render(camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/driving_range_rt.png"))
+    save_png(&frame, &out_path("driving_range_rt.png"))
 }
 
 fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -557,7 +594,7 @@ fn render_rt_flight(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .set_targets(&range.targets, &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&flight_camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_rt.png"))
+    save_png(&frame, &out_path("flight_rt.png"))
 }
 
 fn render_rt_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -578,7 +615,7 @@ fn render_rt_flight_tee(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .set_targets(&range.targets, &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_tee_rt.png"))
+    save_png(&frame, &out_path("flight_tee_rt.png"))
 }
 
 fn render_rt_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -614,7 +651,7 @@ fn render_rt_flight_wide(range: &Range, snap: &FlightSnapshot) -> Result<()> {
         .set_targets(&range.targets, &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&wide_camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide_rt.png"))
+    save_png(&frame, &out_path("flight_wide_rt.png"))
 }
 
 fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> {
@@ -650,14 +687,23 @@ fn render_rt_flight_wide_45(range: &Range, snap: &FlightSnapshot) -> Result<()> 
         .set_targets(&range.targets, &range.grid)
         .context("failed to upload target rings")?;
     let frame = renderer.render(&wide45_camera).context("render failed")?;
-    save_png(&frame, &format!("{OUTPUT_DIR}/flight_wide_45_rt.png"))
+    save_png(&frame, &out_path("flight_wide_45_rt.png"))
 }
 
 fn main() -> Result<()> {
+    let Some(out_dir) = parse_out_dir(std::env::args().skip(1))? else {
+        println!("usage: screenshot [--out <dir>]   (default: {DEFAULT_OUTPUT_DIR}/)");
+        return Ok(());
+    };
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+    if OUTPUT_DIR.set(out_dir).is_err() {
+        bail!("output directory set twice");
+    }
+
     let range = Range::new();
     let camera = Camera::driving_range();
 
-    fs::create_dir_all(OUTPUT_DIR).context("failed to create screenshots dir")?;
     eprintln!("Initializing offscreen renderers ({WIDTH}x{HEIGHT})...");
 
     // ── Hero screenshot (7-iron, tee box + chase camera + HUD) ──
