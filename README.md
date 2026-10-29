@@ -11,6 +11,10 @@ A (very) digital driving range for golf simulators.
 
 ![Empty Range](./screens/empty_range.png "Empty Range")
 
+![In flight, ray traced, with the HUD and chase camera](./screens/in_flight.png "In flight")
+
+![The tracer from 45° above, reflected in the ray-traced floor](./screens/in_flight_45.png "In flight from 45°")
+
 ## Launch Monitor Integration
 
 cyberflight receives live shot data from [flighthook](https://github.com/divotmaker/flighthook), an open-source golf automation bus. flighthook connects to your launch monitor and broadcasts shot data over a local WebSocket (the [Flight Relay Protocol](https://github.com/flightrelay/spec)); cyberflight subscribes as a client to render ball flights in real time.
