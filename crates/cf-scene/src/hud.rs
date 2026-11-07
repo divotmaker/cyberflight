@@ -420,7 +420,7 @@ fn build_rect_fill(x_left: f32, x_right: f32, y_top: f32, y_bottom: f32) -> Vec<
 }
 
 /// Build the HUD geometry of a short `text` notice: one line in a panel,
-/// centred between the side panels at the top of the screen, in the style of
+/// centered between the side panels at the top of the screen, in the style of
 /// the telemetry panel.
 #[must_use]
 pub fn build_notice(text: &str, screen_w: f32, screen_h: f32) -> HudGeometry {
@@ -571,7 +571,7 @@ mod tests {
         assert_eq!((rows[0].label, rows[0].value), ("LAUNCH MONITOR", "READY"));
         let offline = system_rows(&one, false);
         assert_eq!(offline[0].value, "-");
-        assert!(offline[0].label_fade < 0.0, "alert colour");
+        assert!(offline[0].label_fade < 0.0, "alert color");
         assert_eq!(system_rows(&HashMap::new(), true)[0].value, "UNKNOWN");
     }
 
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn notice_is_centred_between_the_panels() {
+    fn notice_is_centered_between_the_panels() {
         for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0), (3840.0, 2160.0)] {
             let text = "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE";
             let geom = build_notice(text, w, h);
@@ -649,7 +649,7 @@ mod tests {
             let (left, right) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(0.0, f32::max));
             assert!(
                 ((left + right) * 0.5 - w * 0.5).abs() < 1.0,
-                "centred at {w}x{h}"
+                "centered at {w}x{h}"
             );
             assert!(
                 left > w * PANEL_FRAC && right < w * (1.0 - PANEL_FRAC),

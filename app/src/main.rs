@@ -24,9 +24,9 @@ use dimple::environment::Environment;
 
 use flight::{FlightManager, FrpState};
 
-/// How often a minimised window wakes to take in shots and advance the
+/// How often a minimized window wakes to take in shots and advance the
 /// flights without drawing.
-const MINIMISED_TICK: Duration = Duration::from_millis(200);
+const MINIMIZED_TICK: Duration = Duration::from_millis(200);
 
 /// How long the notice of a key press stays on screen.
 const NOTICE_DURATION: Duration = Duration::from_millis(2500);
@@ -49,17 +49,17 @@ fn reflections_notice(mode: RenderMode, ray_tracing_available: bool) -> &'static
     }
 }
 
-/// Whether a window of `size` is minimised: Windows reports a minimised
+/// Whether a window of `size` is minimized: Windows reports a minimized
 /// window as a resize to zero width and height.
-fn is_minimised(size: PhysicalSize<u32>) -> bool {
+fn is_minimized(size: PhysicalSize<u32>) -> bool {
     size.width == 0 || size.height == 0
 }
 
 /// How the event loop waits: on window events while visible (redraws keep
-/// the loop running), on a [`MINIMISED_TICK`] timer while minimised.
-fn control_flow(minimised: bool, now: Instant) -> ControlFlow {
-    if minimised {
-        ControlFlow::WaitUntil(now + MINIMISED_TICK)
+/// the loop running), on a [`MINIMIZED_TICK`] timer while minimized.
+fn control_flow(minimized: bool, now: Instant) -> ControlFlow {
+    if minimized {
+        ControlFlow::WaitUntil(now + MINIMIZED_TICK)
     } else {
         ControlFlow::Wait
     }
@@ -76,9 +76,9 @@ struct App {
     start_time: Instant,
     frame_count: u64,
     fps_timer: Instant,
-    /// The window is minimised: nothing is drawn, and [`App::advance`] runs
+    /// The window is minimized: nothing is drawn, and [`App::advance`] runs
     /// on a timer instead of per frame.
-    minimised: bool,
+    minimized: bool,
     /// The notice shown over the scene and when it was raised.
     notice: Option<(&'static str, Instant)>,
     /// Why the event loop was stopped, when the app could not run.
@@ -100,7 +100,7 @@ impl App {
             start_time,
             frame_count: 0,
             fps_timer: Instant::now(),
-            minimised: false,
+            minimized: false,
             notice: None,
             fatal: None,
         }
@@ -164,12 +164,12 @@ impl App {
         event_loop.exit();
     }
 
-    /// Track the minimised state from a window resize. Returns whether the
+    /// Track the minimized state from a window resize. Returns whether the
     /// window was restored, so drawing has to be restarted.
-    fn track_minimised(&mut self, size: PhysicalSize<u32>) -> bool {
-        let was_minimised = self.minimised;
-        self.minimised = is_minimised(size);
-        was_minimised && !self.minimised
+    fn track_minimized(&mut self, size: PhysicalSize<u32>) -> bool {
+        let was_minimized = self.minimized;
+        self.minimized = is_minimized(size);
+        was_minimized && !self.minimized
     }
 
     /// Launch the shots that have arrived, each from its arrival time, as of
@@ -294,10 +294,10 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             // Without a renderer nothing paces the loop, so it is not redrawn
-            // (the app is exiting; see `fail`). A minimised window is not
+            // (the app is exiting; see `fail`). A minimized window is not
             // drawn and stops requesting redraws until it is restored;
             // `about_to_wait` keeps the flights going meanwhile.
-            WindowEvent::RedrawRequested if self.renderer.is_some() && !self.minimised => {
+            WindowEvent::RedrawRequested if self.renderer.is_some() && !self.minimized => {
                 self.update();
 
                 if let Some(renderer) = &mut self.renderer {
@@ -348,7 +348,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 eprintln!("Resized: {}x{}", size.width, size.height);
-                let restored = self.track_minimised(size);
+                let restored = self.track_minimized(size);
                 if let Some(renderer) = &mut self.renderer {
                     if let Err(e) = renderer.resize(size.width, size.height) {
                         eprintln!("Resize error: {e}");
@@ -369,7 +369,7 @@ impl ApplicationHandler for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
         let now = self.start_time.elapsed().as_secs_f64();
         self.take_in(now);
-        if self.renderer.is_some() && !self.minimised {
+        if self.renderer.is_some() && !self.minimized {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -378,12 +378,12 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = self.start_time.elapsed().as_secs_f64();
-        if self.minimised && self.renderer.is_some() {
+        if self.minimized && self.renderer.is_some() {
             let _ = self.advance(now);
         } else {
             self.take_in(now);
         }
-        event_loop.set_control_flow(control_flow(self.minimised, Instant::now()));
+        event_loop.set_control_flow(control_flow(self.minimized, Instant::now()));
     }
 }
 
@@ -505,11 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_sized_window_is_minimised() {
-        assert!(is_minimised(PhysicalSize::new(0, 0)));
-        assert!(is_minimised(PhysicalSize::new(0, 1080)));
-        assert!(is_minimised(PhysicalSize::new(1920, 0)));
-        assert!(!is_minimised(PhysicalSize::new(1920, 1080)));
+    fn a_zero_sized_window_is_minimized() {
+        assert!(is_minimized(PhysicalSize::new(0, 0)));
+        assert!(is_minimized(PhysicalSize::new(0, 1080)));
+        assert!(is_minimized(PhysicalSize::new(1920, 0)));
+        assert!(!is_minimized(PhysicalSize::new(1920, 1080)));
     }
 
     #[test]
@@ -517,21 +517,21 @@ mod tests {
         let mut app = app();
         let visible = PhysicalSize::new(1920, 1080);
         let hidden = PhysicalSize::new(0, 0);
-        assert!(!app.track_minimised(visible), "resize while visible");
-        assert!(!app.minimised);
-        assert!(!app.track_minimised(hidden), "minimise");
-        assert!(app.minimised);
-        assert!(!app.track_minimised(hidden), "still minimised");
-        assert!(app.track_minimised(visible), "restore");
-        assert!(!app.minimised);
+        assert!(!app.track_minimized(visible), "resize while visible");
+        assert!(!app.minimized);
+        assert!(!app.track_minimized(hidden), "minimize");
+        assert!(app.minimized);
+        assert!(!app.track_minimized(hidden), "still minimized");
+        assert!(app.track_minimized(visible), "restore");
+        assert!(!app.minimized);
     }
 
     #[test]
-    fn a_minimised_window_waits_on_a_timer() {
+    fn a_minimized_window_waits_on_a_timer() {
         let now = Instant::now();
         assert_eq!(
             control_flow(true, now),
-            ControlFlow::WaitUntil(now + MINIMISED_TICK)
+            ControlFlow::WaitUntil(now + MINIMIZED_TICK)
         );
         assert_eq!(control_flow(false, now), ControlFlow::Wait);
     }
@@ -570,7 +570,7 @@ mod tests {
         });
 
         let mut app = app_of(&format!("ws://{addr}/frp"));
-        app.minimised = true;
+        app.minimized = true;
         let start = Instant::now();
         let mut now = 0.0;
         while app.flights.flights.is_empty() && start.elapsed().as_secs() < 5 {
@@ -597,7 +597,7 @@ mod tests {
             "launched at its arrival, not the tick"
         );
 
-        // Later ticks animate it in game time; it lands while minimised.
+        // Later ticks animate it in game time; it lands while minimized.
         let landed = flight.launch_time + flight.total_time + 0.1;
         let _ = app.advance(landed);
         assert!(app.flights.flights[0].landed);

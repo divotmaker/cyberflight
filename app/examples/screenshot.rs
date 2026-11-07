@@ -227,7 +227,7 @@ fn range_shots(snap: &FlightSnapshot) -> (Vec<Shot>, Vec<Shot>) {
         Vec3::new(8.0, snap.ball_pos.y, snap.ball_pos.z),
         snap.ball_pos,
     );
-    // Cameras that frame the whole tracer, centred on its midpoint: to the
+    // Cameras that frame the whole tracer, centered on its midpoint: to the
     // side, and above and to the side (a 45° down angle).
     let tail_start = snap.tail_start();
     let mid = (tail_start + snap.ball_pos) * 0.5;

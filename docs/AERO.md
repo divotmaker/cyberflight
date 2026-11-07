@@ -36,7 +36,7 @@ not yet validated against measured data and may change between releases.
   wrapped in the default `GroundPhysics`: level ground at Y = 0,
   `Surface::FAIRWAY` everywhere except on the range's optional green. The
   green (`cf_scene::green::GreenConfig`) is one circle on the target line,
-  set by its distance downrange to the centre (`distance_m`) and its
+  set by its distance downrange to the center (`distance_m`) and its
   diameter (`diameter_m`); inside it the floor is `Surface::GREEN`, and its
   edge is drawn as one neon-green ring, the only circle on the range. dimple
   samples the floor under the ball at every step, so a ball that runs onto

@@ -56,7 +56,7 @@ void main() {
         0           // payload location
     );
 
-    // The reflection image's texel: the floor's colour, zero where no floor
+    // The reflection image's texel: the floor's color, zero where no floor
     // was hit (alpha 1 on the floor, 0 elsewhere).
     vec4 color = reflection_texel(payload);
     imageStore(outputImage, pixel, color);

@@ -12,7 +12,7 @@ use cf_scene::tee::TeeBox;
 use crate::composite::CompositePass;
 use crate::context::GpuContext;
 use crate::error::RenderError;
-use crate::flight::tee_ball_centre;
+use crate::flight::tee_ball_center;
 use crate::frame::TracerBuffers;
 use crate::gpu::{Image2d, Image2dDesc};
 use crate::mirror::{Mirror, MirrorTracer};
@@ -21,11 +21,11 @@ use crate::rt_pipeline::{RtPipeline, RtPushConstants};
 
 /// Format of the reflection image (`rgba16f` in `rt.rgen`).
 ///
-/// It holds linear colour up to `MAX_RADIANCE` in `floor_shading.glsl`, which
+/// It holds linear color up to `MAX_RADIANCE` in `floor_shading.glsl`, which
 /// the composite pass reads one texel per pixel and blends into an sRGB
 /// target, so it needs more range than [0, 1] for emissive reflections and
 /// more precision than 8 bits for dark tones. Vulkan requires storage,
-/// sampled and blendable colour attachment support for this format.
+/// sampled and blendable color attachment support for this format.
 pub(crate) const REFLECTION_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// One view of a frame: a camera and the rectangle of the frame (and of the
@@ -71,7 +71,7 @@ impl TraceView {
 /// The ball the floor reflects analytically.
 #[derive(Clone, Copy)]
 pub(crate) struct Ball {
-    pub(crate) centre: Vec3,
+    pub(crate) center: Vec3,
     pub(crate) radius: f32,
 }
 
@@ -82,9 +82,9 @@ pub(crate) struct ReflectionFrame<'a> {
     pub(crate) views: &'a [TraceView],
     /// The newest flight's tracer as the raster pass uploaded it.
     pub(crate) tracer: &'a MirrorTracer,
-    /// Framebuffer of the colour image the reflections are composited into.
+    /// Framebuffer of the color image the reflections are composited into.
     pub(crate) overlay: vk::Framebuffer,
-    /// Extent of the colour image.
+    /// Extent of the color image.
     pub(crate) extent: vk::Extent2D,
     /// The frame in flight: which of the ray tracer's per-frame structures
     /// this frame builds and traces.
@@ -103,7 +103,7 @@ pub(crate) struct ReflectionFrame<'a> {
 /// the raster pass draws from) and ball, so they show the same reflection.
 pub(crate) struct Reflections {
     /// The image both paths write and the composite reads: the floor's
-    /// colour, with the reflections in it, per pixel.
+    /// color, with the reflections in it, per pixel.
     target: Image2d,
     composite: CompositePass,
     mirror: Mirror,
@@ -197,7 +197,7 @@ impl Reflections {
             mirror,
             rt,
             ball: Ball {
-                centre: tee_ball_centre(tee),
+                center: tee_ball_center(tee),
                 radius: tee.ball_radius,
             },
         })
@@ -208,9 +208,9 @@ impl Reflections {
         self.rt.is_some()
     }
 
-    /// Reflect the ball with centre `ball_centre`.
-    pub(crate) fn set_ball(&mut self, ball_centre: Vec3) {
-        self.ball.centre = ball_centre;
+    /// Reflect the ball with center `ball_center`.
+    pub(crate) fn set_ball(&mut self, ball_center: Vec3) {
+        self.ball.center = ball_center;
     }
 
     /// Recreate the reflection image at `extent` (if it differs) and point
@@ -251,11 +251,11 @@ impl Reflections {
     /// # Safety
     /// `cb` is recording, outside a render pass; the buffers of
     /// `frame.tracer` are live and hold its vertices (and, with ray tracing,
-    /// the line AABBs of its centre line); `frame.frame` is the frame in
+    /// the line AABBs of its center line); `frame.frame` is the frame in
     /// flight that owns those buffers and whose fence was waited on; the
-    /// colour image is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image
-    /// extent equals `frame.extent` and every view lies within it. Afterwards the
-    /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the colour
+    /// color image is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image
+    /// extent equals `frame.extent` and every view lies within it. Afterward the
+    /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the color
     /// image still in `COLOR_ATTACHMENT_OPTIMAL`.
     pub(crate) unsafe fn record(
         &self,
@@ -290,7 +290,7 @@ impl Reflections {
             &view.camera,
             [view.extent.width as f32, view.extent.height as f32],
             [view.offset[0] as f32, view.offset[1] as f32],
-            self.ball.centre,
+            self.ball.center,
             self.ball.radius,
         )
     }
@@ -329,7 +329,7 @@ impl Reflections {
             // Storage image: UNDEFINED → GENERAL. The transition is a write,
             // so it waits for what last used the image: the composite
             // sampling it (fragment shader) and, after mirrored frames, the
-            // mirror's floor pass writing it (colour attachment output).
+            // mirror's floor pass writing it (color attachment output).
             device.cmd_pipeline_barrier(
                 cb,
                 vk::PipelineStageFlags::FRAGMENT_SHADER
@@ -457,12 +457,12 @@ mod tests {
     fn the_ball_is_the_newest_flights_one_radius_up_or_on_the_tee() {
         let tee = TeeBox::default();
         assert_eq!(
-            content(&[]).ball_centre,
+            content(&[]).ball_center,
             Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0)
         );
         let newest = flight(60.0, 3.5);
         assert_eq!(
-            content(&[flight(30.0, 3.9), flight(60.0, 3.5)]).ball_centre,
+            content(&[flight(30.0, 3.9), flight(60.0, 3.5)]).ball_center,
             newest.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0)
         );
     }

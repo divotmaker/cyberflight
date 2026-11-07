@@ -11,9 +11,9 @@ pub(crate) struct OffscreenTarget {
     pub(crate) height: u32,
     pub(crate) color: Image2d,
     pub(crate) depth: Image2d,
-    /// Colour + depth, for the scene pass.
+    /// Color + depth, for the scene pass.
     pub(crate) scene: vk::Framebuffer,
-    /// Colour only, for the HUD and composite passes.
+    /// Color only, for the HUD and composite passes.
     pub(crate) overlay: vk::Framebuffer,
     /// Readback buffer: `width * height * 4` bytes of RGBA8.
     pub(crate) staging: HostBuffer,

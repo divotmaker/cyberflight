@@ -161,13 +161,13 @@ impl SceneGeometry {
 
             if frame.ball_on_tee() {
                 // Ball glow (additive, magenta — before the ball so the ball
-                // occludes its centre)
+                // occludes its center)
                 device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.glow);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.tee_glow.handle()], &[0]);
                 push_constants(device, cb, pipes.layout, stages, &pc_magenta);
                 device.cmd_draw(cb, self.tee_glow_count, 1, 0, 0);
 
-                // Ball (black sphere — occludes the glow centre, revealing the outline)
+                // Ball (black sphere — occludes the glow center, revealing the outline)
                 device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.fill);
                 device.cmd_bind_vertex_buffers(cb, 0, &[self.tee.handle()], &[0]);
                 push_constants(device, cb, pipes.layout, stages, &pc_black);

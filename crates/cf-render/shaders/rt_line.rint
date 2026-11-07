@@ -1,7 +1,7 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
 
-// Intersection of the tracer's centre line (cf-scene `generate_trail_line`):
+// Intersection of the tracer's center line (cf-scene `generate_trail_line`):
 // a round capsule around each segment, never thinner on screen than the
 // raster line. Primitive i is the segment from line.vertices[2i] to
 // line.vertices[2i + 1], as the raster pass draws it.
@@ -13,11 +13,11 @@ layout(push_constant) uniform PushConstants {
     vec4 camera_pos;  // xyz = position, w = viewport X offset (pixels)
     mat4 inv_view_proj;
     vec4 ball_pos;    // xyz = ball center, w = viewport Y offset (pixels)
-    float pixel_size; // size of one pixel per metre of ray path
-    layout(offset = 104) float line_max_radius; // metres; the segment AABBs' padding
+    float pixel_size; // size of one pixel per meter of ray path
+    layout(offset = 104) float line_max_radius; // meters; the segment AABBs' padding
 } pc;
 
-// What rt_line.rahit needs to colour the hit.
+// What rt_line.rahit needs to color the hit.
 struct LineHit {
     float s;        // position along the segment, in [0, 1]
     float coverage; // 1 at the axis, falling to 0 at the capsule's edge
@@ -65,7 +65,7 @@ void main() {
         return;
     }
 
-    // Neighbouring segments' capsules overlap around the point they share.
+    // Neighboring segments' capsules overlap around the point they share.
     // Only the segment the ray passes closest to reports a hit, so a bend
     // is not counted twice.
     if (i > 0 && line.vertices[2 * i - 1].xyz == a && d > segment_distance(i - 1, o, dir)) {

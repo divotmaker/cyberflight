@@ -11,7 +11,7 @@ use cf_scene::grid::GridVertex;
 use cf_scene::tee::TeeBox;
 
 use crate::error::RenderError;
-use crate::flight::tee_ball_centre;
+use crate::flight::tee_ball_center;
 use crate::gpu::{HostBuffer, push_constants};
 use crate::mirror::MirrorTracer;
 use crate::pipeline::{GridPushConstants, ScenePipelines};
@@ -36,11 +36,11 @@ pub(crate) struct FrameContent {
     /// `flight_glows`, so a buffer that cannot hold everything keeps the
     /// newest tracer. Zero without a flight.
     pub(crate) newest_tube: usize,
-    /// Vertices of the newest flight's tracer centre line: the first ones of
+    /// Vertices of the newest flight's tracer center line: the first ones of
     /// `flight_lines`. Zero without a flight.
     pub(crate) newest_line: usize,
-    /// Centre of the newest flight's ball, or of the ball on the tee.
-    pub(crate) ball_centre: Vec3,
+    /// Center of the newest flight's ball, or of the ball on the tee.
+    pub(crate) ball_center: Vec3,
 }
 
 impl Default for FrameContent {
@@ -54,7 +54,7 @@ impl Default for FrameContent {
             ball_on_tee: true,
             newest_tube: 0,
             newest_line: 0,
-            ball_centre: tee_ball_centre(&TeeBox::default()),
+            ball_center: tee_ball_center(&TeeBox::default()),
         }
     }
 }
@@ -100,11 +100,11 @@ pub(crate) struct TracerBuffers {
     pub(crate) tube: vk::Buffer,
     /// Vertices the glow buffer holds.
     pub(crate) tube_capacity: u32,
-    /// The line buffer, which starts with the tracer's centre line segments.
+    /// The line buffer, which starts with the tracer's center line segments.
     pub(crate) line: vk::Buffer,
     /// Vertices the line buffer holds.
     pub(crate) line_capacity: u32,
-    /// The bounds of the centre line's segments ([`line_aabbs`]), one per
+    /// The bounds of the center line's segments ([`line_aabbs`]), one per
     /// segment of the line buffer's first vertices.
     pub(crate) line_aabbs: vk::Buffer,
 }
@@ -112,12 +112,12 @@ pub(crate) struct TracerBuffers {
 /// The GPU buffers one frame is drawn from.
 pub(crate) struct FrameResources {
     buffers: [HostBuffer; SLOTS],
-    /// Bounds of the newest centre line's segments; with ray tracing only.
+    /// Bounds of the newest center line's segments; with ray tracing only.
     line_aabbs: Option<HostBuffer>,
     counts: [u32; SLOTS],
     ball_on_tee: bool,
     /// Vertices of the newest flight's tube at the start of the glow buffer,
-    /// and of its centre line at the start of the line buffer, as far as
+    /// and of its center line at the start of the line buffer, as far as
     /// they were uploaded.
     newest_tube: u32,
     newest_line: u32,
@@ -297,7 +297,7 @@ impl FrameResources {
                 device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.glow);
                 self.draw(device, cb, pipes.layout, FLIGHT_GLOWS, &pc_magenta);
             }
-            // Ball fill (black sphere, occludes the glow centre).
+            // Ball fill (black sphere, occludes the glow center).
             if self.counts[FLIGHT_FILLS] > 0 {
                 device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.fill);
                 self.draw(device, cb, pipes.layout, FLIGHT_FILLS, &pc_black);

@@ -168,7 +168,7 @@ pub fn diff_image(baseline: &RgbaImage, candidate: &RgbaImage) -> RgbImage {
             let diff = u16::from(a[i].abs_diff(b[i]));
             u8::try_from((diff * DIFF_GAIN).min(255)).unwrap_or(u8::MAX)
         };
-        // Alpha-only changes show as grey, so they do not vanish.
+        // Alpha-only changes show as gray, so they do not vanish.
         let alpha = ch(3);
         *d = Rgb([ch(0).max(alpha), ch(1).max(alpha), ch(2).max(alpha)]);
     }

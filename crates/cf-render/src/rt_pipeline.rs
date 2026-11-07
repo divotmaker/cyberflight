@@ -21,11 +21,11 @@ pub struct RtPushConstants {
     pub inv_view_proj: [[f32; 4]; 4],
     /// Ball position (xyz), w = viewport Y offset in pixels.
     pub ball_pos: [f32; 4],
-    /// Size of one pixel per metre of ray path (the viewport's pixel angle).
+    /// Size of one pixel per meter of ray path (the viewport's pixel angle).
     pub pixel_size: f32,
-    /// Radius of the reflected ball in metres.
+    /// Radius of the reflected ball in meters.
     pub ball_radius: f32,
-    /// Largest radius of the tracer's centre line in metres:
+    /// Largest radius of the tracer's center line in meters:
     /// [`TRAIL_LINE_MAX_RADIUS`], the padding of its segment AABBs.
     pub line_max_radius: f32,
 }
@@ -47,7 +47,7 @@ impl RtPushConstants {
         let view = camera.view_matrix();
         let mut proj = camera.projection_matrix(viewport_size[0] / viewport_size[1]);
         // y_axis.y = 1 / tan(fov_y / 2): the viewport spans 2 / y_axis.y per
-        // metre of distance over its height.
+        // meter of distance over its height.
         let pixel_size = 2.0 / (proj.y_axis.y * viewport_size[1]);
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
         let inv_view_proj = (proj * view).inverse();
@@ -81,7 +81,7 @@ pub const GEOM_TRAIL: u32 = 3;
 pub const GEOM_TEE_BOX_BORDER: u32 = 4;
 pub const GEOM_TRAIL_LINE: u32 = 5;
 
-/// Largest radius of the tracer's centre line in metres, and the padding of
+/// Largest radius of the tracer's center line in meters, and the padding of
 /// each segment's AABB around its axis. `rt_line.rint` caps the radius at the
 /// value it gets in the push constants.
 pub const TRAIL_LINE_MAX_RADIUS: f32 = 1.0;
@@ -98,7 +98,7 @@ const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
 const HIT_GROUP_TRIANGLES: u32 = 0;
 /// Hit group of the tracer tube's translucent triangles (`rt_trail.rahit`).
 const HIT_GROUP_GLOW: u32 = 1;
-/// Hit group of the tracer's centre line (`rt_line.rint` + `rt_line.rahit`).
+/// Hit group of the tracer's center line (`rt_line.rint` + `rt_line.rahit`).
 const HIT_GROUP_LINE: u32 = 2;
 
 /// The pipeline's shader modules, layouts, pipeline and descriptor set.
@@ -251,7 +251,7 @@ impl PipelineObjects {
                 .closest_hit_shader(vk::SHADER_UNUSED_KHR)
                 .any_hit_shader(3)
                 .intersection_shader(vk::SHADER_UNUSED_KHR),
-            // Group 4: tracer centre line hit (HIT_GROUP_LINE): a procedural
+            // Group 4: tracer center line hit (HIT_GROUP_LINE): a procedural
             // capsule per segment, any-hit only.
             vk::RayTracingShaderGroupCreateInfoKHR::default()
                 .ty(vk::RayTracingShaderGroupTypeKHR::PROCEDURAL_HIT_GROUP)
@@ -576,7 +576,7 @@ fn tube_geometry(
         .flags(vk::GeometryFlagsKHR::NO_DUPLICATE_ANY_HIT_INVOCATION)
 }
 
-/// The tracer's centre line geometry: one AABB per segment, from the
+/// The tracer's center line geometry: one AABB per segment, from the
 /// `VkAabbPositionsKHR` array at `aabbs`.
 fn line_geometry(aabbs: vk::DeviceAddress) -> vk::AccelerationStructureGeometryKHR<'static> {
     let aabbs = vk::AccelerationStructureGeometryAabbsDataKHR::default()
@@ -817,7 +817,7 @@ struct SceneFrame {
 
 /// The scene the tracer is traced in: the static bottom-level structures,
 /// shared by every frame in flight, and per frame the instances (those, then
-/// the frame's tracer tube and centre line) and the top-level structure over
+/// the frame's tracer tube and center line) and the top-level structure over
 /// them, which is rebuilt every frame.
 ///
 /// Each part is stored as soon as it exists, so after a failure
@@ -975,7 +975,7 @@ fn transform_matrix(m: glam::Mat4) -> vk::TransformMatrixKHR {
 ///
 /// - Bit 0 (0x01): floor. Primary rays use cull mask 0x01.
 /// - Bit 1 (0x02): tee box border. No ray uses this bit.
-/// - Bit 2 (0x04): tracer tube and centre line. Floor reflection rays use
+/// - Bit 2 (0x04): tracer tube and center line. Floor reflection rays use
 ///   cull mask 0x04.
 /// - Bit 7 (0x80): tee box fill. No ray uses this bit.
 ///
@@ -1010,7 +1010,7 @@ pub(crate) fn line_aabbs(vertices: &[GridVertex]) -> Vec<f32> {
 /// structures.
 ///
 /// The floor and tee box are bottom-level structures built once, shared by
-/// every frame in flight. The tracer's tube and centre line are rebuilt every
+/// every frame in flight. The tracer's tube and center line are rebuilt every
 /// frame in the frame's command buffer ([`RtPipeline::record_build`]) from
 /// the frame's own vertex buffers, with the top-level structure over
 /// everything. Each frame in flight has its own copy of everything that
@@ -1365,7 +1365,7 @@ impl RtPipeline {
     }
 
     /// Point bindings 2 and 3 of frame `i`'s descriptor set at the buffers
-    /// the tracer's tube and centre line of `buffers[i]` are read from.
+    /// the tracer's tube and center line of `buffers[i]` are read from.
     ///
     /// # Safety
     /// No pending GPU work uses the descriptor sets; the buffers are live and

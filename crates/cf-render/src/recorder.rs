@@ -62,18 +62,18 @@ impl ChaseViewport {
     }
 }
 
-/// The framebuffers one frame is recorded into, both over the same colour
+/// The framebuffers one frame is recorded into, both over the same color
 /// image of `extent`.
 pub(crate) struct FrameTarget {
-    /// Colour + depth, created with [`SceneRecorder::scene_pass`].
+    /// Color + depth, created with [`SceneRecorder::scene_pass`].
     pub(crate) scene: vk::Framebuffer,
-    /// Colour only, created with [`SceneRecorder::hud_pass`].
+    /// Color only, created with [`SceneRecorder::hud_pass`].
     pub(crate) overlay: vk::Framebuffer,
     pub(crate) extent: vk::Extent2D,
 }
 
 /// Everything both renderers draw a frame with, apart from the output image
-/// and its synchronisation: the passes and pipelines, the static scene, the
+/// and its synchronization: the passes and pipelines, the static scene, the
 /// next frame's flights and HUD, the floor reflections and the chase camera.
 pub(crate) struct SceneRecorder {
     pipelines: ScenePipelines,
@@ -234,7 +234,7 @@ impl SceneRecorder {
     pub(crate) fn update_flight(&mut self, flights: &[FlightRenderData]) {
         flight_vertices(flights, &self.tee, &mut self.content);
         if let Some(reflections) = &mut self.reflections {
-            reflections.set_ball(self.content.ball_centre);
+            reflections.set_ball(self.content.ball_center);
         }
     }
 
@@ -277,7 +277,7 @@ impl SceneRecorder {
     /// flight and record the frame seen from `camera`: the scene pass (with
     /// the chase inset), then the reflections of the main view and the
     /// inset, ray-traced in `RayTraced` mode and mirrored otherwise, then
-    /// the HUD pass, which leaves the colour image in the output layout.
+    /// the HUD pass, which leaves the color image in the output layout.
     ///
     /// The upload is a host write into the buffers of `frame` alone, which no
     /// other frame in flight reads or builds the ray tracer's structures from
@@ -288,7 +288,7 @@ impl SceneRecorder {
     /// frame that last used `frame` (its fence was waited on), and `frame`
     /// is less than the `frames` the recorder was created with. `target`'s
     /// framebuffers were created with [`Self::scene_pass`] and [`Self::hud_pass`] over one
-    /// colour image of the recorder's colour format and `target.extent`
+    /// color image of the recorder's color format and `target.extent`
     /// (plus a depth image of the device's depth format for `scene`), and the
     /// recorder was [`resize`](Self::resize)d to `target.extent`.
     pub(crate) unsafe fn record_frame(

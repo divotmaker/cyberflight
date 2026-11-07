@@ -6,7 +6,7 @@
 layout(push_constant) uniform PushConstants {
     mat4 view_proj;
     vec4 camera_pos; // xyz = camera position
-    vec4 ball_pos;   // xyz = ball centre, w = ball radius
+    vec4 ball_pos;   // xyz = ball center, w = ball radius
 } pc;
 
 layout(location = 0) in vec3 in_position;

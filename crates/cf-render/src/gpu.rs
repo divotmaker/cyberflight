@@ -16,10 +16,10 @@ use crate::rt_pipeline::RtPushConstants;
 ///
 /// # Safety
 /// Implementors are `#[repr(C)]` (or primitive), `Copy`, contain no padding,
-/// pointers or references, and every byte of every value is initialised.
+/// pointers or references, and every byte of every value is initialized.
 pub(crate) unsafe trait GpuData: Copy + 'static {}
 
-// SAFETY: A primitive integer: one byte, always initialised.
+// SAFETY: A primitive integer: one byte, always initialized.
 unsafe impl GpuData for u8 {}
 const _: () = assert!(size_of::<u8>() == 1);
 
@@ -55,7 +55,7 @@ const _: () = assert!(size_of::<RtPushConstants>() == 108);
 // SAFETY: `#[repr(C)]` Vulkan struct: a 3×4 `f32` transform (48 bytes), two
 // `Packed24_8` (`u32` each) and an 8-byte acceleration-structure reference
 // union whose two variants are both 8 bytes wide, so writing either one
-// initialises it whole. 64 bytes, no padding.
+// initializes it whole. 64 bytes, no padding.
 unsafe impl GpuData for vk::AccelerationStructureInstanceKHR {}
 const _: () = assert!(size_of::<vk::AccelerationStructureInstanceKHR>() == 64);
 
@@ -63,7 +63,7 @@ const _: () = assert!(size_of::<vk::AccelerationStructureInstanceKHR>() == 64);
 #[must_use]
 pub(crate) fn as_bytes<T: GpuData>(data: &[T]) -> &[u8] {
     // SAFETY: `T: GpuData` has no padding and every byte of every value is
-    // initialised, so `data` is `size_of_val(data)` initialised bytes; `u8`
+    // initialized, so `data` is `size_of_val(data)` initialized bytes; `u8`
     // has alignment 1 and the borrow keeps `data` alive.
     unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) }
 }

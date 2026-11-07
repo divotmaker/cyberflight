@@ -20,9 +20,9 @@ pub struct Renderer {
     /// Passes, scene, per-frame content, reflections, mode and chase camera.
     recorder: ManuallyDrop<SceneRecorder>,
     swapchain: Swapchain,
-    /// Colour + depth framebuffers of the scene pass, one per swapchain image.
+    /// Color + depth framebuffers of the scene pass, one per swapchain image.
     framebuffers: Vec<vk::Framebuffer>,
-    /// Colour-only framebuffers of the HUD and composite passes, one per
+    /// Color-only framebuffers of the HUD and composite passes, one per
     /// swapchain image.
     overlay_framebuffers: Vec<vk::Framebuffer>,
     /// Depth image for depth testing (`None` after a failed rebuild, until
@@ -33,7 +33,7 @@ pub struct Renderer {
     render_finished: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
-    /// Last window size passed to `resize` (0×0 while minimised).
+    /// Last window size passed to `resize` (0×0 while minimized).
     window_extent: vk::Extent2D,
     /// Swapchain must be rebuilt before the next acquire (out of date,
     /// suboptimal, or the last rebuild failed).
@@ -108,20 +108,20 @@ impl Renderer {
     /// Draw a frame with the current camera.
     ///
     /// Records the scene, the reflections (ray-traced in `RayTraced` mode,
-    /// else mirrored) and the HUD, then submits and presents. Does nothing while the window is minimised
+    /// else mirrored) and the HUD, then submits and presents. Does nothing while the window is minimized
     /// (zero extent). An out-of-date swapchain is rebuilt and the frame
     /// skipped; a suboptimal one is rendered and presented, then rebuilt.
     /// After a failed rebuild every frame retries it first, and a frame
     /// without a complete set of swapchain resources is skipped.
     ///
     /// The in-flight fence is reset only immediately before the submit that
-    /// signals it, so every early return leaves it signalled.
+    /// signals it, so every early return leaves it signaled.
     pub fn draw_frame(&mut self, camera: &Camera) -> Result<(), RenderError> {
         if self.window_extent.width == 0 || self.window_extent.height == 0 {
             return Ok(());
         }
         if self.swapchain_stale && !self.recreate_swapchain()? {
-            // Surface still has a zero extent (minimised).
+            // Surface still has a zero extent (minimized).
             return Ok(());
         }
         if !self.swapchain_resources_complete() {
@@ -151,7 +151,7 @@ impl Renderer {
             ) {
                 Ok(result) => result,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    // No image acquired and the semaphore is not signalled.
+                    // No image acquired and the semaphore is not signaled.
                     // Rebuild now; the next frame renders.
                     self.swapchain_stale = true;
                     self.recreate_swapchain()?;
@@ -208,7 +208,7 @@ impl Renderer {
             .command_buffers(&command_buffers_arr)
             .signal_semaphores(&signal_semaphores);
 
-        // SAFETY: Resetting a fence that is signalled (waited above) and
+        // SAFETY: Resetting a fence that is signaled (waited above) and
         // submitting to a valid queue with valid sync objects.
         unsafe {
             device
@@ -260,7 +260,7 @@ impl Renderer {
     /// is unchanged.
     ///
     /// Returns `Ok(false)` without rebuilding (leaving the swapchain marked
-    /// stale) while the surface extent is zero, e.g. when minimised.
+    /// stale) while the surface extent is zero, e.g. when minimized.
     fn recreate_swapchain(&mut self) -> Result<bool, RenderError> {
         // SAFETY: Querying surface capabilities for current extent.
         let caps = unsafe {
@@ -288,7 +288,7 @@ impl Renderer {
 
     /// Handle window resize.
     ///
-    /// A zero width or height (minimised) pauses rendering until a non-zero
+    /// A zero width or height (minimized) pauses rendering until a non-zero
     /// size arrives.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         self.window_extent = vk::Extent2D { width, height };
@@ -548,7 +548,7 @@ impl Renderer {
         }
     }
 
-    /// Create `count` sets of frame semaphores and (signalled) fences,
+    /// Create `count` sets of frame semaphores and (signaled) fences,
     /// keeping each in `self` as soon as it exists.
     fn create_sync_objects(&mut self, count: usize) -> Result<(), RenderError> {
         let device = &self.gpu.device;

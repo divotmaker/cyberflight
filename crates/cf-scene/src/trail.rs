@@ -245,10 +245,10 @@ pub fn generate_trail_tube(
     }
     let stations = stations(trail, current_time, max_lifetime);
 
-    let ring = |s: &Station, centre: Vec3, radius: f32| -> [Vec3; TRAIL_TUBE_SIDES] {
+    let ring = |s: &Station, center: Vec3, radius: f32| -> [Vec3; TRAIL_TUBE_SIDES] {
         std::array::from_fn(|k| {
             let (sin, cos) = (std::f32::consts::TAU * k as f32 / TRAIL_TUBE_SIDES as f32).sin_cos();
-            centre + (s.u * cos + s.v * sin) * radius
+            center + (s.u * cos + s.v * sin) * radius
         })
     };
     // A band of quads between two rings of equal fade at each end.
@@ -496,7 +496,7 @@ mod tests {
         );
     }
 
-    /// A straight tracer along +Z at the origin, a point every metre and
+    /// A straight tracer along +Z at the origin, a point every meter and
     /// 0.1 s, the newest at `t = 1` and the oldest at `t ≈ 0.03`.
     fn straight_tracer() -> (Vec<TrailPoint>, f64, f64) {
         let trail = (0..30)

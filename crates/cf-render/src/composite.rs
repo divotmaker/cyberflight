@@ -10,7 +10,7 @@ use crate::pipeline::overlay_render_pass;
 
 /// Render pass, pipeline and descriptor set of the reflection composite.
 ///
-/// The pass loads the colour image in `COLOR_ATTACHMENT_OPTIMAL` and leaves
+/// The pass loads the color image in `COLOR_ATTACHMENT_OPTIMAL` and leaves
 /// it there. It is compatible with the HUD pass (they differ only in final
 /// layout), so it draws into the HUD pass's overlay framebuffer.
 pub(crate) struct CompositePass {
@@ -243,10 +243,10 @@ impl CompositePass {
         unsafe { device.update_descriptor_sets(&[write], &[]) };
     }
 
-    /// Record the composite into `overlay_fb` (colour only, `extent`).
+    /// Record the composite into `overlay_fb` (color only, `extent`).
     ///
     /// # Safety
-    /// `cb` is recording, outside a render pass. The colour image is in
+    /// `cb` is recording, outside a render pass. The color image is in
     /// `COLOR_ATTACHMENT_OPTIMAL` and the bound storage image is in
     /// `SHADER_READ_ONLY_OPTIMAL`, with extent equal to `extent`.
     pub(crate) unsafe fn record(

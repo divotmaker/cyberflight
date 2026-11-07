@@ -83,8 +83,8 @@ mod tests {
         let left = physics_to_scene(DVec3::new(100.0, 0.0, -10.0));
         assert!(screen_x(right) > 0.0, "right of line: {}", screen_x(right));
         assert!(screen_x(left) < 0.0, "left of line: {}", screen_x(left));
-        // The target line itself stays centred.
-        let centre = physics_to_scene(DVec3::new(100.0, 0.0, 0.0));
-        assert!(screen_x(centre).abs() < 1e-6);
+        // The target line itself stays centered.
+        let center = physics_to_scene(DVec3::new(100.0, 0.0, 0.0));
+        assert!(screen_x(center).abs() < 1e-6);
     }
 }

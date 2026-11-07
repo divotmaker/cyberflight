@@ -24,8 +24,8 @@ pub struct FlightRenderData {
 /// fill and its glow.
 pub(crate) const FLIGHT_BALL_MESH: (u32, u32) = (8, 16);
 
-/// The centre of the ball resting on `tee`'s tee box.
-pub(crate) fn tee_ball_centre(tee: &TeeBox) -> Vec3 {
+/// The center of the ball resting on `tee`'s tee box.
+pub(crate) fn tee_ball_center(tee: &TeeBox) -> Vec3 {
     Vec3::new(0.0, TEE_ELEVATION + tee.ball_radius, 0.0)
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn flight_trail_tube(flight: &FlightRenderData, tee: &TeeBox) -> Vec<
     )
 }
 
-/// The tracer's centre line of `flight` (LINE_LIST): the segments the raster
+/// The tracer's center line of `flight` (LINE_LIST): the segments the raster
 /// pass and the reflections draw. Empty without at least two trail points.
 pub(crate) fn flight_trail_line(flight: &FlightRenderData) -> Vec<GridVertex> {
     generate_trail_line(
@@ -51,14 +51,14 @@ pub(crate) fn flight_trail_line(flight: &FlightRenderData) -> Vec<GridVertex> {
 }
 
 /// Build the raster geometry of `flights` (oldest first) into `out`'s flight
-/// vertices: per flight the trail's tube ([`flight_trail_tube`]) and centre
-/// line ([`flight_trail_line`]), and the ball and its glow, centred one ball
+/// vertices: per flight the trail's tube ([`flight_trail_tube`]) and center
+/// line ([`flight_trail_line`]), and the ball and its glow, centered one ball
 /// radius above `ball_pos`. With no flight, the ball is on the tee.
 ///
-/// The newest (last) flight comes first, its tube and centre line leading
+/// The newest (last) flight comes first, its tube and center line leading
 /// their buffers, so a buffer too small for every flight loses the oldest
 /// tracers and never the newest. `out` notes the newest flight's tube and
-/// centre line vertex counts and ball centre: the reflections show them.
+/// center line vertex counts and ball center: the reflections show them.
 pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &mut FrameContent) {
     let (rings, segments) = FLIGHT_BALL_MESH;
     out.flight_lines.clear();
@@ -67,27 +67,27 @@ pub(crate) fn flight_vertices(flights: &[FlightRenderData], tee: &TeeBox, out: &
     out.ball_on_tee = flights.is_empty();
     out.newest_tube = 0;
     out.newest_line = 0;
-    out.ball_centre = tee_ball_centre(tee);
+    out.ball_center = tee_ball_center(tee);
 
     for (i, flight) in flights.iter().rev().enumerate() {
-        let centre = flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0);
+        let center = flight.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0);
         let tube = flight_trail_tube(flight, tee);
         let line = flight_trail_line(flight);
         if i == 0 {
             out.newest_tube = tube.len();
             out.newest_line = line.len();
-            out.ball_centre = centre;
+            out.ball_center = center;
         }
         out.flight_glows.extend(tube);
         out.flight_glows.extend(generate_ball_glow_at(
-            centre,
+            center,
             tee.ball_radius,
             rings,
             segments,
         ));
         out.flight_lines.extend(line);
         out.flight_fills
-            .extend(generate_ball_at(centre, tee.ball_radius, rings, segments));
+            .extend(generate_ball_at(center, tee.ball_radius, rings, segments));
     }
 }
 
@@ -117,10 +117,10 @@ mod tests {
         flight_vertices(std::slice::from_ref(&flight), &tee, &mut out);
 
         let r = tee.ball_radius;
-        let centre = Vec3::new(0.0, 19.0 + r, 38.0);
-        let fills = generate_ball_at(centre, r, 8, 16);
+        let center = Vec3::new(0.0, 19.0 + r, 38.0);
+        let fills = generate_ball_at(center, r, 8, 16);
         let mut glows = generate_trail_tube(&flight.trail_points, 1.9, DEFAULT_TRAIL_LIFETIME, r);
-        glows.extend(generate_ball_glow_at(centre, r, 8, 16));
+        glows.extend(generate_ball_glow_at(center, r, 8, 16));
         let lines = generate_trail_line(&flight.trail_points, 1.9, DEFAULT_TRAIL_LIFETIME);
 
         assert!(!out.ball_on_tee);
@@ -174,7 +174,7 @@ mod tests {
             line(oldest)[..]
         );
         assert_eq!(
-            out.ball_centre,
+            out.ball_center,
             newest.ball_pos + Vec3::new(0.0, tee.ball_radius, 0.0)
         );
     }
@@ -191,7 +191,7 @@ mod tests {
         flight_vertices(&[flight], &tee, &mut out);
         flight_vertices(&[], &tee, &mut out);
         assert_eq!((out.newest_tube, out.newest_line), (0, 0));
-        assert_eq!(out.ball_centre, tee_ball_centre(&tee));
+        assert_eq!(out.ball_center, tee_ball_center(&tee));
     }
 
     #[test]

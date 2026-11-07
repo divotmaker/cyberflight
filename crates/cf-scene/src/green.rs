@@ -18,15 +18,15 @@ use glam::Vec3;
 
 use crate::grid::{GridConfig, GridVertex};
 
-/// A circular green centred on the target line.
+/// A circular green centered on the target line.
 ///
 /// `diameter_m` must be positive and finite (checked by a debug assertion
 /// when the radius is taken); `distance_m` must be finite.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GreenConfig {
-    /// Distance downrange from the tee to the green's centre, in metres.
+    /// Distance downrange from the tee to the green's center, in meters.
     pub distance_m: f32,
-    /// Diameter of the green, in metres.
+    /// Diameter of the green, in meters.
     pub diameter_m: f32,
 }
 
@@ -35,7 +35,7 @@ pub struct GreenConfig {
 pub const DEFAULT_GREEN: Option<GreenConfig> = None;
 
 impl GreenConfig {
-    /// Radius of the green in metres: half the diameter.
+    /// Radius of the green in meters: half the diameter.
     #[must_use]
     pub fn radius_m(&self) -> f32 {
         debug_assert!(
@@ -46,7 +46,7 @@ impl GreenConfig {
         self.diameter_m * 0.5
     }
 
-    /// Centre in the scene frame (see [`frame`](crate::frame)), on the
+    /// Center in the scene frame (see [`frame`](crate::frame)), on the
     /// Y = 0 ground plane.
     #[must_use]
     pub fn center_vec3(&self) -> Vec3 {

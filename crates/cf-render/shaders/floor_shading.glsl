@@ -24,7 +24,7 @@ const float F0_GLASS = 0.10;
 // Glass tint and specular use the Fresnel term.
 const float EMISSIVE_REFLECTANCE = 1.1;
 
-// Colour filter of the tinted glass on emissive reflections: they lose
+// Color filter of the tinted glass on emissive reflections: they lose
 // REFL_DESATURATE of their saturation and are multiplied by the cool
 // REFL_TINT, so the tracer's magenta reads as violet in the navy glass.
 const vec3 REFL_TINT = vec3(0.55, 0.75, 1.0);
@@ -32,8 +32,8 @@ const float REFL_DESATURATE = 0.45;
 
 // Tracer and ball reflections fade with the reflected point's height above
 // the floor: full strength at the floor, falling linearly to REFLECTION_FADE_MIN
-// of it at REFLECTION_FADE_HEIGHT metres and staying there above.
-const float REFLECTION_FADE_HEIGHT = 60.0; // metres above the floor
+// of it at REFLECTION_FADE_HEIGHT meters and staying there above.
+const float REFLECTION_FADE_HEIGHT = 60.0; // meters above the floor
 const float REFLECTION_FADE_MIN = 0.1;     // strength at and above that height
 
 // Dark navy glass tint, stronger at grazing angles.
@@ -46,18 +46,18 @@ const float SPEC_POWER = 200.0;
 // Analytical ball reflection: glow halo multiplier relative to ball radius.
 const float BALL_GLOW_MULT = 6.0;
 
-// Upper bound of the stored colour, well above the brightest reflection.
+// Upper bound of the stored color, well above the brightest reflection.
 const float MAX_RADIANCE = 64.0;
 
-// Strength of the reflection of a point h metres above the floor.
+// Strength of the reflection of a point h meters above the floor.
 float height_fade(float h) {
     return mix(1.0, REFLECTION_FADE_MIN, clamp(h / REFLECTION_FADE_HEIGHT, 0.0, 1.0));
 }
 
 // What the floor point `hit_pos` (on the plane y = 0) shows to a camera at
 // `camera_pos` looking along the unit vector `view_dir`: glass tint, the
-// reflected tracer (`trail`) and ball (centre `ball_pos`, radius
-// `ball_radius`, both in metres), and the specular
+// reflected tracer (`trail`) and ball (center `ball_pos`, radius
+// `ball_radius`, both in meters), and the specular
 // gleam. Alpha 1.
 vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 ball_pos,
                  float ball_radius) {
@@ -90,7 +90,7 @@ vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 
     // Suppress glow directly under the ball where the raster ball occludes
     // the floor — the additive composite would otherwise bleed through.
     // Use the viewing ray to check if this floor point is within the ball's
-    // apparent disc from the camera's perspective.
+    // apparent disk from the camera's perspective.
     vec3 to_ball = ball_pos - hit_pos;
     float proj = dot(to_ball, V);
     float perp = length(to_ball - V * proj);
@@ -120,7 +120,7 @@ vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 
     return vec4(glass_base + reflection + specular, 1.0);
 }
 
-// A reflection-image texel: colour in [0, MAX_RADIANCE] (emissive
+// A reflection-image texel: color in [0, MAX_RADIANCE] (emissive
 // reflections are brighter than display white; the composite's target clips
 // them), alpha in [0, 1]. NaN is stored as 0, so the composite never adds
 // unbounded or NaN values.

@@ -9,7 +9,7 @@ pub const CYAN: Vec4 = Vec4::new(0.0, 1.0, 1.0, 1.0);
 /// Neon magenta — ball and flight accents.
 pub const MAGENTA: Vec4 = Vec4::new(1.0, 0.0, 1.0, 1.0);
 
-/// Green edge — neon green, #39FF14 as linear RGB (the colours here are
+/// Green edge — neon green, #39FF14 as linear RGB (the colors here are
 /// linear; the sRGB target encodes them on output) at 90% alpha. The hue
 /// sits well clear of the cyan grid, so the thin ring reads as its own line
 /// without competing with the ball tracer.

@@ -15,16 +15,16 @@ pub struct GridPushConstants {
 
 /// The raster render passes and pipelines of the neon scene.
 ///
-/// The scene pass clears colour and depth and ends in
-/// `COLOR_ATTACHMENT_OPTIMAL`. The HUD pass loads the colour image, has no
+/// The scene pass clears color and depth and ends in
+/// `COLOR_ATTACHMENT_OPTIMAL`. The HUD pass loads the color image, has no
 /// depth, and ends in the renderer's output layout. The scene pipelines
 /// (lines, alpha-blended fills, additive glow) belong to the scene pass;
 /// the depth-less HUD fill and line pipelines to the HUD pass. All share one
 /// layout, shaders and vertex format.
 pub struct ScenePipelines {
-    /// Colour CLEAR, `UNDEFINED` → `COLOR_ATTACHMENT_OPTIMAL`; depth CLEAR.
+    /// Color CLEAR, `UNDEFINED` → `COLOR_ATTACHMENT_OPTIMAL`; depth CLEAR.
     pub(crate) scene_pass: vk::RenderPass,
-    /// Colour LOAD, `COLOR_ATTACHMENT_OPTIMAL` → output layout; no depth.
+    /// Color LOAD, `COLOR_ATTACHMENT_OPTIMAL` → output layout; no depth.
     pub(crate) hud_pass: vk::RenderPass,
     /// [`GridPushConstants`] for the vertex and fragment stages.
     pub(crate) layout: vk::PipelineLayout,
@@ -42,7 +42,7 @@ pub struct ScenePipelines {
 
 impl ScenePipelines {
     /// Create both passes and all five pipelines. `output_layout` is the
-    /// layout the HUD pass leaves the colour image in: `PRESENT_SRC_KHR`
+    /// layout the HUD pass leaves the color image in: `PRESENT_SRC_KHR`
     /// for a swapchain, `TRANSFER_SRC_OPTIMAL` for readback.
     ///
     /// # Errors
@@ -397,7 +397,7 @@ impl ScenePipelines {
     }
 }
 
-/// A colour-only render pass that loads the image in
+/// A color-only render pass that loads the image in
 /// `COLOR_ATTACHMENT_OPTIMAL`, stores it, and leaves it in `final_layout`:
 /// the HUD pass and the reflection composite pass.
 pub(crate) fn overlay_render_pass(

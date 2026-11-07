@@ -6,7 +6,7 @@
 //! writes, for the same composite to add onto the scene. Two render passes
 //! per frame:
 //!
-//! 1. The *tracer pass* draws the newest flight's tracer tube and centre
+//! 1. The *tracer pass* draws the newest flight's tracer tube and center
 //!    line, mirrored (`mirror.vert`), additively into a scratch image. It
 //!    draws them from the vertex buffers the raster pass draws them from.
 //!    Each pixel ends up with what the floor shader gets along a reflected
@@ -49,9 +49,9 @@ pub(crate) struct MirrorTracer {
     pub(crate) tube_buffer: vk::Buffer,
     /// The tube's vertices: the first ones of `tube_buffer`.
     pub(crate) tube: u32,
-    /// Vertex buffer holding the centre line's segments.
+    /// Vertex buffer holding the center line's segments.
     pub(crate) line_buffer: vk::Buffer,
-    /// The centre line's vertices: the first ones of `line_buffer`.
+    /// The center line's vertices: the first ones of `line_buffer`.
     pub(crate) line: u32,
 }
 
@@ -71,7 +71,7 @@ pub(crate) struct FloorPushConstants {
     pub(crate) view_proj: [[f32; 4]; 4],
     /// xyz = camera position.
     pub(crate) camera_pos: [f32; 4],
-    /// xyz = ball centre, w = ball radius.
+    /// xyz = ball center, w = ball radius.
     pub(crate) ball_pos: [f32; 4],
 }
 
@@ -475,7 +475,7 @@ impl ShaderModules {
     }
 }
 
-/// A colour-only pass over a `REFLECTION_FORMAT` image: clears it, and
+/// A color-only pass over a `REFLECTION_FORMAT` image: clears it, and
 /// leaves it readable by fragment shaders.
 ///
 /// The first dependency waits for the previous frame's fragment shaders to
@@ -618,10 +618,10 @@ fn create_pipeline(
     Ok(pipelines[0])
 }
 
-/// Clear the rectangle of `view` of the pass's colour attachment to zero.
+/// Clear the rectangle of `view` of the pass's color attachment to zero.
 ///
 /// # Safety
-/// `cb` is recording inside a render pass with one colour attachment.
+/// `cb` is recording inside a render pass with one color attachment.
 unsafe fn clear_view(device: &ash::Device, cb: vk::CommandBuffer, view: &TraceView) {
     let attachments = [vk::ClearAttachment {
         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -645,7 +645,7 @@ pub(crate) struct Mirror {
     floor: FloorBuffer,
     passes: MirrorPasses,
     target: MirrorTarget,
-    /// Width of the mirrored centre line in pixels: as the raster pass
+    /// Width of the mirrored center line in pixels: as the raster pass
     /// draws it.
     line_width: f32,
 }
@@ -653,7 +653,7 @@ pub(crate) struct Mirror {
 impl Mirror {
     /// Create the mirror for the floor of `grid` with the tee box of `tee`,
     /// drawing into `reflection_view` (an `extent` image of
-    /// `REFLECTION_FORMAT` with `COLOR_ATTACHMENT` usage). The centre line is
+    /// `REFLECTION_FORMAT` with `COLOR_ATTACHMENT` usage). The center line is
     /// 2 px wide where `wide_lines` is enabled, else 1 px.
     ///
     /// # Errors
@@ -720,7 +720,7 @@ impl Mirror {
     }
 
     /// Fill the reflection image for `views` with the mirrored `tracer` and
-    /// the reflected `ball`: the tracer pass, then the floor pass. Afterwards
+    /// the reflected `ball`: the tracer pass, then the floor pass. Afterward
     /// the reflection image is in `SHADER_READ_ONLY_OPTIMAL`.
     ///
     /// Later views replace the rectangle they cover (the chase inset over
@@ -825,7 +825,7 @@ impl Mirror {
                 let pc = FloorPushConstants {
                     view_proj: view_proj(&view.camera, view.aspect()),
                     camera_pos: [camera.x, camera.y, camera.z, 0.0],
-                    ball_pos: [ball.centre.x, ball.centre.y, ball.centre.z, ball.radius],
+                    ball_pos: [ball.center.x, ball.center.y, ball.center.z, ball.radius],
                 };
                 push_constants(
                     device,

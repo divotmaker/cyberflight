@@ -1,6 +1,6 @@
 #version 450
 
-// Vertex stage of the mirrored tracer: the tube and centre line the raster
+// Vertex stage of the mirrored tracer: the tube and center line the raster
 // pass draws, reflected across the floor plane y = 0.
 
 layout(push_constant) uniform PushConstants {
