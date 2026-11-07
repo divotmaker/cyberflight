@@ -43,16 +43,16 @@ pub const MAX_SPIN_RPM: f64 = 20_000.0;
 /// Why an FRP shot cannot be simulated.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum RejectReason {
-    /// The shot carries no ball flight data.
-    #[error("no ball flight data")]
-    NoBallFlight,
-    /// The ball flight has no launch speed.
+    /// The shot carries no launch data.
+    #[error("no launch data")]
+    NoLaunch,
+    /// The launch has no launch speed.
     #[error("no launch speed")]
     NoLaunchSpeed,
     /// The launch speed is zero or negative (mph).
     #[error("launch speed {0:.1} mph is not positive")]
     NonPositiveLaunchSpeed(f64),
-    /// The ball flight has no launch elevation.
+    /// The launch has no launch elevation.
     #[error("no launch elevation")]
     NoLaunchElevation,
     /// A launch value is NaN or infinite.
@@ -89,13 +89,14 @@ pub struct ReceivedShot {
     pub shot_number: u32,
     pub input: ShotInput,
     pub club: ClubDelivery,
-    /// Carry distance reported by the launch monitor (yards), if available.
+    /// Carry distance in the shot's flight result (yards), if it has one.
     pub lm_carry_yards: Option<f64>,
     /// Whether the device measured the backspin in `input` (directly or as
-    /// total spin). When false it is [`ASSUMED_BACKSPIN_RPM`].
+    /// total spin). When false it is the spin the shot's flight model
+    /// assumed, or [`ASSUMED_BACKSPIN_RPM`] when it assumed none.
     pub backspin_measured: bool,
     /// Whether the device measured the sidespin in `input`. When false it
-    /// is 0.
+    /// is the sidespin the shot's flight model assumed, or 0.
     pub sidespin_measured: bool,
     /// Launch values that were clamped to the physical envelope.
     pub clamped: Vec<Clamped>,
@@ -133,7 +134,9 @@ fn finite(field: &'static str, value: f64) -> Result<f64, RejectReason> {
 impl ReceivedShot {
     /// Convert an FRP `CompletedShot` into a `ReceivedShot`.
     ///
-    /// The shot needs a ball flight with a positive launch speed and a
+    /// The launch is [`launch_for_flight`](flightrelay::CompletedShot::launch_for_flight): the measured
+    /// launch, with a value it lacks filled from what the shot's modeled
+    /// flight result assumed. The shot needs a positive launch speed and a
     /// launch elevation; a missing azimuth is a straight shot (0°). NaN or
     /// infinite launch values reject the shot, and values outside the
     /// physical envelope (the `MAX_*`/`MIN_*` constants) are clamped and
@@ -142,18 +145,19 @@ impl ReceivedShot {
     /// Spin comes from the FRP components, or from `total_spin_rpm` +
     /// `spin_axis` when the device sends only that pair. A total spin
     /// without an axis is taken as backspin (less any measured sidespin).
-    /// Without any spin the simulation uses [`ASSUMED_BACKSPIN_RPM`] and no
-    /// sidespin, flagged in [`backspin_measured`](Self::backspin_measured)
+    /// Without any spin, measured or assumed, the simulation uses
+    /// [`ASSUMED_BACKSPIN_RPM`] and no sidespin. Spin the device did not
+    /// measure is flagged in [`backspin_measured`](Self::backspin_measured)
     /// and [`sidespin_measured`](Self::sidespin_measured).
     ///
-    /// Display-only values (club data, the device's carry) that are not
-    /// finite are dropped.
+    /// Display-only values (club data, the carry of the flight result) that
+    /// are not finite are dropped.
     ///
     /// # Errors
     ///
     /// Returns why the shot cannot be simulated.
     pub fn from_frp(shot: &flightrelay::CompletedShot) -> Result<Self, RejectReason> {
-        let mut ball = shot.ball.clone().ok_or(RejectReason::NoBallFlight)?;
+        let mut ball = shot.launch_for_flight().ok_or(RejectReason::NoLaunch)?;
         // The axis only splits a total spin sent without components.
         let axis_used = ball.backspin_rpm.is_none()
             && ball.sidespin_rpm.is_none()
@@ -162,6 +166,9 @@ impl ReceivedShot {
             finite("spin_axis", axis)?;
         }
         ball.complete_spin();
+        // Spin that only the flight model assumed is not measured.
+        let mut measured = shot.launch.clone().unwrap_or_default();
+        measured.complete_spin();
 
         let speed = ball.launch_speed.ok_or(RejectReason::NoLaunchSpeed)?;
         let speed = finite("launch_speed", speed.as_mph())?;
@@ -234,7 +241,12 @@ impl ReceivedShot {
                 smash_factor: display(c.smash_factor),
             });
 
-        let lm_carry_yards = display(ball.carry_distance.map(|d| d.as_yards()));
+        let lm_carry_yards = display(
+            shot.flight
+                .as_ref()
+                .and_then(|f| f.carry_distance)
+                .map(|d| d.as_yards()),
+        );
 
         Ok(Self {
             device: shot.device.clone(),
@@ -242,8 +254,8 @@ impl ReceivedShot {
             input,
             club,
             lm_carry_yards,
-            backspin_measured: backspin.is_some(),
-            sidespin_measured: sidespin.is_some(),
+            backspin_measured: measured.backspin_rpm.is_some() || measured.total_spin_rpm.is_some(),
+            sidespin_measured: measured.sidespin_rpm.is_some(),
             clamped,
         })
     }
@@ -255,7 +267,10 @@ mod tests {
     use dimple::aero::BallModel;
     use dimple::environment::Environment;
     use dimple::trajectory::simulate_flight;
-    use flightrelay::{BallFlight, ClubData, CompletedShot, Distance, ShotKey, Velocity};
+    use flightrelay::{
+        AssumedLaunch, Basis, ClubData, CompletedShot, Distance, FlightResult, Launch, ShotKey,
+        Velocity,
+    };
 
     fn sample_completed_shot() -> CompletedShot {
         CompletedShot {
@@ -264,14 +279,16 @@ mod tests {
                 shot_id: "test-uuid".to_owned(),
                 shot_number: 1,
             },
-            ball: Some(BallFlight {
+            timestamp: None,
+            launch: Some(Launch {
                 launch_speed: Some(Velocity::MilesPerHour(167.0)),
                 launch_elevation: Some(10.5),
                 launch_azimuth: Some(-1.2),
                 backspin_rpm: Some(2700),
                 sidespin_rpm: Some(-300),
-                ..BallFlight::default()
+                ..Launch::default()
             }),
+            flight: None,
             club: Some(ClubData {
                 club_speed: Some(Velocity::MilesPerHour(112.0)),
                 path: Some(-2.1),
@@ -282,11 +299,12 @@ mod tests {
                 ..ClubData::default()
             }),
             impact: None,
+            source: None,
         }
     }
 
     #[test]
-    fn converts_ball_flight_to_shot_input() {
+    fn converts_launch_to_shot_input() {
         let shot = ReceivedShot::from_frp(&sample_completed_shot()).unwrap();
         assert!((shot.input.ball_speed_mph - 167.0).abs() < 0.01);
         assert!((shot.input.launch_angle_deg - 10.5).abs() < 0.01);
@@ -315,8 +333,8 @@ mod tests {
         assert!(shot.club.path_deg.is_none());
     }
 
-    fn ball(data: &mut CompletedShot) -> &mut BallFlight {
-        data.ball.as_mut().unwrap()
+    fn ball(data: &mut CompletedShot) -> &mut Launch {
+        data.launch.as_mut().unwrap()
     }
 
     #[test]
@@ -407,7 +425,7 @@ mod tests {
 
     #[test]
     fn rejects_non_finite_launch_values() {
-        type Corrupt = fn(&mut BallFlight);
+        type Corrupt = fn(&mut Launch);
         let cases: [(&str, Corrupt); 6] = [
             ("launch_speed", |b| {
                 b.launch_speed = Some(Velocity::MilesPerHour(f64::NAN));
@@ -503,7 +521,10 @@ mod tests {
         let mut data = sample_completed_shot();
         let b = ball(&mut data);
         b.launch_speed = Some(Velocity::MetersPerSecond(70.0));
-        b.carry_distance = Some(Distance::Meters(150.0));
+        data.flight = Some(FlightResult {
+            carry_distance: Some(Distance::Meters(150.0)),
+            ..FlightResult::new(Basis::Tracked)
+        });
         data.club.as_mut().unwrap().club_speed = Some(Velocity::KilometersPerHour(160.0));
         let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!((shot.input.ball_speed_mph - 156.586).abs() < 0.01);
@@ -514,7 +535,10 @@ mod tests {
     #[test]
     fn drops_non_finite_display_values() {
         let mut data = sample_completed_shot();
-        ball(&mut data).carry_distance = Some(Distance::Yards(f64::NAN));
+        data.flight = Some(FlightResult {
+            carry_distance: Some(Distance::Yards(f64::NAN)),
+            ..FlightResult::new(Basis::Tracked)
+        });
         let club = data.club.as_mut().unwrap();
         club.club_speed = Some(Velocity::MilesPerHour(f64::INFINITY));
         club.path = Some(f64::NAN);
@@ -528,11 +552,11 @@ mod tests {
     #[test]
     fn uses_total_spin_and_axis_without_components() {
         let mut data = sample_completed_shot();
-        let ball = data.ball.as_mut().unwrap();
-        ball.backspin_rpm = None;
-        ball.sidespin_rpm = None;
-        ball.total_spin_rpm = Some(3000);
-        ball.spin_axis = Some(-10.0);
+        let launch = data.launch.as_mut().unwrap();
+        launch.backspin_rpm = None;
+        launch.sidespin_rpm = None;
+        launch.total_spin_rpm = Some(3000);
+        launch.spin_axis = Some(-10.0);
         let shot = ReceivedShot::from_frp(&data).unwrap();
         // 3000 × cos(-10°) = 2954.4, 3000 × sin(-10°) = -520.9
         assert!((shot.input.backspin_rpm - 2954.0).abs() < 0.01);
@@ -540,13 +564,63 @@ mod tests {
     }
 
     #[test]
-    fn rejects_shot_without_ball_data() {
+    fn rejects_shot_without_launch_data() {
         let mut data = sample_completed_shot();
-        data.ball = None;
+        data.launch = None;
         assert_eq!(
             ReceivedShot::from_frp(&data).unwrap_err(),
-            RejectReason::NoBallFlight
+            RejectReason::NoLaunch
         );
+    }
+
+    /// A chip as a forwarder sends it: the measured launch without spin, and
+    /// a modeled flight result holding the spin its model assumed.
+    fn modeled_chip() -> CompletedShot {
+        let mut data = sample_completed_shot();
+        let launch = data.launch.as_mut().unwrap();
+        launch.backspin_rpm = None;
+        launch.sidespin_rpm = None;
+        data.flight = Some(FlightResult {
+            model: Some("estimate".to_owned()),
+            carry_distance: Some(Distance::Yards(120.0)),
+            assumed: Some(AssumedLaunch {
+                backspin_rpm: Some(6200),
+                sidespin_rpm: Some(150),
+                ..AssumedLaunch::default()
+            }),
+            ..FlightResult::new(Basis::Modeled)
+        });
+        data
+    }
+
+    #[test]
+    fn flies_the_spin_a_modeled_flight_assumed() {
+        let shot = ReceivedShot::from_frp(&modeled_chip()).unwrap();
+        assert!((shot.input.backspin_rpm - 6200.0).abs() < 0.01);
+        assert!((shot.input.sidespin_rpm - 150.0).abs() < 0.01);
+        assert!(!shot.backspin_measured);
+        assert!(!shot.sidespin_measured);
+        assert!((shot.lm_carry_yards.unwrap() - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn measured_spin_wins_over_assumed() {
+        let mut data = modeled_chip();
+        data.launch.as_mut().unwrap().backspin_rpm = Some(2700);
+        data.launch.as_mut().unwrap().sidespin_rpm = Some(-300);
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!((shot.input.backspin_rpm - 2700.0).abs() < 0.01);
+        assert!((shot.input.sidespin_rpm - -300.0).abs() < 0.01);
+        assert!(shot.backspin_measured && shot.sidespin_measured);
+    }
+
+    #[test]
+    fn tracked_flight_assumes_nothing() {
+        let mut data = modeled_chip();
+        data.flight.as_mut().unwrap().basis = Basis::Tracked;
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!((shot.input.backspin_rpm - ASSUMED_BACKSPIN_RPM).abs() < 0.01);
+        assert!(!shot.backspin_measured);
     }
 
     #[test]

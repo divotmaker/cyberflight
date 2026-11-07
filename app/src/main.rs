@@ -457,7 +457,7 @@ fn run() -> Result<()> {
 mod tests {
     use super::*;
     use flightrelay::{
-        BallFlight, EndpointConfig, FrpEndpoint, FrpEnvelope, FrpEvent, FrpMessage, Role, ShotKey,
+        EndpointConfig, FrpEndpoint, FrpEnvelope, FrpEvent, FrpMessage, Launch, Role, ShotKey,
         Transport, Velocity,
     };
 
@@ -551,16 +551,16 @@ mod tests {
                 shot_id: "shot-1".to_owned(),
                 shot_number: 1,
             };
-            let ball = BallFlight {
+            let launch = Launch {
                 launch_speed: Some(Velocity::MilesPerHour(140.0)),
                 launch_elevation: Some(14.0),
                 backspin_rpm: Some(5000),
                 sidespin_rpm: Some(0),
-                ..BallFlight::default()
+                ..Launch::default()
             };
             for event in [
                 FrpEvent::shot_trigger(key.clone()),
-                FrpEvent::ball_flight(key.clone(), ball),
+                FrpEvent::launch(key.clone(), launch),
                 FrpEvent::ShotFinished { key },
             ] {
                 conn.send(&FrpMessage::Envelope(FrpEnvelope::new("test.0", event)))

@@ -380,9 +380,7 @@ pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
 /// Returns an error if the endpoint cannot be opened.
 pub fn frp_endpoint(url: &str) -> Result<FrpEndpoint, flightrelay::FrpError> {
     FrpEndpoint::open(
-        EndpointConfig::new(Role::Controller, Transport::connect(url))
-            .with_name("cyberflight")
-            .with_versions(&[FRP_VERSION]),
+        EndpointConfig::new(Role::Controller, Transport::connect(url)).with_name("cyberflight"),
     )
 }
 
@@ -910,23 +908,23 @@ mod tests {
         FrpMessage::Envelope(flightrelay::FrpEnvelope::new("test.0", event))
     }
 
-    /// The lifecycle messages of shot `n`: trigger, ball flight, finished.
+    /// The lifecycle messages of shot `n`: trigger, launch, finished.
     fn shot_messages(n: u32, speed_mph: f64, elevation_deg: f64) -> Vec<FrpMessage> {
         let key = flightrelay::ShotKey {
             shot_id: format!("shot-{n}"),
             shot_number: n,
         };
-        let ball = flightrelay::BallFlight {
+        let launch = flightrelay::Launch {
             launch_speed: Some(flightrelay::Velocity::MilesPerHour(speed_mph)),
             launch_elevation: Some(elevation_deg),
             launch_azimuth: Some(0.0),
             backspin_rpm: Some(3000),
             sidespin_rpm: Some(0),
-            ..flightrelay::BallFlight::default()
+            ..flightrelay::Launch::default()
         };
         vec![
             envelope(FrpEvent::shot_trigger(key.clone())),
-            envelope(FrpEvent::ball_flight(key.clone(), ball)),
+            envelope(FrpEvent::launch(key.clone(), launch)),
             envelope(FrpEvent::ShotFinished { key }),
         ]
     }
@@ -1266,6 +1264,7 @@ mod tests {
                 manufacturer: None,
                 model: None,
                 firmware: None,
+                source: Some(flightrelay::Source::Measured),
                 telemetry: Some(ready),
             }))
             .expect("send");
@@ -1452,8 +1451,8 @@ mod tests {
         let mut fm = FlightManager::new();
         let mut msgs = shot_messages(1, 160.0, 11.0);
         if let FrpMessage::Envelope(env) = &mut msgs[1] {
-            if let FrpEvent::BallFlight { ball, .. } = &mut env.event {
-                ball.launch_speed = None;
+            if let FrpEvent::Launch { launch, .. } = &mut env.event {
+                launch.launch_speed = None;
             }
         }
         deliver(&mut intake, &mut fm, &msgs, 0.0);
