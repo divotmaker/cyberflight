@@ -17,7 +17,9 @@ A (very) digital driving range for golf simulators.
 
 ## Launch Monitor Integration
 
-cyberflight receives live shot data from [flighthook](https://github.com/divotmaker/flighthook), an open-source golf automation bus. flighthook connects to your launch monitor and broadcasts shot data over a local WebSocket (the [Flight Relay Protocol](https://github.com/flightrelay/spec)); cyberflight subscribes as a client to render ball flights in real time.
+cyberflight receives live shot data from [flighthook](https://github.com/divotmaker/flighthook), an open-source golf automation bus. flighthook connects to your launch monitor and broadcasts shot data over a local WebSocket (the [Flight Relay Protocol](https://github.com/flightrelay/spec), FRP 0.3.0); cyberflight joins that bus as a collector (an actor that only listens, with a new actor id each run) to render ball flights in real time. It also connects to any other FRP launch monitor or hub with `--frp`.
+
+The SYSTEM rows of the HUD list each launch monitor on the bus by name: READY when it reports no blockers, WAITING otherwise.
 
 ### Supported launch monitors
 

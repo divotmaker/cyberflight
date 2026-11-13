@@ -22,9 +22,10 @@ use dimple::environment::Environment;
 use dimple::ground::Termination;
 use dimple::trajectory::{ShotInput, ShotResult};
 
+use flightrelay::types::roles;
 use flightrelay::{
-    EndpointConfig, FrpConnection, FrpEndpoint, FrpEvent, FrpMessage, Role, ShotAggregator,
-    Transport,
+    BusActor, BusState, DEFAULT_HEARTBEAT, EndpointConfig, FrpBody, FrpConnection, FrpEndpoint,
+    FrpMessage, ShotAggregator, ShotEvent, Transport,
 };
 
 /// FRP spec version we support.
@@ -341,6 +342,12 @@ pub const DIAL_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// A shot taken in this much later than it arrived is reported (seconds).
 const LATE_INTAKE_S: f64 = 0.25;
 
+/// How often the intake forgets actors that stopped heartbeating.
+const EXPIRE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The display name of cyberflight's actor on the bus.
+const ACTOR_NAME: &str = "cyberflight";
+
 /// The FRP device dialled without `--frp`: flighthook on this machine.
 ///
 /// An IPv4 address rather than `localhost`: by default flighthook listens on
@@ -371,24 +378,32 @@ pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
 
 /// Open the FRP endpoint cyberflight dials at `url`.
 ///
-/// Cyberflight is an FRP *controller*: it receives shot data and drives the
-/// device. Opening a dialing endpoint performs no I/O, so this only fails on a
-/// malformed configuration.
+/// Cyberflight is an FRP *collector*: an actor on the bus that receives
+/// shots and sends nothing but its own `bus.actor`. Opening a dialing
+/// endpoint performs no I/O, so this only fails on a malformed
+/// configuration.
 ///
 /// # Errors
 ///
 /// Returns an error if the endpoint cannot be opened.
 pub fn frp_endpoint(url: &str) -> Result<FrpEndpoint, flightrelay::FrpError> {
-    FrpEndpoint::open(
-        EndpointConfig::new(Role::Controller, Transport::connect(url)).with_name("cyberflight"),
+    FrpEndpoint::open(EndpointConfig::new(Transport::connect(url)))
+}
+
+/// Cyberflight's `bus.actor`: role `collector`, heartbeat
+/// [`DEFAULT_HEARTBEAT`].
+fn actor_message(actor_id: &str) -> FrpMessage {
+    FrpMessage::new(
+        actor_id,
+        BusActor::new(ACTOR_NAME, DEFAULT_HEARTBEAT.as_secs_f64()).with_role(roles::COLLECTOR),
     )
 }
 
 /// The endpoint back from a dialing thread, with the connection it made.
 type DialResult = (FrpEndpoint, Result<FrpConnection, flightrelay::FrpError>);
 
-/// Dial the device and complete the FRP handshake on a background thread,
-/// so the caller can report a handshake that does not finish. The endpoint
+/// Dial the bus and complete the WebSocket upgrade on a background thread,
+/// so the caller can report a dial that does not finish. The endpoint
 /// and the outcome come back on the returned channel.
 ///
 /// # Errors
@@ -425,33 +440,46 @@ fn spawn_dial(
     Ok(rx)
 }
 
-/// Turns FRP messages into shots: tracks launch monitor ready states and
-/// aggregates each shot's lifecycle events.
+/// Turns FRP messages into shots: tracks the bus's launch monitors and
+/// their ready states, and aggregates each shot's messages.
 ///
 /// Every message is fed, whatever is on screen, so a shot that arrives while
 /// an earlier ball is still flying or rolling is never lost.
 #[derive(Debug, Default)]
 pub struct ShotIntake {
     shots: ShotAggregator,
-    /// Last known ready state per launch monitor device ID.
+    bus: BusState,
+    /// Ready state (no blockers) per launch monitor on the bus, by the name
+    /// in its `bus.actor`.
     pub lm_states: HashMap<String, bool>,
 }
 
 impl ShotIntake {
-    /// Process one FRP message. Returns a shot once its `shot_finished`
+    /// Process one FRP message. Returns a shot once its `shot.finished`
     /// arrives and it converts to a simulation input.
+    ///
+    /// A message for a shot that already finished is not shown again: one
+    /// from the shot's own launch monitor is logged as a warning, and an
+    /// addendum from another actor (e.g. a slow flight model's
+    /// `shot.flight`) is noted in the log. The shot has already been shown.
     pub fn ingest(&mut self, msg: &FrpMessage) -> Option<ReceivedShot> {
-        if let FrpMessage::Envelope(env) = msg {
-            if let FrpEvent::DeviceTelemetry {
-                telemetry: Some(t), ..
-            } = &env.event
-            {
-                if let Some(ready) = t.get(flightrelay::types::telemetry::READY) {
-                    self.lm_states.insert(env.device.clone(), ready == "true");
-                }
-            }
+        if self.bus.apply(msg) {
+            self.refresh_lm_states();
         }
-        let completed = self.shots.feed(msg)?;
+        let completed = match self.shots.feed(msg)? {
+            ShotEvent::Finished(shot) => shot,
+            ShotEvent::Updated(shot) => {
+                eprintln!(
+                    "INFO: shot #{} from {} updated after it finished; the shot on screen is unchanged",
+                    shot.key.shot_number, shot.from
+                );
+                return None;
+            }
+            ShotEvent::Late(late) => {
+                eprintln!("WARN: {late}");
+                return None;
+            }
+        };
         match ReceivedShot::from_frp(&completed) {
             Ok(shot) => {
                 for clamp in &shot.clamped {
@@ -465,11 +493,50 @@ impl ShotIntake {
             Err(reason) => {
                 eprintln!(
                     "WARN: shot #{} from {} not shown: {reason}",
-                    completed.key.shot_number, completed.device
+                    completed.key.shot_number, completed.from
                 );
                 None
             }
         }
+    }
+
+    /// Forget the actors that missed three heartbeats, with their state and
+    /// open shots.
+    pub fn expire(&mut self) {
+        let gone = self.bus.expire();
+        for actor in &gone {
+            self.shots.forget_actor(actor);
+        }
+        if !gone.is_empty() {
+            self.refresh_lm_states();
+        }
+    }
+
+    /// Rebuild [`lm_states`](Self::lm_states) from the bus: one entry per
+    /// `launch_monitor` actor, ready when it lists no blockers. Two actors
+    /// with one name are told apart by their actor ids.
+    fn refresh_lm_states(&mut self) {
+        let monitors: Vec<(&str, &BusActor)> = self
+            .bus
+            .actors()
+            .filter(|(_, actor)| actor.has_role(roles::LAUNCH_MONITOR))
+            .collect();
+        self.lm_states = monitors
+            .iter()
+            .map(|&(id, actor)| {
+                let shared = monitors
+                    .iter()
+                    .filter(|(_, other)| other.name == actor.name)
+                    .count()
+                    > 1;
+                let label = if shared {
+                    format!("{} ({id})", actor.name)
+                } else {
+                    actor.name.clone()
+                };
+                (label, actor.is_clear())
+            })
+            .collect();
     }
 }
 
@@ -487,7 +554,7 @@ pub struct ArrivedShot {
 enum IntakeEvent {
     /// A dial has started: not connected.
     Connecting,
-    /// The FRP handshake completed.
+    /// The connection is up and cyberflight's actor announced.
     Connected,
     /// The connection was lost.
     Disconnected,
@@ -512,21 +579,23 @@ impl IntakeTiming {
     };
 }
 
-/// Shot intake from an FRP device, used by both windowed and streaming modes.
+/// Shot intake from an FRP bus, used by both windowed and streaming modes.
 ///
-/// A dedicated thread holds the connection and reads it with blocking reads,
-/// whatever the app is doing: it connects, reconnects every
-/// [`RECONNECT_INTERVAL`] while disconnected, aggregates shots and stamps
-/// each with its arrival time. [`poll`](Self::poll) never blocks.
+/// A dedicated thread holds the connection and reads it whatever the app is
+/// doing: it connects, announces cyberflight as a collector actor (a new
+/// actor id each run) and republishes its `bus.actor` every
+/// [`DEFAULT_HEARTBEAT`], reconnects every [`RECONNECT_INTERVAL`] while
+/// disconnected, aggregates shots and stamps each with its arrival time.
+/// [`poll`](Self::poll) never blocks.
 ///
 /// The thread is never joined. It ends at its next report after this is
 /// dropped (a shot, a ready-state change, a disconnect or a dial), or with
 /// the process.
 pub struct FrpState {
     events: mpsc::Receiver<IntakeEvent>,
-    /// Whether the device is connected (the FRP handshake completed).
+    /// Whether the bus is connected.
     pub connected: bool,
-    /// Last known ready state per launch monitor device ID; empty while
+    /// Last known ready state per launch monitor, by name; empty while
     /// disconnected.
     pub lm_states: HashMap<String, bool>,
     /// The intake thread has ended (reported once).
@@ -534,7 +603,7 @@ pub struct FrpState {
 }
 
 impl FrpState {
-    /// Start taking in shots from the device at `url`. Arrival times are
+    /// Start taking in shots from the bus at `url`. Arrival times are
     /// seconds since `start`; `wake` is called after each shot, connection
     /// change or ready-state change, from the intake thread.
     ///
@@ -547,7 +616,9 @@ impl FrpState {
         start: Instant,
         wake: impl Fn() + Send + 'static,
     ) -> anyhow::Result<Self> {
-        let (events, _thread) = spawn_intake(url, start, wake, IntakeTiming::DEFAULT)?;
+        let actor_id = flightrelay::new_actor_id();
+        eprintln!("FRP actor id {actor_id} (new for this run)");
+        let (events, _thread) = spawn_intake(url, &actor_id, start, wake, IntakeTiming::DEFAULT)?;
         Ok(Self::from_events(events))
     }
 
@@ -589,10 +660,11 @@ impl FrpState {
     }
 }
 
-/// Start the intake thread for the device at `url`. Returns its event
-/// channel and handle.
+/// Start the intake thread for the bus at `url`, as the actor `actor_id`.
+/// Returns its event channel and handle.
 fn spawn_intake(
     url: &str,
+    actor_id: &str,
     start: Instant,
     wake: impl Fn() + Send + 'static,
     timing: IntakeTiming,
@@ -600,9 +672,10 @@ fn spawn_intake(
     let endpoint = frp_endpoint(url).context("open the FRP endpoint")?;
     let (tx, rx) = mpsc::channel();
     let url = url.to_owned();
+    let me = actor_message(actor_id);
     let handle = thread::Builder::new()
         .name("frp-intake".to_owned())
-        .spawn(move || run_intake(&url, endpoint, start, &tx, &wake, timing))
+        .spawn(move || run_intake(&url, &me, endpoint, start, &tx, &wake, timing))
         .context("start the FRP intake thread")?;
     Ok((rx, handle))
 }
@@ -611,6 +684,7 @@ fn spawn_intake(
 /// Returns once the app has dropped its end of `tx`.
 fn run_intake(
     url: &str,
+    me: &FrpMessage,
     endpoint: FrpEndpoint,
     start: Instant,
     tx: &mpsc::Sender<IntakeEvent>,
@@ -652,7 +726,11 @@ fn run_intake(
         let Some(mut conn) = conn else {
             continue;
         };
-        eprintln!("Connected (FRP {})", conn.version());
+        if let Err(e) = conn.greet(std::slice::from_ref(me), &[]) {
+            eprintln!("FRP disconnected: {e}");
+            continue;
+        }
+        eprintln!("Connected (FRP {FRP_VERSION})");
         if !report(IntakeEvent::Connected) {
             return;
         }
@@ -660,18 +738,31 @@ fn run_intake(
         let mut intake = ShotIntake::default();
         // The ready states the app has; it clears them when a dial starts.
         let mut reported = HashMap::new();
+        let mut beat = Instant::now();
+        let mut expired = Instant::now();
         let reason = loop {
-            match conn.recv() {
-                Ok(msg) => {
-                    let arrival = start.elapsed().as_secs_f64();
-                    let shot = intake.ingest(&msg);
-                    if intake.lm_states != reported {
-                        reported.clone_from(&intake.lm_states);
-                        if !report(IntakeEvent::LmStates(reported.clone())) {
-                            return;
-                        }
+            // Wait for a message no longer than the next heartbeat or the
+            // next expiry is due.
+            let left = DEFAULT_HEARTBEAT
+                .saturating_sub(beat.elapsed())
+                .min(EXPIRE_INTERVAL.saturating_sub(expired.elapsed()));
+            match conn.recv_timeout(left) {
+                Ok(Some(msg)) if matches!(msg.body, FrpBody::BusSync(_)) => {
+                    if let Err(e) = conn.send(me) {
+                        break e;
                     }
-                    if let Some(shot) = shot {
+                }
+                Ok(Some(msg)) => {
+                    let arrival = start.elapsed().as_secs_f64();
+                    if let Some(shot) = intake.ingest(&msg) {
+                        // The ready states first, so a shot's own state
+                        // change is on the app before the shot.
+                        if intake.lm_states != reported {
+                            reported.clone_from(&intake.lm_states);
+                            if !report(IntakeEvent::LmStates(reported.clone())) {
+                                return;
+                            }
+                        }
                         eprintln!(
                             "Shot #{} from {} arrived at {arrival:.3}s",
                             shot.shot_number, shot.device
@@ -681,10 +772,27 @@ fn run_intake(
                         }
                     }
                 }
-                Err(flightrelay::FrpError::Json(_)) => {
-                    // some messages may not be parsable due to extension
-                }
+                // Nothing arrived in time.
+                Ok(None) => {}
+                // Not an FRP message: ignore it and keep reading.
+                Err(flightrelay::FrpError::Json(_)) => {}
                 Err(e) => break e,
+            }
+            if beat.elapsed() >= DEFAULT_HEARTBEAT {
+                beat = Instant::now();
+                if let Err(e) = conn.send(me) {
+                    break e;
+                }
+            }
+            if expired.elapsed() >= EXPIRE_INTERVAL {
+                expired = Instant::now();
+                intake.expire();
+            }
+            if intake.lm_states != reported {
+                reported.clone_from(&intake.lm_states);
+                if !report(IntakeEvent::LmStates(reported.clone())) {
+                    return;
+                }
             }
         };
         // Device states and partly received shots go with the connection.
@@ -695,10 +803,9 @@ fn run_intake(
     }
 }
 
-/// Dial `url` and wait for the handshake, reporting every `warn` that it
-/// has not finished. A dial that does not finish is left running: the
-/// handshake has no timeout, so a redial would only add a second waiting
-/// thread.
+/// Dial `url` and wait for the WebSocket upgrade, reporting every `warn`
+/// that it has not finished. A dial that does not finish is left running,
+/// so a redial would not add a second waiting thread.
 ///
 /// Returns the endpoint for the next dial (`None` if it was lost and could
 /// not be reopened) and the connection, if one was made.
@@ -725,7 +832,7 @@ fn dial(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 eprintln!(
                     "WARN: still connecting to FRP at {url} after {:.0}s: \
-                     the device has not answered",
+                     the peer has not answered",
                     started.elapsed().as_secs_f64()
                 );
             }
@@ -904,8 +1011,19 @@ mod tests {
         )
     }
 
-    fn envelope(event: FrpEvent) -> FrpMessage {
-        FrpMessage::Envelope(flightrelay::FrpEnvelope::new("test.0", event))
+    /// The actor id of the test's launch monitor.
+    const LM: &str = "7d2f9a41c03be856";
+
+    /// A message from the test's launch monitor.
+    fn lm(body: impl Into<flightrelay::FrpBody>) -> FrpMessage {
+        FrpMessage::new(LM, body)
+    }
+
+    /// The test launch monitor's `bus.actor`, named `name`, with `blockers`.
+    fn lm_actor(name: &str, blockers: &[&str]) -> BusActor {
+        let mut actor = BusActor::new(name, 2.0).with_role(roles::LAUNCH_MONITOR);
+        actor.blockers = blockers.iter().map(|&b| b.to_owned()).collect();
+        actor
     }
 
     /// The lifecycle messages of shot `n`: trigger, launch, finished.
@@ -923,9 +1041,12 @@ mod tests {
             ..flightrelay::Launch::default()
         };
         vec![
-            envelope(FrpEvent::shot_trigger(key.clone())),
-            envelope(FrpEvent::launch(key.clone(), launch)),
-            envelope(FrpEvent::ShotFinished { key }),
+            lm(flightrelay::ShotTrigger::new(key.clone())),
+            lm(flightrelay::ShotLaunch {
+                key: key.clone(),
+                launch,
+            }),
+            lm(flightrelay::ShotFinished { key }),
         ]
     }
 
@@ -980,11 +1101,8 @@ mod tests {
 
     /// A device listening on a free local port, and the URL to dial it.
     fn device() -> (FrpEndpoint, String) {
-        let device = FrpEndpoint::open(EndpointConfig::new(
-            Role::Device,
-            Transport::listen("127.0.0.1:0"),
-        ))
-        .expect("device endpoint");
+        let device = FrpEndpoint::open(EndpointConfig::new(Transport::listen("127.0.0.1:0")))
+            .expect("device endpoint");
         let addr = device.local_addr().expect("addr").expect("bound");
         (device, format!("ws://{addr}/frp"))
     }
@@ -1002,6 +1120,22 @@ mod tests {
     /// Returns how many there were.
     fn turn_away(holder: &std::net::TcpListener) -> usize {
         std::iter::from_fn(|| holder.accept().ok()).count()
+    }
+
+    /// Cyberflight's actor id in these tests.
+    const ME: &str = "c19e04b7a2d5f318";
+
+    /// Read cyberflight's greeting on `conn`: its `bus.actor`, then
+    /// `bus.sync`.
+    fn greeted(conn: &mut FrpConnection) {
+        let actor = conn.recv().expect("bus.actor");
+        assert_eq!(actor, actor_message(ME));
+        let sync = conn.recv().expect("bus.sync");
+        assert_eq!(
+            (sync.from.as_str(), sync.kind()),
+            (ME, "bus.sync"),
+            "{sync:?}"
+        );
     }
 
     /// The longest any wait in these tests lasts.
@@ -1022,7 +1156,7 @@ mod tests {
         let wake = move || {
             counter.fetch_add(1, Ordering::SeqCst);
         };
-        let (events, thread) = spawn_intake(url, start, wake, QUICK).expect("intake");
+        let (events, thread) = spawn_intake(url, ME, start, wake, QUICK).expect("intake");
         (FrpState::from_events(events), start, wakes, thread)
     }
 
@@ -1108,8 +1242,8 @@ mod tests {
         )));
     }
 
-    // The dial this test starts stays blocked in the handshake until the
-    // test closes the connection: the FRP handshake has no timeout.
+    // The dial this test starts stays blocked in the WebSocket upgrade until
+    // the test closes the connection: the upgrade has no timeout.
     #[test]
     fn a_silent_device_is_dialled_once() {
         // Accepts TCP but never answers the WebSocket upgrade.
@@ -1160,11 +1294,9 @@ mod tests {
         // The device takes the port over from the holder.
         let addr = holder.local_addr().expect("addr");
         drop(holder);
-        let mut device = FrpEndpoint::open(EndpointConfig::new(
-            Role::Device,
-            Transport::listen(addr.to_string()),
-        ))
-        .expect("device endpoint");
+        let mut device =
+            FrpEndpoint::open(EndpointConfig::new(Transport::listen(addr.to_string())))
+                .expect("device endpoint");
         let server = thread::spawn(move || {
             let conn = device.establish().expect("handshake");
             (device, conn)
@@ -1256,18 +1388,8 @@ mod tests {
         let (mut device, url) = device();
         let server = thread::spawn(move || {
             let mut conn = device.establish().expect("handshake");
-            let ready = HashMap::from([(
-                flightrelay::types::telemetry::READY.to_owned(),
-                "true".to_owned(),
-            )]);
-            conn.send(&envelope(FrpEvent::DeviceTelemetry {
-                manufacturer: None,
-                model: None,
-                firmware: None,
-                source: Some(flightrelay::Source::Measured),
-                telemetry: Some(ready),
-            }))
-            .expect("send");
+            greeted(&mut conn);
+            conn.send(&lm(lm_actor("Eagle One", &[]))).expect("send");
             // Shot 3 is cut off by the close; its end comes on the next connection.
             let shot3 = shot_messages(3, 140.0, 14.0);
             for msg in &shot3[..2] {
@@ -1276,6 +1398,7 @@ mod tests {
             drop(conn);
 
             let mut conn = device.establish().expect("second handshake");
+            greeted(&mut conn);
             conn.send(&shot3[2]).expect("send");
             for msg in shot_messages(4, 140.0, 14.0) {
                 conn.send(&msg).expect("send");
@@ -1283,14 +1406,15 @@ mod tests {
             (device, conn)
         });
 
-        let (events, intake) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
+        let (events, intake) =
+            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
         let seen = recv_until(&events, |e| matches!(e, IntakeEvent::Shot(_)));
         let (_device, conn) = join(server, "the device (it accepts twice)");
         assert_eq!(
             labels(&seen),
             [
                 "Connected",
-                r#"ready {"test.0": true}"#,
+                r#"ready {"Eagle One": true}"#,
                 "Disconnected",
                 "Connected",
                 // Shot 3 was cut off by the close and is forgotten.
@@ -1304,7 +1428,7 @@ mod tests {
         // The app forgets the ready states with the connection.
         let (tx, rx) = mpsc::channel();
         let mut state = FrpState::from_events(rx);
-        let ready = HashMap::from([("test.0".to_owned(), true)]);
+        let ready = HashMap::from([("Eagle One".to_owned(), true)]);
         for event in [IntakeEvent::Connected, IntakeEvent::LmStates(ready.clone())] {
             tx.send(event).expect("send");
         }
@@ -1315,6 +1439,30 @@ mod tests {
         assert!(state.poll().is_empty());
         assert!(!state.connected);
         assert!(state.lm_states.is_empty());
+    }
+
+    #[test]
+    fn the_intake_answers_bus_sync_with_its_actor() {
+        let (mut device, url) = device();
+        let server = thread::spawn(move || {
+            let mut conn = device.establish().expect("handshake");
+            greeted(&mut conn);
+            conn.send(&FrpMessage::new(
+                "7d2f9a41c03be856",
+                flightrelay::BusSync::default(),
+            ))
+            .expect("send");
+            let answer = conn.recv().expect("answer to bus.sync");
+            (device, conn, answer)
+        });
+
+        let (events, intake) =
+            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
+        let (_device, conn, answer) = join(server, "the device");
+        assert_eq!(answer, actor_message(ME));
+        drop(events);
+        drop(conn);
+        join(intake, "the intake");
     }
 
     #[test]
@@ -1332,7 +1480,8 @@ mod tests {
     fn the_intake_ends_when_the_app_is_gone() {
         // Disconnected: it ends at its next dial.
         let (holder, url) = held_port();
-        let (events, intake) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
+        let (events, intake) =
+            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
         let mut dials = 0;
         wait_until(|| {
             dials += turn_away(&holder);
@@ -1350,7 +1499,8 @@ mod tests {
 
         // Connected: it ends at the next shot.
         let (mut device, url) = device();
-        let (events, intake) = spawn_intake(&url, Instant::now(), || {}, QUICK).expect("intake");
+        let (events, intake) =
+            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
         let server = thread::spawn(move || {
             let conn = device.establish().expect("handshake");
             (device, conn)
@@ -1450,13 +1600,84 @@ mod tests {
         let mut intake = ShotIntake::default();
         let mut fm = FlightManager::new();
         let mut msgs = shot_messages(1, 160.0, 11.0);
-        if let FrpMessage::Envelope(env) = &mut msgs[1] {
-            if let FrpEvent::Launch { launch, .. } = &mut env.event {
-                launch.launch_speed = None;
-            }
+        if let flightrelay::FrpBody::ShotLaunch(m) = &mut msgs[1].body {
+            m.launch.launch_speed = None;
         }
         deliver(&mut intake, &mut fm, &msgs, 0.0);
         assert!(fm.flights.is_empty());
+    }
+
+    #[test]
+    fn launch_monitors_are_ready_without_blockers() {
+        let mut intake = ShotIntake::default();
+        assert!(intake.lm_states.is_empty());
+        intake.ingest(&lm(lm_actor("Eagle One", &["not_armed"])));
+        assert_eq!(
+            intake.lm_states,
+            HashMap::from([("Eagle One".to_owned(), false)])
+        );
+        intake.ingest(&lm(lm_actor("Eagle One", &[])));
+        assert_eq!(
+            intake.lm_states,
+            HashMap::from([("Eagle One".to_owned(), true)])
+        );
+        // Another actor with no launch monitor role is not listed; a second
+        // launch monitor with the same name is told apart by its id.
+        intake.ingest(&FrpMessage::new(
+            "aaaa000000000000",
+            BusActor::new("Shot Log", 2.0).with_role(roles::COLLECTOR),
+        ));
+        intake.ingest(&FrpMessage::new(
+            "bbbb000000000000",
+            lm_actor("Eagle One", &["no_ball"]),
+        ));
+        assert_eq!(
+            intake.lm_states,
+            HashMap::from([
+                (format!("Eagle One ({LM})"), true),
+                ("Eagle One (bbbb000000000000)".to_owned(), false),
+            ])
+        );
+        // An actor that leaves is forgotten.
+        intake.ingest(&FrpMessage::new(
+            "bbbb000000000000",
+            flightrelay::Removal::of(flightrelay::StateKind::BusActor),
+        ));
+        assert_eq!(
+            intake.lm_states,
+            HashMap::from([("Eagle One".to_owned(), true)])
+        );
+    }
+
+    #[test]
+    fn a_late_flight_does_not_launch_the_shot_again() {
+        let mut intake = ShotIntake::default();
+        let mut fm = FlightManager::new();
+        let msgs = shot_messages(1, 160.0, 11.0);
+        deliver(&mut intake, &mut fm, &msgs, 0.0);
+        assert_eq!(fm.flights.len(), 1);
+        let late = FrpMessage::new(
+            "e4a7136b9f02cd58",
+            flightrelay::ShotFlight {
+                key: flightrelay::ShotKey::new("shot-1", 1),
+                flight: flightrelay::FlightResult::new(flightrelay::Basis::Modeled),
+            },
+        );
+        assert!(intake.ingest(&late).is_none());
+        assert_eq!(fm.flights.len(), 1);
+    }
+
+    #[test]
+    fn cyberflight_announces_itself_as_a_collector() {
+        let me = actor_message(ME);
+        assert_eq!(me.from, ME);
+        let flightrelay::FrpBody::BusActor(actor) = &me.body else {
+            panic!("{me:?}");
+        };
+        assert_eq!(actor.name, ACTOR_NAME);
+        assert!(actor.has_role(roles::COLLECTOR));
+        assert!(actor.is_clear());
+        assert!((actor.heartbeat - DEFAULT_HEARTBEAT.as_secs_f64()).abs() < 1e-9);
     }
 
     #[test]

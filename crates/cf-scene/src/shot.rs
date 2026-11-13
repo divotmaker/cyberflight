@@ -85,11 +85,15 @@ impl std::fmt::Display for Clamped {
 /// A complete shot received from flightrelay, ready for simulation and display.
 #[derive(Debug, Clone)]
 pub struct ReceivedShot {
+    /// The actor id of the launch monitor that sent the shot's
+    /// `shot.trigger`.
     pub device: String,
     pub shot_number: u32,
     pub input: ShotInput,
     pub club: ClubDelivery,
-    /// Carry distance in the shot's flight result (yards), if it has one.
+    /// Carry distance (yards) of the shot's flight result to show
+    /// ([`CompletedShot::flight`](flightrelay::CompletedShot::flight)), if it
+    /// has one.
     pub lm_carry_yards: Option<f64>,
     /// Whether the device measured the backspin in `input` (directly or as
     /// total spin). When false it is the spin the shot's flight model
@@ -242,14 +246,13 @@ impl ReceivedShot {
             });
 
         let lm_carry_yards = display(
-            shot.flight
-                .as_ref()
+            shot.flight()
                 .and_then(|f| f.carry_distance)
                 .map(|d| d.as_yards()),
         );
 
         Ok(Self {
-            device: shot.device.clone(),
+            device: shot.from.clone(),
             shot_number: shot.key.shot_number,
             input,
             club,
@@ -268,13 +271,22 @@ mod tests {
     use dimple::environment::Environment;
     use dimple::trajectory::simulate_flight;
     use flightrelay::{
-        AssumedLaunch, Basis, ClubData, CompletedShot, Distance, FlightResult, Launch, ShotKey,
-        Velocity,
+        AssumedLaunch, Basis, ClubData, CompletedShot, Distance, Flight, FlightResult, Launch,
+        ShotKey, Velocity,
     };
+
+    /// `data` with `flight` as its only flight result, from its launch
+    /// monitor.
+    fn with_flight(data: &mut CompletedShot, flight: FlightResult) {
+        data.flights = vec![Flight {
+            from: data.from.clone(),
+            flight,
+        }];
+    }
 
     fn sample_completed_shot() -> CompletedShot {
         CompletedShot {
-            device: "mevo.0".to_owned(),
+            from: "7d2f9a41c03be856".to_owned(),
             key: ShotKey {
                 shot_id: "test-uuid".to_owned(),
                 shot_number: 1,
@@ -288,7 +300,7 @@ mod tests {
                 sidespin_rpm: Some(-300),
                 ..Launch::default()
             }),
-            flight: None,
+            flights: Vec::new(),
             club: Some(ClubData {
                 club_speed: Some(Velocity::MilesPerHour(112.0)),
                 path: Some(-2.1),
@@ -300,6 +312,8 @@ mod tests {
             }),
             impact: None,
             source: None,
+            turn: None,
+            block: None,
         }
     }
 
@@ -521,10 +535,13 @@ mod tests {
         let mut data = sample_completed_shot();
         let b = ball(&mut data);
         b.launch_speed = Some(Velocity::MetersPerSecond(70.0));
-        data.flight = Some(FlightResult {
-            carry_distance: Some(Distance::Meters(150.0)),
-            ..FlightResult::new(Basis::Tracked)
-        });
+        with_flight(
+            &mut data,
+            FlightResult {
+                carry_distance: Some(Distance::Meters(150.0)),
+                ..FlightResult::new(Basis::Tracked)
+            },
+        );
         data.club.as_mut().unwrap().club_speed = Some(Velocity::KilometersPerHour(160.0));
         let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!((shot.input.ball_speed_mph - 156.586).abs() < 0.01);
@@ -535,10 +552,13 @@ mod tests {
     #[test]
     fn drops_non_finite_display_values() {
         let mut data = sample_completed_shot();
-        data.flight = Some(FlightResult {
-            carry_distance: Some(Distance::Yards(f64::NAN)),
-            ..FlightResult::new(Basis::Tracked)
-        });
+        with_flight(
+            &mut data,
+            FlightResult {
+                carry_distance: Some(Distance::Yards(f64::NAN)),
+                ..FlightResult::new(Basis::Tracked)
+            },
+        );
         let club = data.club.as_mut().unwrap();
         club.club_speed = Some(Velocity::MilesPerHour(f64::INFINITY));
         club.path = Some(f64::NAN);
@@ -580,16 +600,19 @@ mod tests {
         let launch = data.launch.as_mut().unwrap();
         launch.backspin_rpm = None;
         launch.sidespin_rpm = None;
-        data.flight = Some(FlightResult {
-            model: Some("estimate".to_owned()),
-            carry_distance: Some(Distance::Yards(120.0)),
-            assumed: Some(AssumedLaunch {
-                backspin_rpm: Some(6200),
-                sidespin_rpm: Some(150),
-                ..AssumedLaunch::default()
-            }),
-            ..FlightResult::new(Basis::Modeled)
-        });
+        with_flight(
+            &mut data,
+            FlightResult {
+                model: Some("estimate".to_owned()),
+                carry_distance: Some(Distance::Yards(120.0)),
+                assumed: Some(AssumedLaunch {
+                    backspin_rpm: Some(6200),
+                    sidespin_rpm: Some(150),
+                    ..AssumedLaunch::default()
+                }),
+                ..FlightResult::new(Basis::Modeled)
+            },
+        );
         data
     }
 
@@ -615,9 +638,20 @@ mod tests {
     }
 
     #[test]
+    fn a_flight_models_assumptions_fill_the_launch() {
+        // The launch monitor sent no flight; a flight model sent one.
+        let mut data = modeled_chip();
+        data.flights[0].from = "e4a7136b9f02cd58".to_owned();
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!((shot.input.backspin_rpm - 6200.0).abs() < 0.01);
+        assert!(!shot.backspin_measured);
+        assert!((shot.lm_carry_yards.unwrap() - 120.0).abs() < 0.01);
+    }
+
+    #[test]
     fn tracked_flight_assumes_nothing() {
         let mut data = modeled_chip();
-        data.flight.as_mut().unwrap().basis = Basis::Tracked;
+        data.flights[0].flight.basis = Basis::Tracked;
         let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!((shot.input.backspin_rpm - ASSUMED_BACKSPIN_RPM).abs() < 0.01);
         assert!(!shot.backspin_measured);
@@ -626,7 +660,7 @@ mod tests {
     #[test]
     fn preserves_metadata() {
         let shot = ReceivedShot::from_frp(&sample_completed_shot()).unwrap();
-        assert_eq!(shot.device, "mevo.0");
+        assert_eq!(shot.device, "7d2f9a41c03be856");
         assert_eq!(shot.shot_number, 1);
     }
 }

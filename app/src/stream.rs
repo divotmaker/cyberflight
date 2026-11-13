@@ -126,7 +126,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         }
     }
 
-    // Take in shots from the FRP device.
+    // Take in shots from the FRP bus.
     let start = Instant::now();
     let mut fh = FrpState::new(frp_url, start, || {}).context("start the FRP intake")?;
     let mut fm = FlightManager::new();

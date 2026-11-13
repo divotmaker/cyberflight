@@ -457,18 +457,18 @@ fn run() -> Result<()> {
 mod tests {
     use super::*;
     use flightrelay::{
-        EndpointConfig, FrpEndpoint, FrpEnvelope, FrpEvent, FrpMessage, Launch, Role, ShotKey,
-        Transport, Velocity,
+        EndpointConfig, FrpEndpoint, FrpMessage, Launch, ShotFinished, ShotKey, ShotLaunch,
+        ShotTrigger, Transport, Velocity,
     };
 
-    /// An app whose FRP device at `url` is dialled from now.
+    /// An app whose FRP bus at `url` is dialled from now.
     fn app_of(url: &str) -> App {
         let start = Instant::now();
         let frp = FrpState::new(url, start, || {}).expect("intake");
         App::new(true, frp, start)
     }
 
-    /// An app whose FRP device refuses the connection.
+    /// An app whose FRP bus refuses the connection.
     fn app() -> App {
         app_of("ws://127.0.0.1:9/frp")
     }
@@ -539,11 +539,8 @@ mod tests {
     /// Shots that arrive while nothing is drawn launch when they arrived.
     #[test]
     fn advance_launches_shots_without_a_renderer() {
-        let mut device = FrpEndpoint::open(EndpointConfig::new(
-            Role::Device,
-            Transport::listen("127.0.0.1:0"),
-        ))
-        .expect("device endpoint");
+        let mut device = FrpEndpoint::open(EndpointConfig::new(Transport::listen("127.0.0.1:0")))
+            .expect("device endpoint");
         let addr = device.local_addr().expect("addr").expect("bound");
         let server = std::thread::spawn(move || {
             let mut conn = device.establish().expect("handshake");
@@ -558,13 +555,19 @@ mod tests {
                 sidespin_rpm: Some(0),
                 ..Launch::default()
             };
-            for event in [
-                FrpEvent::shot_trigger(key.clone()),
-                FrpEvent::launch(key.clone(), launch),
-                FrpEvent::ShotFinished { key },
+            let lm = "7d2f9a41c03be856";
+            for msg in [
+                FrpMessage::new(lm, ShotTrigger::new(key.clone())),
+                FrpMessage::new(
+                    lm,
+                    ShotLaunch {
+                        key: key.clone(),
+                        launch,
+                    },
+                ),
+                FrpMessage::new(lm, ShotFinished { key }),
             ] {
-                conn.send(&FrpMessage::Envelope(FrpEnvelope::new("test.0", event)))
-                    .expect("send");
+                conn.send(&msg).expect("send");
             }
             (device, conn)
         });
