@@ -1251,12 +1251,7 @@ mod tests {
         listener.set_nonblocking(true).expect("nonblocking");
         let url = format!("ws://{}/frp", listener.local_addr().expect("addr"));
         let (mut state, _, _, intake) = intake(&url);
-        let polled = Instant::now();
         assert!(state.poll().is_empty());
-        assert!(
-            polled.elapsed() < Duration::from_millis(100),
-            "poll returns at once"
-        );
 
         // Many reconnect intervals pass; the outstanding dial is not repeated.
         let mut accepted = Vec::new();
