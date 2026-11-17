@@ -631,7 +631,7 @@ impl Drop for StreamEncoder {
 /// Strip alpha channel: RGBA → RGB24 in-place into pre-allocated buffer.
 fn strip_alpha(rgba: &[u8], rgb: &mut [u8]) {
     let mut j = 0;
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         rgb[j] = pixel[0];
         rgb[j + 1] = pixel[1];
         rgb[j + 2] = pixel[2];

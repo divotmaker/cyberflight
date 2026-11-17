@@ -594,7 +594,7 @@ mod tests {
         for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0), (3840.0, 2160.0)] {
             let text = "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE";
             let geom = build_notice(text, w, h);
-            assert!(!geom.lines.is_empty() && geom.lines.len() % 2 == 0);
+            assert!(!geom.lines.is_empty() && geom.lines.len().is_multiple_of(2));
             assert_eq!(geom.fills.len(), 6, "one rectangle");
             let xs = geom.fills.iter().map(|v| v.position[0]);
             let (left, right) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(0.0, f32::max));

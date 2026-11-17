@@ -286,10 +286,11 @@ fn png_names(dir: &Path) -> Result<Vec<String>, CompareError> {
         let is_png = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("png"));
-        if is_png && path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                names.push(name.to_owned());
-            }
+        if is_png
+            && path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            names.push(name.to_owned());
         }
     }
     names.sort();

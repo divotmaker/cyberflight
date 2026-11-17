@@ -523,7 +523,9 @@ mod tests {
     fn spirv_words_match_a_little_endian_decode() {
         let spv = include_bytes!("../shaders/grid.vert.spv");
         let expected: Vec<u32> = spv
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(spirv_words(spv).unwrap(), expected);

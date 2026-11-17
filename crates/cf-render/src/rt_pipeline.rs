@@ -997,7 +997,7 @@ fn instance_mask(geom_type: u32) -> u8 {
 pub(crate) fn line_aabbs(vertices: &[GridVertex]) -> Vec<f32> {
     let pad = glam::Vec3::splat(TRAIL_LINE_MAX_RADIUS);
     let mut aabbs = Vec::with_capacity(vertices.len() / 2 * 6);
-    for seg in vertices.chunks_exact(2) {
+    for seg in vertices.as_chunks::<2>().0 {
         let a = glam::Vec3::from(seg[0].position);
         let b = glam::Vec3::from(seg[1].position);
         let (min, max) = (a.min(b) - pad, a.max(b) + pad);

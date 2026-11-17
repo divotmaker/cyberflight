@@ -514,7 +514,7 @@ mod tests {
         let origin = Vec3::new(x, 10.0, z);
         let dir = -Vec3::Y;
         let mut sum = 0.0;
-        for tri in verts.chunks_exact(3) {
+        for tri in verts.as_chunks::<3>().0 {
             let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(tri[i].position));
             // Moller-Trumbore.
             let (e1, e2) = (b - a, c - a);

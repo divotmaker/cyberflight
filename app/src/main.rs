@@ -299,11 +299,11 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested if self.renderer.is_some() && !self.minimized => {
                 self.update();
 
-                if let Some(renderer) = &mut self.renderer {
-                    if let Err(e) = renderer.draw_frame(&self.range.camera) {
-                        self.fail(event_loop, anyhow::Error::new(e).context("draw frame"));
-                        return;
-                    }
+                if let Some(renderer) = &mut self.renderer
+                    && let Err(e) = renderer.draw_frame(&self.range.camera)
+                {
+                    self.fail(event_loop, anyhow::Error::new(e).context("draw frame"));
+                    return;
                 }
 
                 if let Some(window) = &self.window {
@@ -348,15 +348,13 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 eprintln!("Resized: {}x{}", size.width, size.height);
                 let restored = self.track_minimized(size);
-                if let Some(renderer) = &mut self.renderer {
-                    if let Err(e) = renderer.resize(size.width, size.height) {
-                        eprintln!("Resize error: {e}");
-                    }
+                if let Some(renderer) = &mut self.renderer
+                    && let Err(e) = renderer.resize(size.width, size.height)
+                {
+                    eprintln!("Resize error: {e}");
                 }
-                if restored {
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
+                if restored && let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             _ => {}
@@ -368,10 +366,11 @@ impl ApplicationHandler for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
         let now = self.start_time.elapsed().as_secs_f64();
         self.take_in(now);
-        if self.renderer.is_some() && !self.minimized {
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
+        if self.renderer.is_some()
+            && !self.minimized
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
         }
     }
 
