@@ -16,7 +16,7 @@ use cf_scene::trail::{TrailPoint, tracer_tail};
 use dimple::aero::BallModel;
 use dimple::environment::Environment;
 use dimple::ground::Termination;
-use dimple::trajectory::{ShotInput, ShotResult};
+use dimple::trajectory::{ShotInput, ShotResult, TrajectoryPoint, interpolate_trajectory};
 
 use crate::intake::ArrivedShot;
 
@@ -30,52 +30,28 @@ pub const DEFAULT_TRAIL_SUBSAMPLE: usize = 1;
 /// ground after landing (seconds). Shots that come to rest animate to the end.
 pub const MAX_UNSETTLED_GROUND_TIME_S: f64 = 8.0;
 
-/// A point in the unified shot timeline (flight, then hops, slide and roll),
-/// in dimple's frame.
-#[derive(Debug, Clone, Copy)]
-pub struct TimelinePoint {
-    pub time: f64,
-    pub pos: DVec3,
-}
-
 /// A dimple-frame vector as a scene-frame render position.
 fn to_scene(p: DVec3) -> Vec3 {
     physics_to_scene(p).as_vec3()
 }
 
-/// Interpolate position in the unified timeline.
-pub fn interpolate_timeline(points: &[TimelinePoint], t: f64) -> Option<DVec3> {
-    if points.is_empty() || t < points[0].time {
-        return None;
-    }
-    let last = points.last()?;
-    if t >= last.time {
-        return Some(last.pos);
-    }
-    let idx = points.partition_point(|p| p.time <= t);
-    if idx == 0 {
-        return Some(points[0].pos);
-    }
-    let a = &points[idx - 1];
-    let b = &points[idx];
-    let frac = (t - a.time) / (b.time - a.time);
-    Some(a.pos.lerp(b.pos, frac))
-}
-
-/// Build the unified timeline from a ShotResult: the flight points, then the
-/// ground points (hops, slide, roll). Both carry absolute shot times; a
-/// ground point at or before the previous point's time (the landing, shared
-/// by both) is skipped so times strictly increase.
-pub fn build_timeline(result: &ShotResult) -> Vec<TimelinePoint> {
+/// Build the unified shot timeline from a ShotResult, in dimple's frame:
+/// the flight points, then the ground points (hops, slide, roll). Both carry
+/// absolute shot times; a ground point at or before the previous point's
+/// time (the landing, shared by both) is skipped so times strictly increase.
+pub fn build_timeline(result: &ShotResult) -> Vec<TrajectoryPoint> {
     let mut timeline = Vec::with_capacity(result.flight.points.len() + result.ground.points.len());
-    let flight = result.flight.points.iter().map(|p| (p.time, p.pos));
-    let ground = result.ground.points.iter().map(|p| (p.time, p.pos));
-    for (time, pos) in flight.chain(ground) {
+    let ground = result.ground.points.iter().map(|p| TrajectoryPoint {
+        time: p.time,
+        pos: p.pos,
+        vel: p.vel,
+    });
+    for point in result.flight.points.iter().copied().chain(ground) {
         if timeline
             .last()
-            .is_none_or(|last: &TimelinePoint| time > last.time)
+            .is_none_or(|last: &TrajectoryPoint| point.time > last.time)
         {
-            timeline.push(TimelinePoint { time, pos });
+            timeline.push(point);
         }
     }
     timeline
@@ -85,7 +61,7 @@ pub fn build_timeline(result: &ShotResult) -> Vec<TimelinePoint> {
 pub struct AnimatedFlight {
     pub input: ShotInput,
     pub result: ShotResult,
-    pub timeline: Vec<TimelinePoint>,
+    pub timeline: Vec<TrajectoryPoint>,
     pub total_time: f64,
     /// Where the animation ends: dimple's rest position, or the last shown
     /// position when the ball did not settle.
@@ -122,12 +98,14 @@ impl AnimatedFlight {
             if let Some(cut) = timeline
                 .last()
                 .filter(|last| last.time > end)
-                .and_then(|_| interpolate_timeline(&timeline, end))
+                .and_then(|_| interpolate_trajectory(&timeline, end))
             {
                 timeline.retain(|p| p.time < end);
-                timeline.push(TimelinePoint {
+                // The animation stops the ball here.
+                timeline.push(TrajectoryPoint {
                     time: end,
                     pos: cut,
+                    vel: DVec3::ZERO,
                 });
             }
             eprintln!(
@@ -177,7 +155,7 @@ impl AnimatedFlight {
         let pos = if shot_t >= self.total_time {
             self.rest_pos
         } else {
-            interpolate_timeline(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO)
+            interpolate_trajectory(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO)
         };
 
         let total_m = pos.x.hypot(pos.z);
@@ -224,7 +202,7 @@ impl AnimatedFlight {
 
         let t_clamped = shot_t.min(self.total_time);
 
-        let ball_pos = interpolate_timeline(&self.timeline, t_clamped).map(to_scene)?;
+        let ball_pos = interpolate_trajectory(&self.timeline, t_clamped).map(to_scene)?;
 
         let samples = self.timeline.iter().map(|p| TrailPoint {
             position: to_scene(p.pos),
@@ -254,7 +232,7 @@ impl AnimatedFlight {
         };
 
         let ideal = if shot_t < self.total_time {
-            let ball_pos = interpolate_timeline(&self.timeline, shot_t).map(to_scene)?;
+            let ball_pos = interpolate_trajectory(&self.timeline, shot_t).map(to_scene)?;
 
             let idx = self.timeline.partition_point(|p| p.time <= shot_t);
             let vel_idx = if idx > 0 { idx - 1 } else { 0 };
@@ -682,7 +660,7 @@ mod tests {
     fn interpolates_through_the_ground_phase() {
         let f = animate(ShotInput::seven_iron(), None);
         let t = f.result.flight.flight_time + 0.5;
-        let pos = interpolate_timeline(&f.timeline, t).expect("inside timeline");
+        let pos = interpolate_trajectory(&f.timeline, t).expect("inside timeline");
         assert!(pos.x > f.result.flight.carry_m * 0.99);
         assert!(pos.x < f.result.final_pos.x + 1e-9);
     }
