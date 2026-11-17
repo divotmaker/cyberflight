@@ -28,7 +28,7 @@ const EXPIRE_INTERVAL: Duration = Duration::from_millis(500);
 /// The display name of cyberflight's actor on the bus.
 const ACTOR_NAME: &str = "cyberflight";
 
-/// The FRP device dialled without `--frp`: flighthook on this machine.
+/// The FRP device dialed without `--frp`: flighthook on this machine.
 ///
 /// An IPv4 address rather than `localhost`: by default flighthook listens on
 /// IPv4 only, and where `localhost` resolves to `::1` first (Windows), every
@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_device_is_dialled_over_ipv4() {
+    fn the_default_device_is_dialed_over_ipv4() {
         assert!(DEFAULT_FRP_URL.starts_with("ws://127.0.0.1:"));
         assert!(DEFAULT_FRP_URL.ends_with(&format!(
             ":{}{}",
@@ -729,7 +729,7 @@ mod tests {
             DialStep::Wait(Duration::from_millis(1))
         );
         assert_eq!(dialer.step(ms(5_000)), DialStep::Dial);
-        // A connection lost after the interval is redialled at once.
+        // A connection lost after the interval is redialed at once.
         assert_eq!(dialer.step(ms(60_000)), DialStep::Dial);
     }
 
