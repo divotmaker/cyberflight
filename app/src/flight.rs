@@ -309,6 +309,9 @@ pub struct FlightManager {
     pub flights: Vec<AnimatedFlight>,
     pub last_telemetry: Option<ShotTelemetry>,
     pub trail_subsample: usize,
+    /// The newest launched shot's flight has expired: the HUD keeps its last
+    /// numbers and the chase camera lets go, whatever older shots remain.
+    newest_expired: bool,
 }
 
 impl Default for FlightManager {
@@ -323,6 +326,7 @@ impl FlightManager {
             flights: Vec::new(),
             last_telemetry: None,
             trail_subsample: DEFAULT_TRAIL_SUBSAMPLE,
+            newest_expired: false,
         }
     }
 
@@ -372,6 +376,7 @@ impl FlightManager {
             env,
             green,
         ));
+        self.newest_expired = false;
     }
 
     /// Update flight state: mark landed, remove expired, build render data.
@@ -391,8 +396,11 @@ impl FlightManager {
         }
 
         // The HUD keeps the newest shot's numbers after its flight expires.
-        if let Some(newest) = self.flights.last() {
+        if !self.newest_expired
+            && let Some(newest) = self.flights.last()
+        {
             self.last_telemetry = Some(newest.telemetry(now));
+            self.newest_expired = newest.is_expired(now);
         }
 
         // Remove expired flights
@@ -409,12 +417,12 @@ impl FlightManager {
         self.flights.iter().any(|f| f.is_animating(now))
     }
 
-    /// Compute the chase camera for the most recent active flight (if any).
+    /// Compute the chase camera for the newest shot, while its flight lasts.
     pub fn chase_camera(&mut self, now: f64) -> Option<Camera> {
-        self.flights
-            .iter_mut()
-            .rev()
-            .find_map(|f| f.chase_camera(now))
+        if self.newest_expired {
+            return None;
+        }
+        self.flights.last_mut()?.chase_camera(now)
     }
 
     /// Build HUD geometry for the current frame from the newest shot's
@@ -506,6 +514,44 @@ mod tests {
         let shown = fm.last_telemetry.as_ref().expect("telemetry");
         let seven_iron = animate(ShotInput::seven_iron(), None);
         assert!((shown.ball_speed_mph - seven_iron.telemetry(0.0).ball_speed_mph).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_hud_and_chase_camera_follow_the_newest_shot_only() {
+        // A driver at 0 s, a short chip at 1 s: the chip's flight expires
+        // while the driver's is still on screen.
+        let mut fm = FlightManager::new();
+        let env = Environment::SEA_LEVEL;
+        let driver = received(ShotInput::driver());
+        let chip = received(ShotInput {
+            ball_speed_mph: 40.0,
+            launch_angle_deg: 25.0,
+            ..ShotInput::seven_iron()
+        });
+        fm.launch(&driver, 0.0, &env, None);
+        fm.launch(&chip, 1.0, &env, None);
+        let chip_flight = animate(chip.input, None);
+        let chip_expires = 1.0 + chip_flight.total_time + CHASE_LINGER_TIME;
+        let driver_expires = fm.flights[0].total_time + CHASE_LINGER_TIME;
+        assert!(chip_expires + 1.0 < driver_expires, "the chip expires first");
+
+        fm.update(chip_expires - 1.0);
+        fm.update(chip_expires + 1.0);
+        assert_eq!(fm.flights.len(), 1, "only the driver remains");
+        let shown = fm.last_telemetry.as_ref().expect("telemetry").ball_speed_mph;
+        assert!((shown - chip.input.ball_speed_mph).abs() < 1e-9);
+        assert!(fm.chase_camera(chip_expires + 1.0).is_none());
+
+        fm.update(chip_expires + 2.0);
+        let shown = fm.last_telemetry.as_ref().expect("telemetry").ball_speed_mph;
+        assert!((shown - chip.input.ball_speed_mph).abs() < 1e-9);
+
+        // A newer shot takes both back.
+        fm.launch(&driver, chip_expires + 3.0, &env, None);
+        fm.update(chip_expires + 3.5);
+        let shown = fm.last_telemetry.as_ref().expect("telemetry").ball_speed_mph;
+        assert!((shown - driver.input.ball_speed_mph).abs() < 1e-9);
+        assert!(fm.chase_camera(chip_expires + 3.5).is_some());
     }
 
     #[test]
