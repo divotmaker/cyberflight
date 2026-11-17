@@ -6,7 +6,8 @@ A (very) digital driving range for golf simulators.
 > Ball flight comes from [dimple](https://github.com/divotmaker/dimple); its ground model
 > (bounce and roll after landing, so run and total distance) is **beta** and not yet validated
 > against measured data. See [docs/AERO.md](docs/AERO.md).
-> The whole range plays as fairway. An optional circular green, drawn as one neon-green ring, is off
+> The whole range plays as fairway. A putt with only a speed and a direction (no launch angle or spin) rolls
+> from the tee on green. An optional circular green, drawn as one neon-green ring, is off
 > by default; see [docs/AERO.md](docs/AERO.md) for how to enable it.
 
 ![Empty Range](./screens/empty_range.png "Empty Range")
