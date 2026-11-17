@@ -5,15 +5,6 @@ use crate::hud_font;
 
 // ── Telemetry HUD ──────────────────────────────────────────────────────
 
-/// Imperial vs metric display units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnitSystem {
-    /// Distance in yards, height in feet, speed in MPH.
-    Imperial,
-    /// Everything in meters, speed in KPH.
-    Metric,
-}
-
 /// Shot telemetry data for HUD display.
 ///
 /// Distance fields (`carry_yards`, `total_yards`, `downrange_yards`) are live —
@@ -117,22 +108,13 @@ fn or_dash(value: Option<f64>, fmt: impl Fn(f64) -> String) -> String {
     value.map_or_else(|| "-".to_owned(), fmt)
 }
 
-/// The telemetry panel's sections and rows for `t`.
-fn telemetry_rows(t: &ShotTelemetry, units: UnitSystem) -> Vec<HudRow> {
+/// The telemetry panel's sections and rows for `t`: distance in yards,
+/// height in feet, speed in MPH.
+fn telemetry_rows(t: &ShotTelemetry) -> Vec<HudRow> {
     use HudRow::{Gap, Header, Value};
 
-    let (spd_label, spd_factor) = match units {
-        UnitSystem::Imperial => ("MPH", 1.0),
-        UnitSystem::Metric => ("KPH", 1.60934),
-    };
-    let fmt_dist = |yards: f64| match units {
-        UnitSystem::Imperial => format!("{yards:.1} YDS"),
-        UnitSystem::Metric => format!("{:.1} M", yards * 0.9144),
-    };
-    let fmt_height = |meters: f64| match units {
-        UnitSystem::Imperial => format!("{:.1} FT", meters / 0.3048),
-        UnitSystem::Metric => format!("{meters:.1} M"),
-    };
+    let fmt_dist = |yards: f64| format!("{yards:.1} YDS");
+    let fmt_height = |meters: f64| format!("{:.1} FT", meters / 0.3048);
     // Offset from the target line: `R`/`L` and the distance, unsigned.
     let fmt_lateral = |yards: f64| {
         let text = fmt_dist(yards.abs());
@@ -150,9 +132,7 @@ fn telemetry_rows(t: &ShotTelemetry, units: UnitSystem) -> Vec<HudRow> {
         Header("CLUB"),
         Value(
             "SPEED",
-            or_dash(t.club_speed_mph, |v| {
-                format!("{:.0} {spd_label}", v * spd_factor)
-            }),
+            or_dash(t.club_speed_mph, |v| format!("{v:.0} MPH")),
         ),
     ];
     let club_angles = [
@@ -170,10 +150,7 @@ fn telemetry_rows(t: &ShotTelemetry, units: UnitSystem) -> Vec<HudRow> {
     rows.extend([
         Gap,
         Header("LAUNCH"),
-        Value(
-            "SPEED",
-            format!("{:.1} {spd_label}", t.ball_speed_mph * spd_factor),
-        ),
+        Value("SPEED", format!("{:.1} MPH", t.ball_speed_mph)),
     ]);
     if let Some(sf) = t.smash_factor {
         rows.push(Value("SMASH", format!("{sf:.2}")));
@@ -262,7 +239,6 @@ fn system_rows(lm_states: &HashMap<String, bool>, connected: bool) -> Vec<System
 /// `connected`: whether the FRP connection is alive.
 pub fn build_hud(
     telemetry: Option<&ShotTelemetry>,
-    units: UnitSystem,
     chase_active: bool,
     lm_states: &HashMap<String, bool>,
     connected: bool,
@@ -292,7 +268,7 @@ pub fn build_hud(
     let mut y = sc.margin_top;
 
     if let Some(t) = telemetry {
-        for row in telemetry_rows(t, units) {
+        for row in telemetry_rows(t) {
             y = match row {
                 HudRow::Header(title) => emit_section_header(&mut lines, title, y, panel_w, &sc),
                 HudRow::Value(label, value) => emit_row(&mut lines, label, &value, y, panel_w, &sc),
@@ -485,7 +461,7 @@ mod tests {
 
     #[test]
     fn telemetry_values() {
-        let rows = telemetry_rows(&sample(), UnitSystem::Imperial);
+        let rows = telemetry_rows(&sample());
         assert_eq!(value(&rows, "CLUB", "SPEED"), "90 MPH");
         assert_eq!(value(&rows, "CLUB", "PATH"), "-2.1");
         assert_eq!(value(&rows, "LAUNCH", "SPEED"), "132.0 MPH");
@@ -509,7 +485,7 @@ mod tests {
             club_path_deg: None,
             ..sample()
         };
-        let rows = telemetry_rows(&t, UnitSystem::Imperial);
+        let rows = telemetry_rows(&t);
         assert_eq!(value(&rows, "CLUB", "SPEED"), "-");
         assert_eq!(value(&rows, "LAUNCH", "BACK"), "-");
         assert_eq!(value(&rows, "LAUNCH", "SIDE"), "-");
@@ -518,18 +494,17 @@ mod tests {
 
     #[test]
     fn lateral_is_yards_left_or_right() {
-        let lateral = |yards: f64, units| {
+        let lateral = |yards: f64| {
             let t = ShotTelemetry {
                 lateral_yards: yards,
                 ..sample()
             };
-            value(&telemetry_rows(&t, units), "RESULT", "LATERAL")
+            value(&telemetry_rows(&t), "RESULT", "LATERAL")
         };
-        assert_eq!(lateral(4.24, UnitSystem::Imperial), "R 4.2 YDS");
-        assert_eq!(lateral(-12.0, UnitSystem::Imperial), "L 12.0 YDS");
-        assert_eq!(lateral(0.01, UnitSystem::Imperial), "0.0 YDS");
-        assert_eq!(lateral(-0.04, UnitSystem::Imperial), "0.0 YDS");
-        assert_eq!(lateral(10.0, UnitSystem::Metric), "R 9.1 M");
+        assert_eq!(lateral(4.24), "R 4.2 YDS");
+        assert_eq!(lateral(-12.0), "L 12.0 YDS");
+        assert_eq!(lateral(0.01), "0.0 YDS");
+        assert_eq!(lateral(-0.04), "0.0 YDS");
     }
 
     #[test]
@@ -538,13 +513,13 @@ mod tests {
             lm_carry_yards: Some(161.2),
             ..sample()
         };
-        let rows = telemetry_rows(&flying, UnitSystem::Imperial);
+        let rows = telemetry_rows(&flying);
         assert_eq!(value(&rows, "FLIGHT", "CARRY(LM)"), "-");
         let landed = ShotTelemetry {
             elapsed_s: 7.5,
             ..flying
         };
-        let rows = telemetry_rows(&landed, UnitSystem::Imperial);
+        let rows = telemetry_rows(&landed);
         assert_eq!(value(&rows, "FLIGHT", "CARRY(LM)"), "161.2 YDS");
         assert_eq!(value(&rows, "FLIGHT", "TIME"), "7.5 S");
     }
@@ -578,15 +553,7 @@ mod tests {
     #[test]
     fn build_hud_with_telemetry() {
         let t = sample();
-        let geom = build_hud(
-            Some(&t),
-            UnitSystem::Imperial,
-            false,
-            &HashMap::new(),
-            true,
-            1920.0,
-            1080.0,
-        );
+        let geom = build_hud(Some(&t), false, &HashMap::new(), true, 1920.0, 1080.0);
         assert!(!geom.lines.is_empty(), "should have text lines");
         assert_eq!(geom.lines.len() % 2, 0, "LINE_LIST needs even count");
         assert_eq!(geom.fills.len(), 12, "2 panels × 2 triangles each");
@@ -594,29 +561,13 @@ mod tests {
 
     #[test]
     fn build_hud_without_telemetry() {
-        let geom = build_hud(
-            None,
-            UnitSystem::Imperial,
-            false,
-            &HashMap::new(),
-            true,
-            1920.0,
-            1080.0,
-        );
+        let geom = build_hud(None, false, &HashMap::new(), true, 1920.0, 1080.0);
         assert!(!geom.lines.is_empty(), "should show standby text");
     }
 
     #[test]
     fn panel_fills_cover_both_sides() {
-        let geom = build_hud(
-            None,
-            UnitSystem::Imperial,
-            false,
-            &HashMap::new(),
-            true,
-            1920.0,
-            1080.0,
-        );
+        let geom = build_hud(None, false, &HashMap::new(), true, 1920.0, 1080.0);
         // Left panel: 0..384, right panel: 1536..1920
         let left_fills = &geom.fills[..6];
         let right_fills = &geom.fills[6..12];

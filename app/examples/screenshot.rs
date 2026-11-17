@@ -38,7 +38,7 @@ use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::Frame;
 use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
-use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
+use cf_scene::hud::{ShotTelemetry, build_hud};
 use cf_scene::range::Range;
 use cf_scene::trail::{TrailPoint, tracer_tail};
 use dimple::aero::BallModel;
@@ -288,7 +288,6 @@ fn render_shot(range: &Range, snap: &FlightSnapshot, shot: &Shot) -> Result<bool
         let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
         let hud = build_hud(
             Some(&telemetry(snap, false)),
-            UnitSystem::Imperial,
             false,
             &lm,
             true,
@@ -361,7 +360,6 @@ fn render_hero(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
     let hud = build_hud(
         Some(&telemetry(snap, true)),
-        UnitSystem::Imperial,
         true,
         &lm,
         true,
@@ -419,7 +417,6 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
     renderer.set_chase_camera(Some(hero_chase_camera(snap)));
     let hud = build_hud(
         Some(&telemetry(snap, true)),
-        UnitSystem::Imperial,
         true,
         &lm,
         true,
@@ -432,15 +429,7 @@ fn render_stream(range: &Range, snap: &FlightSnapshot) -> Result<()> {
 
     renderer.update_flight(&[]);
     renderer.set_chase_camera(None);
-    let hud = build_hud(
-        None,
-        UnitSystem::Imperial,
-        false,
-        &lm,
-        true,
-        WIDTH as f32,
-        HEIGHT as f32,
-    );
+    let hud = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
     renderer.update_hud(&hud.lines, &hud.fills);
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("stream_idle.png"))

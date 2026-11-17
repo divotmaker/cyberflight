@@ -1,4 +1,4 @@
-use dimple::units::Unit;
+use dimple::units::yards_to_meters;
 use glam::Vec3;
 
 /// Vertex for grid line rendering.
@@ -14,55 +14,32 @@ pub struct GridVertex {
     pub fade: f32,
 }
 
-/// Configuration for the neon ground grid.
+/// Configuration for the neon ground grid, in yards.
+///
+/// The default is the driving range: 60 wide (±30 yd) × 450 long, 10-yard
+/// grid. Width is a multiple of spacing so grid lines align with the edges
+/// and a centerline runs down X=0.
 #[derive(Debug, Clone, Copy)]
 pub struct GridConfig {
-    /// Display unit (yards or meters).
-    pub unit: Unit,
-    /// Grid line spacing in display units.
+    /// Grid line spacing (yd).
     pub spacing: f32,
-    /// Downrange extent in display units (+Z direction, starts at 0).
+    /// Downrange extent (yd, +Z direction, starts at 0).
     pub downrange: f32,
-    /// Lateral half-width in display units (+/- X direction).
+    /// Lateral half-width (yd, +/- X direction).
     pub lateral: f32,
 }
 
 impl GridConfig {
-    /// Driving range grid for the given unit system.
-    ///
-    /// Yards: 60 wide (±30 yd) × 450 long, 10-yard grid.
-    /// Meters: 60 wide (±30 m) × 400 long, 10-meter grid.
-    ///
-    /// Width is a multiple of spacing so grid lines align with the edges
-    /// and a centerline runs down X=0.
-    #[must_use]
-    pub fn driving_range(unit: Unit) -> Self {
-        match unit {
-            Unit::Yards => Self {
-                unit,
-                spacing: 10.0,
-                downrange: 450.0,
-                lateral: 30.0,
-            },
-            Unit::Meters => Self {
-                unit,
-                spacing: 10.0,
-                downrange: 400.0,
-                lateral: 30.0,
-            },
-        }
-    }
-
     fn spacing_m(&self) -> f32 {
-        self.unit.to_meters(f64::from(self.spacing)) as f32
+        yards_to_meters(f64::from(self.spacing)) as f32
     }
 
     fn downrange_m(&self) -> f32 {
-        self.unit.to_meters(f64::from(self.downrange)) as f32
+        yards_to_meters(f64::from(self.downrange)) as f32
     }
 
     fn lateral_m(&self) -> f32 {
-        self.unit.to_meters(f64::from(self.lateral)) as f32
+        yards_to_meters(f64::from(self.lateral)) as f32
     }
 
     /// Distance from the tee at which grid lines have faded out (m): the far
@@ -77,7 +54,11 @@ impl GridConfig {
 
 impl Default for GridConfig {
     fn default() -> Self {
-        Self::driving_range(Unit::Yards)
+        Self {
+            spacing: 10.0,
+            downrange: 450.0,
+            lateral: 30.0,
+        }
     }
 }
 
@@ -249,7 +230,7 @@ mod tests {
 
     #[test]
     fn yards_grid_dimensions() {
-        let config = GridConfig::driving_range(Unit::Yards);
+        let config = GridConfig::default();
         let verts = generate_grid_vertices(&config);
         let max_x = verts.iter().map(|v| v.position[0]).fold(0.0_f32, f32::max);
         let max_z = verts.iter().map(|v| v.position[2]).fold(0.0_f32, f32::max);
@@ -257,15 +238,5 @@ mod tests {
         assert!((max_x - 27.43).abs() < 1.0, "max_x={max_x}");
         // 450 yards ≈ 411.48m (downrange, +Z)
         assert!((max_z - 411.48).abs() < 1.0, "max_z={max_z}");
-    }
-
-    #[test]
-    fn meters_grid_dimensions() {
-        let config = GridConfig::driving_range(Unit::Meters);
-        let verts = generate_grid_vertices(&config);
-        let max_x = verts.iter().map(|v| v.position[0]).fold(0.0_f32, f32::max);
-        let max_z = verts.iter().map(|v| v.position[2]).fold(0.0_f32, f32::max);
-        assert!((max_x - 30.0).abs() < 1.0, "max_x={max_x}");
-        assert!((max_z - 400.0).abs() < 1.0, "max_z={max_z}");
     }
 }

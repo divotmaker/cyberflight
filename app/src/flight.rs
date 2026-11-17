@@ -10,7 +10,7 @@ use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
 use cf_scene::green::GreenConfig;
 use cf_scene::ground;
-use cf_scene::hud::{ShotTelemetry, UnitSystem, build_hud};
+use cf_scene::hud::{ShotTelemetry, build_hud};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::trail::{TrailPoint, tracer_tail};
 use dimple::aero::BallModel;
@@ -432,7 +432,6 @@ impl FlightManager {
         }
         build_hud(
             self.last_telemetry.as_ref(),
-            UnitSystem::Imperial,
             chase_active,
             lm_states,
             frp_connected,
