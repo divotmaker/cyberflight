@@ -538,23 +538,38 @@ mod tests {
         let chip_flight = animate(chip.input, None);
         let chip_expires = 1.0 + chip_flight.total_time + CHASE_LINGER_TIME;
         let driver_expires = fm.flights[0].total_time + CHASE_LINGER_TIME;
-        assert!(chip_expires + 1.0 < driver_expires, "the chip expires first");
+        assert!(
+            chip_expires + 1.0 < driver_expires,
+            "the chip expires first"
+        );
 
         fm.update(chip_expires - 1.0);
         fm.update(chip_expires + 1.0);
         assert_eq!(fm.flights.len(), 1, "only the driver remains");
-        let shown = fm.last_telemetry.as_ref().expect("telemetry").ball_speed_mph;
+        let shown = fm
+            .last_telemetry
+            .as_ref()
+            .expect("telemetry")
+            .ball_speed_mph;
         assert!((shown - chip.input.ball_speed_mph).abs() < 1e-9);
         assert!(fm.chase_camera(chip_expires + 1.0).is_none());
 
         fm.update(chip_expires + 2.0);
-        let shown = fm.last_telemetry.as_ref().expect("telemetry").ball_speed_mph;
+        let shown = fm
+            .last_telemetry
+            .as_ref()
+            .expect("telemetry")
+            .ball_speed_mph;
         assert!((shown - chip.input.ball_speed_mph).abs() < 1e-9);
 
         // A newer shot takes both back.
         fm.launch(&driver, chip_expires + 3.0, &env, None);
         fm.update(chip_expires + 3.5);
-        let shown = fm.last_telemetry.as_ref().expect("telemetry").ball_speed_mph;
+        let shown = fm
+            .last_telemetry
+            .as_ref()
+            .expect("telemetry")
+            .ball_speed_mph;
         assert!((shown - driver.input.ball_speed_mph).abs() < 1e-9);
         assert!(fm.chase_camera(chip_expires + 3.5).is_some());
     }
