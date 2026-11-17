@@ -24,9 +24,8 @@ The SYSTEM rows of the HUD list each launch monitor on the bus by name: READY wh
 ### Supported launch monitors
 
 cyberflight works with any launch monitor flighthook supports. Today that includes the
-FlightScope Mevo+, Mevo Gen2 and Xi, the Square Golf Omni, the Garmin R10 (alpha) and Uneekor
-(alpha), plus any monitor that speaks GSPro Open Connect through flighthook's OpenConnect
-server; see [flighthook's list](https://github.com/divotmaker/flighthook#supported-integrations) for the
+FlightScope Mevo+, Mevo Gen2 and Xi, the Square Golf Omni and the Garmin R10, plus any monitor
+that flighthook can bridge; see [flighthook's list](https://github.com/divotmaker/flighthook#supported-integrations) for the
 current set and each device's status.
 
 ### Setup
@@ -34,9 +33,8 @@ current set and each device's status.
 1. Start flighthook and connect to your launch monitor
 2. Start cyberflight — it connects to flighthook at `ws://127.0.0.1:5880/frp`; for
    flighthook on another machine, pass `--frp ws://<host>:5880/frp`. While
-   flighthook is not running, cyberflight retries every 5 s. If something
-   accepts the connection but never answers, cyberflight keeps waiting and
-   logs a warning every 30 s; restart cyberflight to reconnect.
+   flighthook is not running, or something accepts the connection but never
+   answers, cyberflight retries every 5 s.
 3. Send it
 
 Shots are received in the background whatever is on screen, and each ball flies from the
@@ -89,7 +87,7 @@ cyberflight --stream --mode hls --serve --port 8080 # HLS in stream/, served ove
 
 ## Building
 
-Requires a recent stable Rust toolchain (edition 2024) and a Vulkan 1.3 driver. Ray tracing
+Requires Rust 1.94 or newer (edition 2024) and a Vulkan 1.3 driver. Ray tracing
 needs `VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure`; it is optional (the
 floor's reflections are then mirrored).
 
