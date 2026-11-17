@@ -285,36 +285,31 @@ mod tests {
     }
 
     fn sample_completed_shot() -> CompletedShot {
-        CompletedShot {
-            from: "7d2f9a41c03be856".to_owned(),
-            key: ShotKey {
+        let mut shot = CompletedShot::new(
+            "7d2f9a41c03be856",
+            ShotKey {
                 shot_id: "test-uuid".to_owned(),
                 shot_number: 1,
             },
-            timestamp: None,
-            launch: Some(Launch {
-                launch_speed: Some(Velocity::MilesPerHour(167.0)),
-                launch_elevation: Some(10.5),
-                launch_azimuth: Some(-1.2),
-                backspin_rpm: Some(2700),
-                sidespin_rpm: Some(-300),
-                ..Launch::default()
-            }),
-            flights: Vec::new(),
-            club: Some(ClubData {
-                club_speed: Some(Velocity::MilesPerHour(112.0)),
-                path: Some(-2.1),
-                attack_angle: Some(-1.5),
-                face_angle: Some(0.8),
-                dynamic_loft: Some(14.2),
-                smash_factor: Some(1.49),
-                ..ClubData::default()
-            }),
-            impact: None,
-            source: None,
-            turn: None,
-            block: None,
-        }
+        );
+        shot.launch = Some(Launch {
+            launch_speed: Some(Velocity::MilesPerHour(167.0)),
+            launch_elevation: Some(10.5),
+            launch_azimuth: Some(-1.2),
+            backspin_rpm: Some(2700),
+            sidespin_rpm: Some(-300),
+            ..Launch::default()
+        });
+        shot.club = Some(ClubData {
+            club_speed: Some(Velocity::MilesPerHour(112.0)),
+            path: Some(-2.1),
+            attack_angle: Some(-1.5),
+            face_angle: Some(0.8),
+            dynamic_loft: Some(14.2),
+            smash_factor: Some(1.49),
+            ..ClubData::default()
+        });
+        shot
     }
 
     #[test]

@@ -12,14 +12,14 @@ use cf_scene::shot::ReceivedShot;
 use flightrelay::types::roles;
 use flightrelay::{
     BusActor, BusState, DEFAULT_HEARTBEAT, EndpointConfig, FrpBody, FrpConnection, FrpEndpoint,
-    FrpMessage, ShotAggregator, ShotEvent, Transport,
+    FrpMessage, ShotAccumulator, ShotEvent, Target,
 };
 
 /// FRP spec version we support.
 const FRP_VERSION: &str = flightrelay::SPEC_VERSION;
 
-/// How often a lost or refused FRP connection is retried, and how long a
-/// dial (connect and WebSocket upgrade) may take.
+/// How often a lost or refused FRP connection is retried, and how long each
+/// part of a dial may take: the TCP connect, then the WebSocket upgrade.
 pub const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How often the intake forgets actors that stopped heartbeating.
@@ -59,9 +59,9 @@ pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
 /// Open the FRP endpoint cyberflight dials at `url`.
 ///
 /// Cyberflight is an FRP *collector*: an actor on the bus that receives
-/// shots and sends nothing but its own `bus.actor`. A dial gives up after
-/// [`RECONNECT_INTERVAL`], so a peer that accepts and never answers is a
-/// failed dial. Opening a dialing endpoint performs no I/O, so this only
+/// shots and sends nothing but its own `bus.actor`. Neither the TCP
+/// connect nor the WebSocket upgrade takes longer than [`RECONNECT_INTERVAL`],
+/// so a peer that accepts and never answers is a failed dial. Opening a dialing endpoint performs no I/O, so this only
 /// fails on a malformed configuration.
 ///
 /// # Errors
@@ -69,7 +69,7 @@ pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
 /// Returns an error if the endpoint cannot be opened.
 pub fn frp_endpoint(url: &str) -> Result<FrpEndpoint, flightrelay::FrpError> {
     FrpEndpoint::open(
-        EndpointConfig::new(Transport::connect(url)).with_handshake_timeout(RECONNECT_INTERVAL),
+        EndpointConfig::new(Target::connect(url)).with_handshake_timeout(RECONNECT_INTERVAL),
     )
 }
 
@@ -89,7 +89,7 @@ fn actor_message(actor_id: &str) -> FrpMessage {
 /// an earlier ball is still flying or rolling is never lost.
 #[derive(Debug, Default)]
 pub struct ShotIntake {
-    shots: ShotAggregator,
+    shots: ShotAccumulator,
     bus: BusState,
     /// Ready state (no blockers) per launch monitor on the bus, by the name
     /// in its `bus.actor`.
@@ -121,6 +121,7 @@ impl ShotIntake {
                 eprintln!("WARN: {late}");
                 return None;
             }
+            _ => return None,
         };
         match ReceivedShot::from_frp(&completed) {
             Ok(shot) => {
@@ -626,7 +627,7 @@ mod tests {
 
     /// A device listening on a free local port, and the URL to dial it.
     fn device() -> (FrpEndpoint, String) {
-        let device = FrpEndpoint::open(EndpointConfig::new(Transport::listen("127.0.0.1:0")))
+        let device = FrpEndpoint::open(EndpointConfig::new(Target::listen("127.0.0.1:0")))
             .expect("device endpoint");
         let addr = device.local_addr().expect("addr").expect("bound");
         (device, format!("ws://{addr}/frp"))
