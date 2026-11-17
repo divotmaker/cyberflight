@@ -333,11 +333,9 @@ impl AnimatedFlight {
     }
 }
 
-/// How often a lost or refused FRP connection is retried.
+/// How often a lost or refused FRP connection is retried, and how long a
+/// dial (connect and WebSocket upgrade) may take.
 pub const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
-
-/// How often a connect that has not finished is reported.
-pub const DIAL_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// A shot taken in this much later than it arrived is reported (seconds).
 const LATE_INTAKE_S: f64 = 0.25;
@@ -379,15 +377,18 @@ pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
 /// Open the FRP endpoint cyberflight dials at `url`.
 ///
 /// Cyberflight is an FRP *collector*: an actor on the bus that receives
-/// shots and sends nothing but its own `bus.actor`. Opening a dialing
-/// endpoint performs no I/O, so this only fails on a malformed
-/// configuration.
+/// shots and sends nothing but its own `bus.actor`. A dial gives up after
+/// [`RECONNECT_INTERVAL`], so a peer that accepts and never answers is a
+/// failed dial. Opening a dialing endpoint performs no I/O, so this only
+/// fails on a malformed configuration.
 ///
 /// # Errors
 ///
 /// Returns an error if the endpoint cannot be opened.
 pub fn frp_endpoint(url: &str) -> Result<FrpEndpoint, flightrelay::FrpError> {
-    FrpEndpoint::open(EndpointConfig::new(Transport::connect(url)))
+    FrpEndpoint::open(
+        EndpointConfig::new(Transport::connect(url)).with_handshake_timeout(RECONNECT_INTERVAL),
+    )
 }
 
 /// Cyberflight's `bus.actor`: role `collector`, heartbeat
@@ -397,47 +398,6 @@ fn actor_message(actor_id: &str) -> FrpMessage {
         actor_id,
         BusActor::new(ACTOR_NAME, DEFAULT_HEARTBEAT.as_secs_f64()).with_role(roles::COLLECTOR),
     )
-}
-
-/// The endpoint back from a dialing thread, with the connection it made.
-type DialResult = (FrpEndpoint, Result<FrpConnection, flightrelay::FrpError>);
-
-/// Dial the bus and complete the WebSocket upgrade on a background thread,
-/// so the caller can report a dial that does not finish. The endpoint
-/// and the outcome come back on the returned channel.
-///
-/// # Errors
-///
-/// Returns the endpoint and the error when the thread cannot be started.
-fn spawn_dial(
-    endpoint: FrpEndpoint,
-) -> Result<mpsc::Receiver<DialResult>, (FrpEndpoint, std::io::Error)> {
-    let (tx, rx) = mpsc::channel();
-    // The endpoint is handed over only once the thread runs, so a failed
-    // spawn leaves it with the caller.
-    let (start_tx, start_rx) = mpsc::channel::<FrpEndpoint>();
-    let spawned = thread::Builder::new()
-        .name("frp-dial".to_owned())
-        .spawn(move || {
-            let Ok(mut endpoint) = start_rx.recv() else {
-                return;
-            };
-            let result = endpoint.establish();
-            // The receiver is gone only when the intake has stopped.
-            let _ = tx.send((endpoint, result));
-        });
-    if let Err(e) = spawned {
-        return Err((endpoint, e));
-    }
-    start_tx
-        .send(endpoint)
-        .map_err(|mpsc::SendError(endpoint)| {
-            (
-                endpoint,
-                std::io::Error::other("FRP connect thread exited before starting"),
-            )
-        })?;
-    Ok(rx)
 }
 
 /// Turns FRP messages into shots: tracks the bus's launch monitors and
@@ -563,22 +523,6 @@ pub(crate) enum IntakeEvent {
     Shot(ArrivedShot),
 }
 
-/// How often the intake thread dials and reports.
-#[derive(Debug, Clone, Copy)]
-struct IntakeTiming {
-    /// Least time from the start of one dial to the start of the next.
-    reconnect: Duration,
-    /// How often a dial that has not finished is reported.
-    dial_warn: Duration,
-}
-
-impl IntakeTiming {
-    const DEFAULT: Self = Self {
-        reconnect: RECONNECT_INTERVAL,
-        dial_warn: DIAL_WARN_INTERVAL,
-    };
-}
-
 /// Shot intake from an FRP bus, used by both windowed and streaming modes.
 ///
 /// A dedicated thread holds the connection and reads it whatever the app is
@@ -618,7 +562,7 @@ impl FrpState {
     ) -> anyhow::Result<Self> {
         let actor_id = flightrelay::new_actor_id();
         eprintln!("FRP actor id {actor_id} (new for this run)");
-        let (events, _thread) = spawn_intake(url, &actor_id, start, wake, IntakeTiming::DEFAULT)?;
+        let (events, _thread) = spawn_intake(url, &actor_id, start, wake, RECONNECT_INTERVAL)?;
         Ok(Self::from_events(events))
     }
 
@@ -661,14 +605,15 @@ impl FrpState {
     }
 }
 
-/// Start the intake thread for the bus at `url`, as the actor `actor_id`.
-/// Returns its event channel and handle.
+/// Start the intake thread for the bus at `url`, as the actor `actor_id`,
+/// dialing no more often than every `reconnect`. Returns its event channel
+/// and handle.
 fn spawn_intake(
     url: &str,
     actor_id: &str,
     start: Instant,
     wake: impl Fn() + Send + 'static,
-    timing: IntakeTiming,
+    reconnect: Duration,
 ) -> anyhow::Result<(mpsc::Receiver<IntakeEvent>, thread::JoinHandle<()>)> {
     let endpoint = frp_endpoint(url).context("open the FRP endpoint")?;
     let (tx, rx) = mpsc::channel();
@@ -676,7 +621,7 @@ fn spawn_intake(
     let me = actor_message(actor_id);
     let handle = thread::Builder::new()
         .name("frp-intake".to_owned())
-        .spawn(move || run_intake(&url, &me, endpoint, start, &tx, &wake, timing))
+        .spawn(move || run_intake(&url, &me, endpoint, start, &tx, &wake, reconnect))
         .context("start the FRP intake thread")?;
     Ok((rx, handle))
 }
@@ -686,11 +631,11 @@ fn spawn_intake(
 fn run_intake(
     url: &str,
     me: &FrpMessage,
-    endpoint: FrpEndpoint,
+    mut endpoint: FrpEndpoint,
     start: Instant,
     tx: &mpsc::Sender<IntakeEvent>,
     wake: &dyn Fn(),
-    timing: IntakeTiming,
+    reconnect: Duration,
 ) {
     // Report `event` and wake the app; false once the app is gone.
     let report = |event: IntakeEvent| {
@@ -700,79 +645,29 @@ fn run_intake(
         }
         sent
     };
-    let mut endpoint = Some(endpoint);
-    let mut dialer = Dialer::new(timing);
-    // The dial that has not finished, if any.
-    let mut pending: Option<mpsc::Receiver<DialResult>> = None;
+    let mut dialer = Dialer::new(reconnect);
     loop {
-        let wait = match dialer.step(Instant::now()) {
-            DialStep::Wait(wait) => wait,
-            DialStep::Warn(after) => {
-                eprintln!(
-                    "WARN: still connecting to FRP at {url} after {:.0}s: \
-                     the peer has not answered",
-                    after.as_secs_f64()
-                );
-                continue;
-            }
+        match dialer.step(Instant::now()) {
+            DialStep::Wait(wait) => thread::sleep(wait),
             DialStep::Dial => {
                 // Nothing to wake the app for: it is not connected either way.
                 if tx.send(IntakeEvent::Connecting).is_err() {
                     return;
                 }
-                let Some(ep) = endpoint.take().or_else(|| reopen(url)) else {
-                    dialer.finished();
-                    continue;
-                };
                 eprintln!("Connecting to FRP at {url}...");
-                match spawn_dial(ep) {
-                    Ok(dial) => pending = Some(dial),
-                    Err((ep, e)) => {
-                        eprintln!("WARN: cannot start the FRP connect thread: {e}");
-                        endpoint = Some(ep);
-                        dialer.finished();
+                match endpoint.establish() {
+                    Ok(mut conn) => {
+                        if !read_connection(&mut conn, me, start, &report) {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("FRP not available at {url} (expected {FRP_VERSION}): {e}");
                     }
                 }
-                continue;
             }
-        };
-        let Some(dial) = &pending else {
-            thread::sleep(wait);
-            continue;
-        };
-        let conn = match dial.recv_timeout(wait) {
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Ok((ep, Ok(conn))) => {
-                endpoint = Some(ep);
-                Some(conn)
-            }
-            Ok((ep, Err(e))) => {
-                eprintln!("FRP not available at {url} (expected {FRP_VERSION}): {e}");
-                endpoint = Some(ep);
-                None
-            }
-            // The dialing thread died with the endpoint; open a new one.
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                endpoint = reopen(url);
-                None
-            }
-        };
-        pending = None;
-        dialer.finished();
-        let Some(mut conn) = conn else {
-            continue;
-        };
-        if !read_connection(&mut conn, me, start, &report) {
-            return;
         }
     }
-}
-
-/// A new endpoint for `url`, reporting why there is none.
-fn reopen(url: &str) -> Option<FrpEndpoint> {
-    frp_endpoint(url)
-        .inspect_err(|e| eprintln!("WARN: cannot reopen FRP endpoint: {e}"))
-        .ok()
 }
 
 /// Greet the bus on `conn` and read it until the connection is lost,
@@ -826,65 +721,39 @@ fn read_connection(
 /// What the intake does next while it is not connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialStep {
-    /// Start a dial.
+    /// Dial now.
     Dial,
-    /// Report that the dial started this long ago has not finished.
-    Warn(Duration),
-    /// Nothing is due for this long: wait for the outstanding dial, or
-    /// sleep if there is none.
+    /// Sleep this long first.
     Wait(Duration),
 }
 
 /// When the intake dials, on the time it is given: at once the first time,
-/// then no sooner than [`IntakeTiming::reconnect`] after the start of the
-/// previous dial. A dial that has not finished is never repeated, so a
-/// device that accepts but does not answer gets one waiting dial, which is
-/// reported every [`IntakeTiming::dial_warn`].
+/// then no sooner than `reconnect` after the start of the previous dial.
 #[derive(Debug)]
 struct Dialer {
-    timing: IntakeTiming,
+    reconnect: Duration,
     /// When the last dial started.
     last: Option<Instant>,
-    /// The dial that has not finished: when it started and when it was
-    /// last reported.
-    out: Option<(Instant, Instant)>,
 }
 
 impl Dialer {
-    fn new(timing: IntakeTiming) -> Self {
+    fn new(reconnect: Duration) -> Self {
         Self {
-            timing,
+            reconnect,
             last: None,
-            out: None,
         }
     }
 
-    /// What to do at `now`. After [`DialStep::Dial`], call
-    /// [`finished`](Self::finished) once that dial has ended, whether or
-    /// not it connected (and after the connection it made is lost).
+    /// What to do at `now`.
     fn step(&mut self, now: Instant) -> DialStep {
-        if let Some((started, warned)) = &mut self.out {
-            let quiet = now.saturating_duration_since(*warned);
-            if quiet < self.timing.dial_warn {
-                return DialStep::Wait(self.timing.dial_warn - quiet);
-            }
-            *warned = now;
-            return DialStep::Warn(now.saturating_duration_since(*started));
-        }
         if let Some(last) = self.last {
             let since = now.saturating_duration_since(last);
-            if since < self.timing.reconnect {
-                return DialStep::Wait(self.timing.reconnect - since);
+            if since < self.reconnect {
+                return DialStep::Wait(self.reconnect - since);
             }
         }
         self.last = Some(now);
-        self.out = Some((now, now));
         DialStep::Dial
-    }
-
-    /// The dial last started has ended.
-    fn finished(&mut self) {
-        self.out = None;
     }
 }
 
@@ -1268,12 +1137,8 @@ mod tests {
     /// never a quiet window.
     const PATIENCE: Duration = Duration::from_secs(5);
 
-    /// Quick redials and no slow-dial reports, so the socket test runs in
-    /// milliseconds.
-    const QUICK: IntakeTiming = IntakeTiming {
-        reconnect: Duration::from_millis(50),
-        dial_warn: Duration::from_secs(60),
-    };
+    /// Quick redials, so the socket test runs in milliseconds.
+    const QUICK: Duration = Duration::from_millis(50);
 
     /// Wait at most [`PATIENCE`] for `thread` to end and return its result.
     /// Fails the test, naming `what`, if it is still running, and with the
@@ -1333,84 +1198,24 @@ mod tests {
         )));
     }
 
-    /// `ms` milliseconds after `t0`.
-    fn ms(t0: Instant, ms: u64) -> Instant {
-        t0 + Duration::from_millis(ms)
-    }
-
-    /// Step `dialer` from `from` until `until`, sleeping through each wait
-    /// as the intake thread does. Returns every other step, with its time
-    /// in milliseconds since `from`.
-    fn run_dialer(dialer: &mut Dialer, from: Instant, until: Instant) -> Vec<(u128, DialStep)> {
-        let mut now = from;
-        let mut steps = Vec::new();
-        while now < until {
-            match dialer.step(now) {
-                DialStep::Wait(wait) => now += wait,
-                step => steps.push(((now - from).as_millis(), step)),
-            }
-        }
-        steps
-    }
-
     #[test]
-    fn a_silent_device_is_dialled_once() {
+    fn the_intake_dials_every_reconnect_interval() {
         let t0 = Instant::now();
-        let mut dialer = Dialer::new(IntakeTiming::DEFAULT);
-        // The first dial goes out at once and never finishes: twenty
-        // reconnect intervals pass, and it is only reported.
-        let steps = run_dialer(&mut dialer, t0, ms(t0, 100_000));
-        let secs = Duration::from_secs;
-        assert_eq!(
-            steps,
-            [
-                (0, DialStep::Dial),
-                (30_000, DialStep::Warn(secs(30))),
-                (60_000, DialStep::Warn(secs(60))),
-                (90_000, DialStep::Warn(secs(90))),
-            ]
-        );
-        // Once it ends, the next dial goes out at once: its interval is over.
-        dialer.finished();
-        assert_eq!(dialer.step(ms(t0, 100_000)), DialStep::Dial);
-    }
-
-    #[test]
-    fn a_refused_device_is_redialled_every_reconnect_interval() {
-        let t0 = Instant::now();
-        let mut dialer = Dialer::new(IntakeTiming::DEFAULT);
+        let ms = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut dialer = Dialer::new(RECONNECT_INTERVAL);
         assert_eq!(dialer.step(t0), DialStep::Dial);
         // Refused after 200 ms: the interval runs from the start of the dial.
-        dialer.finished();
         assert_eq!(
-            dialer.step(ms(t0, 200)),
+            dialer.step(ms(200)),
             DialStep::Wait(Duration::from_millis(4_800))
         );
         assert_eq!(
-            dialer.step(ms(t0, 4_999)),
+            dialer.step(ms(4_999)),
             DialStep::Wait(Duration::from_millis(1))
         );
-        assert_eq!(dialer.step(ms(t0, 5_000)), DialStep::Dial);
-        dialer.finished();
-        let steps = run_dialer(&mut dialer, ms(t0, 5_000), ms(t0, 10_001));
-        assert_eq!(steps, [(5_000, DialStep::Dial)]);
-    }
-
-    #[test]
-    fn a_dial_that_ends_late_is_followed_at_once() {
-        let t0 = Instant::now();
-        let mut dialer = Dialer::new(IntakeTiming::DEFAULT);
-        assert_eq!(dialer.step(t0), DialStep::Dial);
-        // It ends (a connection lost, or a slow refusal) after the interval.
-        assert_eq!(
-            dialer.step(ms(t0, 7_000)),
-            DialStep::Wait(Duration::from_secs(23))
-        );
-        dialer.finished();
-        assert_eq!(dialer.step(ms(t0, 7_000)), DialStep::Dial);
-        // The new dial is reported from its own start.
-        let steps = run_dialer(&mut dialer, ms(t0, 7_000), ms(t0, 37_001));
-        assert_eq!(steps, [(30_000, DialStep::Warn(Duration::from_secs(30)))]);
+        assert_eq!(dialer.step(ms(5_000)), DialStep::Dial);
+        // A connection lost after the interval is redialled at once.
+        assert_eq!(dialer.step(ms(60_000)), DialStep::Dial);
     }
 
     /// The events in `actions`, with each `bus.actor` sent as `"announce"`.
