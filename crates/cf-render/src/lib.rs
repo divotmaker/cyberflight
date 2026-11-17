@@ -1,5 +1,6 @@
 mod composite;
 pub mod context;
+pub mod encoder;
 pub mod error;
 pub mod flight;
 mod frame;
@@ -17,5 +18,4 @@ pub mod render;
 mod rt_offscreen;
 mod rt_pipeline;
 mod scene;
-pub mod stream;
 pub mod window;

@@ -417,19 +417,16 @@ impl FlightManager {
             .find_map(|f| f.chase_camera(now))
     }
 
-    /// Build HUD geometry for the current frame from the newest shot.
+    /// Build HUD geometry for the current frame from the newest shot's
+    /// telemetry as of the last [`update`](Self::update).
     pub fn build_hud(
-        &mut self,
-        now: f64,
+        &self,
         chase_active: bool,
         lm_states: &HashMap<String, bool>,
         frp_connected: bool,
         screen_w: f32,
         screen_h: f32,
     ) -> cf_scene::hud::HudGeometry {
-        if let Some(f) = self.flights.last() {
-            self.last_telemetry = Some(f.telemetry(now));
-        }
         build_hud(
             self.last_telemetry.as_ref(),
             chase_active,
@@ -539,7 +536,7 @@ mod tests {
         // Both balls are drawn; the HUD and the chase camera follow the newest.
         let t = now + 0.5;
         assert_eq!(fm.update(t).len(), 2);
-        let _ = fm.build_hud(t, true, &HashMap::new(), true, 1920.0, 1080.0);
+        let _ = fm.build_hud(true, &HashMap::new(), true, 1920.0, 1080.0);
         let shown = fm.last_telemetry.as_ref().expect("telemetry");
         assert!((shown.ball_speed_mph - second.ball_speed_mph).abs() < 1e-9);
         let chase = fm.chase_camera(t).expect("newest ball is followed");

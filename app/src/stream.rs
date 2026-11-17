@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use cf_render::encoder::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_render::mode::RtMode;
 use cf_render::offscreen::OffscreenRenderer;
-use cf_render::stream::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_scene::range::Range;
 use dimple::environment::Environment;
 
@@ -172,7 +172,6 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
 
         // Build and update HUD.
         let hud = fm.build_hud(
-            now,
             chase_camera.is_some(),
             &fh.lm_states,
             fh.connected,

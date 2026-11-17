@@ -201,7 +201,6 @@ impl App {
             let screen_w = renderer.extent().width as f32;
             let screen_h = renderer.extent().height as f32;
             let hud = self.flights.build_hud(
-                now,
                 chase_camera.is_some(),
                 &self.frp.lm_states,
                 self.frp.connected,

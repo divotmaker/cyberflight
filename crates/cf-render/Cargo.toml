@@ -12,6 +12,5 @@ ash.workspace = true
 gpu-allocator.workspace = true
 glam.workspace = true
 thiserror.workspace = true
-image.workspace = true
 ash-window.workspace = true
 raw-window-handle.workspace = true

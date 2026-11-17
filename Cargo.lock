@@ -239,7 +239,6 @@ dependencies = [
  "cf-scene",
  "glam",
  "gpu-allocator",
- "image",
  "raw-window-handle",
  "thiserror 2.0.18",
 ]
