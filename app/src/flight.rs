@@ -180,7 +180,12 @@ impl AnimatedFlight {
             face_angle_deg: self.club.face_angle_deg,
             dynamic_loft_deg: self.club.dynamic_loft_deg,
             apex_m: if shot_t < self.result.flight.flight_time {
-                pos.y.max(0.0)
+                // The highest point so far, so the row never falls after the apex.
+                let passed = self.timeline.partition_point(|p| p.time <= t_clamped);
+                self.timeline[..passed]
+                    .iter()
+                    .map(|p| p.pos.y)
+                    .fold(pos.y.max(0.0), f64::max)
             } else {
                 self.result.flight.apex_m
             },
@@ -726,6 +731,26 @@ mod tests {
             (t.elapsed_s - f.total_time).abs() < 1e-9,
             "clock runs to rest"
         );
+    }
+
+    #[test]
+    fn the_apex_row_holds_the_highest_point_reached() {
+        let f = animate(ShotInput::driver(), None);
+        let flight_time = f.result.flight.flight_time;
+        let apex = f.result.flight.apex_m;
+        let mut shown = 0.0_f64;
+        let mut t = 0.0;
+        while t < flight_time {
+            let now = f.telemetry(t).apex_m;
+            assert!(now >= shown, "apex fell from {shown} to {now} at {t} s");
+            shown = now;
+            t += 0.05;
+        }
+        // Past the apex the row stays within a sample of it, not at the
+        // ball's lower current height.
+        assert!(shown > apex - 0.5, "{shown} vs apex {apex}");
+        assert!(f.telemetry(flight_time * 0.95).apex_m > apex - 0.5);
+        assert!((f.telemetry(flight_time + 0.1).apex_m - apex).abs() < 1e-9);
     }
 
     #[test]
