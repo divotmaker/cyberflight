@@ -15,7 +15,8 @@ pub struct ShotTelemetry {
     pub club_speed_mph: Option<f64>,
     pub ball_speed_mph: f64,
     pub smash_factor: Option<f64>,
-    pub launch_angle_deg: f64,
+    /// Launch angle, when the shot has one (a rolled shot has none).
+    pub launch_angle_deg: Option<f64>,
     pub launch_azimuth_deg: f64,
     /// Backspin, when the device measured it.
     pub backspin_rpm: Option<f64>,
@@ -156,7 +157,7 @@ fn telemetry_rows(t: &ShotTelemetry) -> Vec<HudRow> {
         rows.push(Value("SMASH", format!("{sf:.2}")));
     }
     rows.extend([
-        Value("VLA", format!("{:.1}", t.launch_angle_deg)),
+        Value("VLA", or_dash(t.launch_angle_deg, |v| format!("{v:.1}"))),
         Value("HLA", format!("{:.1}", t.launch_azimuth_deg)),
         Value("BACK", or_dash(t.backspin_rpm, fmt_rpm)),
         Value("SIDE", or_dash(t.sidespin_rpm, fmt_rpm)),
@@ -424,7 +425,7 @@ mod tests {
             club_speed_mph: Some(90.0),
             ball_speed_mph: 132.0,
             smash_factor: Some(1.47),
-            launch_angle_deg: 16.0,
+            launch_angle_deg: Some(16.0),
             launch_azimuth_deg: -1.2,
             backspin_rpm: Some(7000.0),
             sidespin_rpm: Some(-300.0),
@@ -480,6 +481,7 @@ mod tests {
     fn unmeasured_values_show_a_dash() {
         let t = ShotTelemetry {
             club_speed_mph: None,
+            launch_angle_deg: None,
             backspin_rpm: None,
             sidespin_rpm: None,
             club_path_deg: None,
@@ -487,6 +489,7 @@ mod tests {
         };
         let rows = telemetry_rows(&t);
         assert_eq!(value(&rows, "CLUB", "SPEED"), "-");
+        assert_eq!(value(&rows, "LAUNCH", "VLA"), "-");
         assert_eq!(value(&rows, "LAUNCH", "BACK"), "-");
         assert_eq!(value(&rows, "LAUNCH", "SIDE"), "-");
         assert!(rows.iter().all(|r| !matches!(r, HudRow::Value("PATH", _))));

@@ -115,6 +115,7 @@ fn animate(range: &Range, input: ShotInput, frac: f64) -> (AnimatedFlight, f64) 
         backspin_measured: true,
         sidespin_measured: true,
         clamped: Vec::new(),
+        rolled: false,
     };
     let flight = AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, range.green);
     let now = flight.result.flight.flight_time * frac;

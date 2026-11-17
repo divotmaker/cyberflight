@@ -52,7 +52,7 @@ pub enum RejectReason {
     /// The launch speed is zero or negative (mph).
     #[error("launch speed {0:.1} mph is not positive")]
     NonPositiveLaunchSpeed(f64),
-    /// The launch has no launch elevation.
+    /// The launch has spin but no launch elevation.
     #[error("no launch elevation")]
     NoLaunchElevation,
     /// A launch value is NaN or infinite.
@@ -104,6 +104,10 @@ pub struct ReceivedShot {
     pub sidespin_measured: bool,
     /// Launch values that were clamped to the physical envelope.
     pub clamped: Vec<Clamped>,
+    /// Whether the shot is a ground ball, rolled along the ground instead of
+    /// flown: it has neither a launch elevation nor any spin, as a putting
+    /// mat reports a putt. `input` then has a launch angle and spins of 0.
+    pub rolled: bool,
 }
 
 /// `value` clamped to `min..=max`, recording `field` in `clamped` when it
@@ -158,8 +162,12 @@ impl ReceivedShot {
     ///
     /// The launch is [`launch_for_flight`](flightrelay::CompletedShot::launch_for_flight): the measured
     /// launch, with a value it lacks filled from what the shot's modeled
-    /// flight result assumed. The shot needs a positive launch speed and a
-    /// launch elevation; a missing azimuth is a straight shot (0°). NaN or
+    /// flight result assumed. The shot needs a positive launch speed and,
+    /// unless it is rolled, a launch elevation; a missing azimuth is a
+    /// straight shot (0°). A shot
+    /// with neither a launch elevation nor any spin (backspin, sidespin or
+    /// total spin) is a ground ball: it is [`rolled`](Self::rolled) from
+    /// the tee with a launch angle and spins of 0. NaN or
     /// infinite launch values reject the shot, and values outside the
     /// physical envelope (the `MAX_*`/`MIN_*` constants) are clamped and
     /// listed in [`clamped`](Self::clamped).
@@ -170,8 +178,8 @@ impl ReceivedShot {
     /// A backspin and sidespin that are both exactly 0, with no total spin,
     /// count as no spin: a device that sends 0/0 has not measured it. Any
     /// nonzero spin is used as measured. Without any spin, measured or
-    /// assumed, the simulation uses [`ASSUMED_BACKSPIN_RPM`] and no
-    /// sidespin. Spin the device did not
+    /// assumed, a flown shot uses [`ASSUMED_BACKSPIN_RPM`] and no sidespin,
+    /// and a rolled one no spin at all. Spin the device did not
     /// measure is flagged in [`backspin_measured`](Self::backspin_measured)
     /// and [`sidespin_measured`](Self::sidespin_measured).
     ///
@@ -184,6 +192,10 @@ impl ReceivedShot {
     pub fn from_frp(shot: &flightrelay::CompletedShot) -> Result<Self, RejectReason> {
         let shot = &without_zero_spin(shot);
         let mut ball = shot.launch_for_flight().ok_or(RejectReason::NoLaunch)?;
+        let rolled = ball.launch_elevation.is_none()
+            && [ball.backspin_rpm, ball.sidespin_rpm, ball.total_spin_rpm]
+                .iter()
+                .all(Option::is_none);
         // The axis only splits a total spin sent without components.
         let axis_used = ball.backspin_rpm.is_none()
             && ball.sidespin_rpm.is_none()
@@ -201,10 +213,11 @@ impl ReceivedShot {
         if speed <= 0.0 {
             return Err(RejectReason::NonPositiveLaunchSpeed(speed));
         }
-        let elevation = ball
-            .launch_elevation
-            .ok_or(RejectReason::NoLaunchElevation)?;
-        let elevation = finite("launch_elevation", elevation)?;
+        let elevation = match ball.launch_elevation {
+            Some(elevation) => finite("launch_elevation", elevation)?,
+            None if rolled => 0.0,
+            None => return Err(RejectReason::NoLaunchElevation),
+        };
         let azimuth = finite("launch_azimuth", ball.launch_azimuth.unwrap_or(0.0))?;
 
         let sidespin = ball.sidespin_rpm.map(f64::from);
@@ -240,7 +253,7 @@ impl ReceivedShot {
             ),
             backspin_rpm: clamp_logged(
                 "backspin_rpm",
-                backspin.unwrap_or(ASSUMED_BACKSPIN_RPM),
+                backspin.unwrap_or(if rolled { 0.0 } else { ASSUMED_BACKSPIN_RPM }),
                 -MAX_SPIN_RPM,
                 MAX_SPIN_RPM,
                 &mut clamped,
@@ -282,6 +295,7 @@ impl ReceivedShot {
             backspin_measured: measured.backspin_rpm.is_some() || measured.total_spin_rpm.is_some(),
             sidespin_measured: measured.sidespin_rpm.is_some(),
             clamped,
+            rolled,
         })
     }
 }
@@ -469,6 +483,91 @@ mod tests {
             ReceivedShot::from_frp(&data).unwrap_err(),
             RejectReason::NoLaunchElevation
         );
+    }
+
+    /// A putt as a putting mat sends it: launch speed and azimuth only.
+    fn putt() -> CompletedShot {
+        let mut data = sample_completed_shot();
+        data.club = None;
+        data.launch = Some(Launch {
+            launch_speed: Some(Velocity::MilesPerHour(4.5)),
+            launch_azimuth: Some(1.2),
+            ..Launch::default()
+        });
+        data
+    }
+
+    #[test]
+    fn rolls_a_shot_without_elevation_or_spin() {
+        let shot = ReceivedShot::from_frp(&putt()).unwrap();
+        assert!(shot.rolled);
+        assert_eq!(shot.input.ball_speed_mph, 4.5);
+        assert_eq!(shot.input.launch_azimuth_deg, 1.2);
+        assert_eq!(shot.input.launch_angle_deg, 0.0);
+        assert_eq!(shot.input.backspin_rpm, 0.0);
+        assert_eq!(shot.input.sidespin_rpm, 0.0);
+        assert!(!shot.backspin_measured && !shot.sidespin_measured);
+        assert!(shot.clamped.is_empty());
+    }
+
+    #[test]
+    fn zero_spin_without_elevation_rolls() {
+        let mut data = putt();
+        ball(&mut data).backspin_rpm = Some(0);
+        ball(&mut data).sidespin_rpm = Some(0);
+        assert!(ReceivedShot::from_frp(&data).unwrap().rolled);
+    }
+
+    #[test]
+    fn any_spin_without_elevation_is_rejected() {
+        type Spin = fn(&mut Launch);
+        let cases: [Spin; 3] = [
+            |b| b.backspin_rpm = Some(200),
+            |b| b.sidespin_rpm = Some(-50),
+            |b| b.total_spin_rpm = Some(300),
+        ];
+        for spin in cases {
+            let mut data = putt();
+            spin(ball(&mut data));
+            assert_eq!(
+                ReceivedShot::from_frp(&data).unwrap_err(),
+                RejectReason::NoLaunchElevation
+            );
+        }
+    }
+
+    #[test]
+    fn a_shot_with_elevation_is_flown() {
+        let mut data = putt();
+        ball(&mut data).launch_elevation = Some(0.0);
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!(!shot.rolled);
+        assert!((shot.input.backspin_rpm - ASSUMED_BACKSPIN_RPM).abs() < 0.01);
+        assert!(
+            !ReceivedShot::from_frp(&sample_completed_shot())
+                .unwrap()
+                .rolled
+        );
+        assert!(!ReceivedShot::from_frp(&modeled_chip()).unwrap().rolled);
+    }
+
+    #[test]
+    fn an_assumed_elevation_flies_a_putt() {
+        // A flight model's assumed launch fills the elevation and the spin.
+        let mut data = putt();
+        with_flight(
+            &mut data,
+            FlightResult {
+                assumed: Some(AssumedLaunch {
+                    launch_elevation: Some(2.0),
+                    ..AssumedLaunch::default()
+                }),
+                ..FlightResult::new(Basis::Modeled)
+            },
+        );
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!(!shot.rolled);
+        assert!((shot.input.launch_angle_deg - 2.0).abs() < 0.01);
     }
 
     #[test]

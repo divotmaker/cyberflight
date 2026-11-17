@@ -69,9 +69,21 @@ pub fn simulate_shot(
     dimple::trajectory::simulate_shot(input, model, &ground)
 }
 
+/// Simulate a ground ball (a [`rolled`](crate::shot::ReceivedShot::rolled)
+/// shot, `input` with a launch angle and spins of 0): it starts on the
+/// ground at the tee, slides until it rolls, and rolls to rest, on level
+/// [`Surface::GREEN`] everywhere, the surface a putt is played on, whatever
+/// the range's green. Its flight has no time, carry or apex. The result is
+/// in dimple's frame; map positions to the scene with [`physics_to_scene`].
+#[must_use]
+pub fn simulate_roll(input: &ShotInput, model: &dyn AeroModel) -> ShotResult {
+    dimple::trajectory::simulate_shot(input, model, &Surface::GREEN)
+}
+
 #[cfg(test)]
 mod tests {
     use dimple::Tour;
+    use dimple::ground::Termination;
     use dimple::trajectory::simulate_flight;
 
     use super::*;
@@ -109,6 +121,48 @@ mod tests {
     fn landing(input: &ShotInput) -> Vec3 {
         let flight = simulate_flight(input, &Tour::SEA_LEVEL);
         flight.points.last().expect("flight has points").pos
+    }
+
+    fn putt(azimuth_deg: f64) -> ShotInput {
+        ShotInput {
+            ball_speed_mph: 4.5,
+            launch_angle_deg: 0.0,
+            launch_azimuth_deg: azimuth_deg,
+            backspin_rpm: 0.0,
+            sidespin_rpm: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_roll_stays_on_the_green_and_rests() {
+        let result = simulate_roll(&putt(0.0), &Tour::SEA_LEVEL);
+        assert_eq!(result.flight.flight_time, 0.0);
+        assert_eq!(result.flight.carry_m, 0.0);
+        assert_eq!(result.flight.apex_m, 0.0);
+        assert_eq!(result.ground.termination, Termination::Rest);
+        assert!(
+            result
+                .ground
+                .contacts
+                .iter()
+                .all(|c| c.surface == Surface::GREEN)
+        );
+        assert!(result.ground.points.iter().all(|p| p.pos.y == 0.0));
+        // A 4.5 mph putt on a tournament green rolls a few meters.
+        assert!((1.0..5.0).contains(&result.total_m), "{}", result.total_m);
+    }
+
+    // LATERAL SIGN: a putt started right of the target line finishes right
+    // and is drawn on the right of the screen; a putt started left mirrors it.
+    #[test]
+    fn a_roll_follows_its_azimuth() {
+        let right = simulate_roll(&putt(3.0), &Tour::SEA_LEVEL).ground.rest.pos;
+        let left = simulate_roll(&putt(-3.0), &Tour::SEA_LEVEL).ground.rest.pos;
+        let angle = right.z.atan2(right.x).to_degrees();
+        assert!((angle - 3.0).abs() < 1e-6, "rest at {angle:.3} deg");
+        assert!((left.z + right.z).abs() < 1e-9);
+        assert!(screen_x(physics_to_scene(right)) > 0.0);
+        assert!(screen_x(physics_to_scene(left)) < 0.0);
     }
 
     #[test]

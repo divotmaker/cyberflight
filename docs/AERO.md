@@ -16,7 +16,8 @@ not yet validated against measured data and may change between releases.
 
 - **Shot input.** `cf_scene::shot::ReceivedShot::from_frp` turns a
   flightrelay shot into dimple's `ShotInput`. It needs a ball speed and a
-  launch elevation; a missing azimuth is a straight shot. Spin comes from
+  launch elevation, except for a ground ball (below); a missing azimuth is
+  a straight shot. Spin comes from
   the backspin/sidespin pair or from total spin and spin axis; a total
   spin without an axis counts as backspin (less any measured sidespin). A
   shot without any spin, or one whose backspin and sidespin are both
@@ -28,6 +29,16 @@ not yet validated against measured data and may change between releases.
   envelope are clamped to it and logged: ball speed up to 250 mph (a speed
   of zero or less drops the shot), launch elevation −20° to 70°, azimuth
   ±60°, backspin and sidespin ±20 000 rpm.
+- **Ground ball.** A shot with neither a launch elevation nor any spin
+  (backspin, sidespin or total spin; a 0/0 pair counts as none), as a
+  putting mat sends a putt, is rolled instead of flown:
+  `cf_scene::ground::simulate_roll` runs dimple's `simulate_shot` from the
+  tee at a launch angle of 0 with no spin, on level `Surface::GREEN`
+  whatever the range's green. The ball starts on the ground at its launch
+  speed along its azimuth, slides until it rolls, and rolls to rest, so its
+  carry, apex and flight time are 0 and its total is the roll. The HUD
+  shows its launch angle (VLA) and spin as `-`. A shot with spin but no
+  launch elevation is dropped.
 - **Ball and air.** Shots fly with dimple's `Tour` model at
   `Tour::SEA_LEVEL` (standard sea-level air, no wind); the hops between
   ground impacts fly through the same air.
@@ -45,8 +56,8 @@ not yet validated against measured data and may change between releases.
   samples the floor under the ball at every step, so a ball that runs onto
   the green rolls on as a green and one that runs off it finishes on
   fairway. A new range has no green
-  (`cf_scene::green::DEFAULT_GREEN` is `None`), so every shot plays on
-  fairway; setting `Range::green` to a `GreenConfig` before the range is
+  (`cf_scene::green::DEFAULT_GREEN` is `None`), so every shot except a
+  ground ball plays on fairway; setting `Range::green` to a `GreenConfig` before the range is
   played and drawn adds one, e.g.
   `range.green = Some(GreenConfig { distance_m: 137.16, diameter_m: 30.0 })`.
   `DEFAULT_GREEN` is the value every new range starts with; changing it

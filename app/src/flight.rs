@@ -73,6 +73,9 @@ pub struct AnimatedFlight {
     pub backspin_measured: bool,
     /// Whether the device measured the sidespin (see [`ReceivedShot`]).
     pub sidespin_measured: bool,
+    /// Whether the shot is a ground ball, rolled instead of flown (see
+    /// [`ReceivedShot`]). Its launch angle is not shown.
+    pub rolled: bool,
     pub landed: bool,
     pub prev_chase: Option<(Camera, f64)>,
 }
@@ -84,7 +87,11 @@ impl AnimatedFlight {
         model: &dyn AeroModel,
         green: Option<GreenConfig>,
     ) -> Self {
-        let result = ground::simulate_shot(&shot.input, model, green);
+        let result = if shot.rolled {
+            ground::simulate_roll(&shot.input, model)
+        } else {
+            ground::simulate_shot(&shot.input, model, green)
+        };
         Self::from_result(shot, result, launch_time)
     }
 
@@ -137,6 +144,7 @@ impl AnimatedFlight {
             lm_carry_yards: shot.lm_carry_yards,
             backspin_measured: shot.backspin_measured,
             sidespin_measured: shot.sidespin_measured,
+            rolled: shot.rolled,
             landed: false,
             prev_chase: None,
         }
@@ -167,7 +175,7 @@ impl AnimatedFlight {
             club_speed_mph: self.club.club_speed_mph,
             ball_speed_mph: self.input.ball_speed_mph,
             smash_factor: self.club.smash_factor,
-            launch_angle_deg: self.input.launch_angle_deg,
+            launch_angle_deg: (!self.rolled).then_some(self.input.launch_angle_deg),
             launch_azimuth_deg: self.input.launch_azimuth_deg,
             backspin_rpm: self.backspin_measured.then_some(self.input.backspin_rpm),
             sidespin_rpm: self.sidespin_measured.then_some(self.input.sidespin_rpm),
@@ -464,6 +472,7 @@ mod tests {
             backspin_measured: true,
             sidespin_measured: true,
             clamped: Vec::new(),
+            rolled: false,
         }
     }
 
@@ -690,6 +699,80 @@ mod tests {
         }
         assert!(f.chase_camera(end + 0.01).is_none());
         assert!(f.prev_chase.is_none());
+    }
+
+    /// A 4.5 mph putt started 1.2° right, as `ReceivedShot::from_frp` makes
+    /// it from a putting mat's launch speed and azimuth.
+    fn putt(green: Option<GreenConfig>) -> AnimatedFlight {
+        let shot = ReceivedShot {
+            backspin_measured: false,
+            sidespin_measured: false,
+            rolled: true,
+            ..received(ShotInput {
+                ball_speed_mph: 4.5,
+                launch_angle_deg: 0.0,
+                launch_azimuth_deg: 1.2,
+                backspin_rpm: 0.0,
+                sidespin_rpm: 0.0,
+            })
+        };
+        AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, green)
+    }
+
+    #[test]
+    fn a_putt_rolls_along_the_ground_from_the_tee() {
+        let f = putt(Range::new().green);
+        assert_eq!(f.timeline[0].time, 0.0);
+        assert_eq!(f.timeline[0].pos, dimple::Vec3::ZERO);
+        assert!(f.timeline.iter().all(|p| p.pos.y == 0.0));
+        assert_eq!(f.result.ground.termination, Termination::Rest);
+        assert!(f.rest_pos.z > 0.0, "started right, finishes right");
+
+        let rolling = f.telemetry(0.5);
+        assert_eq!(rolling.apex_m, 0.0);
+        assert_eq!(rolling.carry_yards, 0.0);
+        assert_eq!(rolling.launch_angle_deg, None);
+        assert_eq!(rolling.backspin_rpm, None);
+        assert_eq!(rolling.ball_speed_mph, 4.5);
+        assert_eq!(rolling.launch_azimuth_deg, 1.2);
+        assert!(rolling.total_yards > 0.0);
+        assert!(rolling.total_yards < f.shown_total_yards());
+        assert_eq!(f.render_data(0.5, 1).expect("launched").ball_pos.y, 0.0);
+
+        let rest = f.telemetry(f.total_time + 1.0);
+        assert_eq!(rest.total_yards, f.shown_total_yards());
+        assert_eq!(rest.elapsed_s, f.total_time);
+        assert_eq!(rest.launch_angle_deg, None);
+    }
+
+    #[test]
+    fn a_putt_rolls_on_green_whatever_the_range_green() {
+        let green = Some(GreenConfig {
+            distance_m: 100.0,
+            diameter_m: 20.0,
+        });
+        assert_eq!(putt(None).rest_pos, putt(green).rest_pos);
+    }
+
+    #[test]
+    fn the_chase_camera_keeps_a_rolling_putt_in_view() {
+        let mut f = putt(Range::new().green);
+        // The inset is the right fifth of a 16:9 frame.
+        let aspect = 0.2 * 16.0 / 9.0;
+        let end = f.total_time + CHASE_LINGER_TIME;
+        let mut t = 0.0;
+        while t < end {
+            let cam = f.chase_camera(t).expect("followed until the linger ends");
+            let ball = f.render_data(t, 1).expect("launched").ball_pos;
+            let clip = cam.projection_matrix(aspect) * cam.view_matrix() * ball.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            assert!(
+                clip.w > 0.0 && ndc.x.abs() < 1.0 && ndc.y.abs() < 1.0,
+                "t = {t:.2}: ball at {ndc:?}"
+            );
+            t += 0.05;
+        }
+        assert!(f.chase_camera(end + 0.01).is_none());
     }
 
     /// `ReceivedShot::from_frp` rejects a non-positive speed; this covers a
