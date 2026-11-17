@@ -13,10 +13,10 @@ use cf_scene::ground;
 use cf_scene::hud::{ShotTelemetry, build_hud};
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::trail::{TrailPoint, tracer_tail};
-use dimple::aero::BallModel;
-use dimple::environment::Environment;
+use dimple::AeroModel;
 use dimple::ground::Termination;
 use dimple::trajectory::{ShotInput, ShotResult, TrajectoryPoint, interpolate_trajectory};
+use dimple::units::meters_to_yards;
 
 use crate::intake::ArrivedShot;
 
@@ -81,11 +81,10 @@ impl AnimatedFlight {
     pub fn from_received(
         shot: &ReceivedShot,
         launch_time: f64,
-        ball: &BallModel,
-        env: &Environment,
+        model: &dyn AeroModel,
         green: Option<GreenConfig>,
     ) -> Self {
-        let result = ground::simulate_shot(&shot.input, ball, env, green);
+        let result = ground::simulate_shot(&shot.input, model, green);
         Self::from_result(shot, result, launch_time)
     }
 
@@ -117,17 +116,14 @@ impl AnimatedFlight {
             );
         }
         let total_time = timeline.last().map_or(0.0, |p| p.time);
-        let rest_pos = timeline.last().map_or(result.final_pos, |p| p.pos);
+        let rest_pos = timeline.last().map_or(result.ground.rest.pos, |p| p.pos);
 
-        let rollout_yards = result.total_yards - result.flight.carry_yards;
+        let carry_yards = meters_to_yards(result.flight.carry_m);
+        let total_yards = meters_to_yards(result.total_m);
+        let rollout_yards = total_yards - carry_yards;
         eprintln!(
             "Shot #{} from {}: {:.1} carry + {:.1} rollout = {:.1} total yds, {:.2}s",
-            shot.shot_number,
-            shot.device,
-            result.flight.carry_yards,
-            rollout_yards,
-            result.total_yards,
-            total_time,
+            shot.shot_number, shot.device, carry_yards, rollout_yards, total_yards, total_time,
         );
 
         Self {
@@ -164,7 +160,7 @@ impl AnimatedFlight {
         let carry_yards = if shot_t < self.result.flight.flight_time {
             dimple::units::meters_to_yards(total_m)
         } else {
-            self.result.flight.carry_yards
+            meters_to_yards(self.result.flight.carry_m)
         };
 
         ShotTelemetry {
@@ -343,7 +339,7 @@ impl FlightManager {
         &mut self,
         arrived: &ArrivedShot,
         now: f64,
-        env: &Environment,
+        model: &dyn AeroModel,
         green: Option<GreenConfig>,
     ) {
         let launch_time = arrived.arrival.min(now);
@@ -354,7 +350,7 @@ impl FlightManager {
                 arrived.shot.shot_number, arrived.shot.device
             );
         }
-        self.launch(&arrived.shot, launch_time, env, green);
+        self.launch(&arrived.shot, launch_time, model, green);
     }
 
     /// Simulate `shot` and animate it from `launch_time`.
@@ -365,7 +361,7 @@ impl FlightManager {
         &mut self,
         shot: &ReceivedShot,
         launch_time: f64,
-        env: &Environment,
+        model: &dyn AeroModel,
         green: Option<GreenConfig>,
     ) {
         if self.is_animating(launch_time) {
@@ -377,8 +373,7 @@ impl FlightManager {
         self.flights.push(AnimatedFlight::from_received(
             shot,
             launch_time,
-            &BallModel::TOUR,
-            env,
+            model,
             green,
         ));
         self.newest_expired = false;
@@ -391,11 +386,12 @@ impl FlightManager {
             if !flight.landed && !flight.is_animating(now) && now > flight.launch_time {
                 flight.landed = true;
                 let total_yards = flight.shown_total_yards();
+                let carry_yards = meters_to_yards(flight.result.flight.carry_m);
                 eprintln!(
                     "  Stopped: {:.1} total yds ({:.1} carry + {:.1} rollout)",
                     total_yards,
-                    flight.result.flight.carry_yards,
-                    total_yards - flight.result.flight.carry_yards,
+                    carry_yards,
+                    total_yards - carry_yards,
                 );
             }
         }
@@ -456,6 +452,7 @@ mod tests {
     use super::*;
     use cf_scene::range::Range;
     use cf_scene::shot::ClubDelivery;
+    use dimple::Tour;
 
     fn received(input: ShotInput) -> ReceivedShot {
         ReceivedShot {
@@ -471,13 +468,7 @@ mod tests {
     }
 
     fn animate(input: ShotInput, green: Option<GreenConfig>) -> AnimatedFlight {
-        AnimatedFlight::from_received(
-            &received(input),
-            0.0,
-            &BallModel::TOUR,
-            &Environment::SEA_LEVEL,
-            green,
-        )
+        AnimatedFlight::from_received(&received(input), 0.0, &Tour::SEA_LEVEL, green)
     }
 
     #[test]
@@ -487,7 +478,7 @@ mod tests {
             shot: received(ShotInput::seven_iron()),
             arrival: 1.0,
         };
-        fm.take_in(&shot, 2.5, &Environment::SEA_LEVEL, None);
+        fm.take_in(&shot, 2.5, &Tour::SEA_LEVEL, None);
         assert_eq!(fm.flights[0].launch_time, 1.0);
 
         // 1.5 s into its flight, as if it had launched on arrival.
@@ -502,14 +493,14 @@ mod tests {
     fn a_shot_from_a_long_gap_is_not_animated_as_new() {
         // Two shots arrived while nothing was drawn; both came to rest long ago.
         let mut fm = FlightManager::new();
-        let env = Environment::SEA_LEVEL;
+        let model = Tour::SEA_LEVEL;
         for (n, arrival, input) in [
             (1, 1.0, ShotInput::driver()),
             (2, 12.0, ShotInput::seven_iron()),
         ] {
             let mut shot = received(input);
             shot.shot_number = n;
-            fm.take_in(&ArrivedShot { shot, arrival }, 100.0, &env, None);
+            fm.take_in(&ArrivedShot { shot, arrival }, 100.0, &model, None);
         }
         assert!(fm.update(100.0).is_empty(), "no ball is drawn");
         assert!(fm.flights.is_empty(), "both have expired");
@@ -526,15 +517,15 @@ mod tests {
         // A driver at 0 s, a short chip at 1 s: the chip's flight expires
         // while the driver's is still on screen.
         let mut fm = FlightManager::new();
-        let env = Environment::SEA_LEVEL;
+        let model = Tour::SEA_LEVEL;
         let driver = received(ShotInput::driver());
         let chip = received(ShotInput {
             ball_speed_mph: 40.0,
             launch_angle_deg: 25.0,
             ..ShotInput::seven_iron()
         });
-        fm.launch(&driver, 0.0, &env, None);
-        fm.launch(&chip, 1.0, &env, None);
+        fm.launch(&driver, 0.0, &model, None);
+        fm.launch(&chip, 1.0, &model, None);
         let chip_flight = animate(chip.input, None);
         let chip_expires = 1.0 + chip_flight.total_time + CHASE_LINGER_TIME;
         let driver_expires = fm.flights[0].total_time + CHASE_LINGER_TIME;
@@ -563,7 +554,7 @@ mod tests {
         assert!((shown - chip.input.ball_speed_mph).abs() < 1e-9);
 
         // A newer shot takes both back.
-        fm.launch(&driver, chip_expires + 3.0, &env, None);
+        fm.launch(&driver, chip_expires + 3.0, &model, None);
         fm.update(chip_expires + 3.5);
         let shown = fm
             .last_telemetry
@@ -581,22 +572,22 @@ mod tests {
             shot: received(ShotInput::seven_iron()),
             arrival: 5.0,
         };
-        fm.take_in(&shot, 4.99, &Environment::SEA_LEVEL, None);
+        fm.take_in(&shot, 4.99, &Tour::SEA_LEVEL, None);
         assert_eq!(fm.flights[0].launch_time, 4.99);
     }
 
     #[test]
     fn shot_during_rollout_is_launched() {
         let mut fm = FlightManager::new();
-        let env = Environment::SEA_LEVEL;
+        let model = Tour::SEA_LEVEL;
         let green = Range::new().green;
-        fm.launch(&received(ShotInput::driver()), 0.0, &env, green);
+        fm.launch(&received(ShotInput::driver()), 0.0, &model, green);
 
         // The drive is on the ground but still rolling.
         let now = fm.flights[0].result.flight.flight_time + 1.0;
         assert!(fm.is_animating(now));
         let second = ShotInput::seven_iron();
-        fm.launch(&received(second), now, &env, green);
+        fm.launch(&received(second), now, &model, green);
         assert_eq!(fm.flights.len(), 2, "second shot is launched, not dropped");
 
         // Both balls are drawn; the HUD and the chase camera follow the newest.
@@ -631,7 +622,7 @@ mod tests {
         assert!(f.timeline[i + 1..].iter().all(|p| p.pos.y >= -1e-9));
         assert!(f.timeline.len() > r.flight.points.len());
         let last = f.timeline.last().expect("timeline has points");
-        assert_eq!(last.pos, r.final_pos);
+        assert_eq!(last.pos, r.ground.rest.pos);
         assert_eq!(f.total_time, last.time);
         assert!(f.total_time > r.flight.flight_time + 1.0, "ball runs out");
     }
@@ -639,8 +630,7 @@ mod tests {
     #[test]
     fn unsettled_ball_stops_animating() {
         let input = ShotInput::driver();
-        let mut result =
-            ground::simulate_shot(&input, &BallModel::TOUR, &Environment::SEA_LEVEL, None);
+        let mut result = ground::simulate_shot(&input, &Tour::SEA_LEVEL, None);
         assert_eq!(result.ground.termination, Termination::Rest);
         // A ground phase that runs into dimple's time limit.
         let mut late = *result.ground.points.last().expect("ground points");
@@ -648,15 +638,15 @@ mod tests {
         late.pos.x += 50.0;
         result.ground.points.push(late);
         result.ground.termination = Termination::MaxTime;
-        result.final_pos = late.pos;
-        result.total_yards = dimple::units::meters_to_yards(late.pos.x.hypot(late.pos.z));
+        result.ground.rest.pos = late.pos;
+        result.total_m = late.pos.x.hypot(late.pos.z);
 
         let f = AnimatedFlight::from_result(&received(input), result, 0.0);
         let end = f.result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
         // The log reports the distance the HUD shows, not dimple's.
         let shown = f.telemetry(end + 1.0).total_yards;
         assert!((f.shown_total_yards() - shown).abs() < 1e-9);
-        assert!(f.shown_total_yards() < f.result.total_yards - 1.0);
+        assert!(f.shown_total_yards() < meters_to_yards(f.result.total_m) - 1.0);
         assert!(
             (f.total_time - end).abs() < 1e-9,
             "total {:.1}",
@@ -674,7 +664,7 @@ mod tests {
     fn settled_ball_animates_to_rest() {
         let f = animate(ShotInput::driver(), None);
         assert_eq!(f.result.ground.termination, Termination::Rest);
-        assert_eq!(f.rest_pos, f.result.final_pos);
+        assert_eq!(f.rest_pos, f.result.ground.rest.pos);
         assert!(f.total_time > f.result.flight.flight_time + 1.0);
     }
 
@@ -724,7 +714,7 @@ mod tests {
         let t = f.result.flight.flight_time + 0.5;
         let pos = interpolate_trajectory(&f.timeline, t).expect("inside timeline");
         assert!(pos.x > f.result.flight.carry_m * 0.99);
-        assert!(pos.x < f.result.final_pos.x + 1e-9);
+        assert!(pos.x < f.result.ground.rest.pos.x + 1e-9);
     }
 
     #[test]
@@ -737,9 +727,9 @@ mod tests {
         let f = animate(input, Range::new().green);
         let t = f.telemetry(f.total_time + 1.0);
         let r = &f.result;
-        assert!((t.carry_yards - r.flight.carry_yards).abs() < 1e-9);
-        assert!((t.total_yards - r.total_yards).abs() < 1e-9);
-        let lateral = dimple::units::meters_to_yards(r.final_pos.z);
+        assert!((t.carry_yards - meters_to_yards(r.flight.carry_m)).abs() < 1e-9);
+        assert!((t.total_yards - meters_to_yards(r.total_m)).abs() < 1e-9);
+        let lateral = meters_to_yards(r.ground.rest.pos.z);
         assert!((t.lateral_yards - lateral).abs() < 1e-9);
         assert!(t.lateral_yards > 0.0, "slice finishes right");
         assert!(

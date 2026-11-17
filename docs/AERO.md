@@ -19,15 +19,18 @@ not yet validated against measured data and may change between releases.
   launch elevation; a missing azimuth is a straight shot. Spin comes from
   the backspin/sidespin pair or from total spin and spin axis; a total
   spin without an axis counts as backspin (less any measured sidespin). A
-  shot without any spin flies with an assumed 2500 rpm of backspin; the
-  HUD shows spin the device did not measure as `-`.
+  shot without any spin, or one whose backspin and sidespin are both
+  exactly 0 with no total spin, flies with an assumed 2500 rpm of backspin
+  (a device that reports 0/0 has not measured the spin); any nonzero spin
+  is flown as measured. The HUD shows spin the device did not measure as
+  `-`.
   NaN or infinite launch values drop the shot. Values outside a physical
   envelope are clamped to it and logged: ball speed up to 250 mph (a speed
   of zero or less drops the shot), launch elevation −20° to 70°, azimuth
   ±60°, backspin and sidespin ±20 000 rpm.
-- **Ball and air.** Shots fly with `BallModel::TOUR` in
-  `Environment::SEA_LEVEL`; the hops between ground impacts fly through the
-  same air.
+- **Ball and air.** Shots fly with dimple's `Tour` model at
+  `Tour::SEA_LEVEL` (standard sea-level air, no wind); the hops between
+  ground impacts fly through the same air.
 - **Full shot.** `cf_scene::ground::simulate_shot` runs dimple's
   `simulate_shot` over the range floor: the flight, then impacts, hops,
   slide and roll until the ball stops. Carry, total and offline (the rest

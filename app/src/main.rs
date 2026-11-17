@@ -19,7 +19,7 @@ use cf_render::render::Renderer;
 use cf_render::window::Swapchain;
 use cf_scene::hud::build_notice;
 use cf_scene::range::Range;
-use dimple::environment::Environment;
+use dimple::Tour;
 
 use cyberflight::flight::FlightManager;
 use cyberflight::intake::{self, FrpState};
@@ -70,7 +70,7 @@ struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
     range: Range,
-    environment: Environment,
+    model: Tour,
     frp: FrpState,
     flights: FlightManager,
     start_time: Instant,
@@ -94,7 +94,7 @@ impl App {
             window: None,
             renderer: None,
             range: Range::new(),
-            environment: Environment::SEA_LEVEL,
+            model: Tour::SEA_LEVEL,
             frp,
             flights: FlightManager::new(),
             start_time,
@@ -177,7 +177,7 @@ impl App {
     fn take_in(&mut self, now: f64) {
         for shot in self.frp.poll() {
             self.flights
-                .take_in(&shot, now, &self.environment, self.range.green);
+                .take_in(&shot, now, &self.model, self.range.green);
         }
     }
 

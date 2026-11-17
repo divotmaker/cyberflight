@@ -11,7 +11,7 @@ use cf_render::encoder::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_render::mode::RtMode;
 use cf_render::offscreen::OffscreenRenderer;
 use cf_scene::range::Range;
-use dimple::environment::Environment;
+use dimple::Tour;
 
 use cyberflight::flight::FlightManager;
 use cyberflight::intake::FrpState;
@@ -91,7 +91,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
     );
 
     let range = Range::new();
-    let environment = Environment::SEA_LEVEL;
+    let model = Tour::SEA_LEVEL;
 
     // Create headless renderer, ray-traced when the GPU supports it.
     eprintln!("Initializing headless Vulkan renderer...");
@@ -157,7 +157,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
 
         // Launch the shots that have arrived, each from its arrival time.
         for shot in fh.poll() {
-            fm.take_in(&shot, now, &environment, range.green);
+            fm.take_in(&shot, now, &model, range.green);
         }
 
         // Update flight animations.

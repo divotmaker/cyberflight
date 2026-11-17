@@ -41,8 +41,7 @@ use cf_scene::hud::build_hud;
 use cf_scene::range::Range;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cyberflight::flight::{AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE};
-use dimple::aero::BallModel;
-use dimple::environment::Environment;
+use dimple::Tour;
 use dimple::trajectory::ShotInput;
 
 const WIDTH: u32 = 1920;
@@ -117,13 +116,7 @@ fn animate(range: &Range, input: ShotInput, frac: f64) -> (AnimatedFlight, f64) 
         sidespin_measured: true,
         clamped: Vec::new(),
     };
-    let flight = AnimatedFlight::from_received(
-        &shot,
-        0.0,
-        &BallModel::TOUR,
-        &Environment::SEA_LEVEL,
-        range.green,
-    );
+    let flight = AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, range.green);
     let now = flight.result.flight.flight_time * frac;
     (flight, now)
 }

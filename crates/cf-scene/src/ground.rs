@@ -7,10 +7,9 @@
 //! every step: a ball that lands short of the green and runs onto it rolls
 //! on as a green, and one that runs off it rolls out on fairway.
 
-use dimple::aero::BallModel;
-use dimple::environment::Environment;
 use dimple::ground::{GroundPhysics, GroundSample, Surface, Terrain};
 use dimple::trajectory::{ShotInput, ShotResult};
+use dimple::{AeroModel, Vec3};
 
 use crate::frame::physics_to_scene;
 use crate::green::GreenConfig;
@@ -47,10 +46,10 @@ impl RangeTerrain {
 
 impl Terrain for RangeTerrain {
     fn sample(&self, x: f64, z: f64) -> GroundSample {
-        let scene = physics_to_scene(dimple::Vec3::new(x, 0.0, z));
+        let scene = physics_to_scene(Vec3::new(x, 0.0, z));
         GroundSample {
             height: 0.0,
-            normal: dimple::Vec3::Y,
+            normal: Vec3::Y,
             surface: surface_at(scene.x, scene.z, self.green),
         }
     }
@@ -58,21 +57,21 @@ impl Terrain for RangeTerrain {
 
 /// Simulate a full shot on the range: flight, then impacts, hops, slide
 /// and roll on the range floor with `green` (all fairway for `None`),
-/// hopping through `env`'s air. The result is in dimple's frame; map
+/// hopping through `model`'s air. The result is in dimple's frame; map
 /// positions to the scene with [`physics_to_scene`].
 #[must_use]
 pub fn simulate_shot(
     input: &ShotInput,
-    ball: &BallModel,
-    env: &Environment,
+    model: &dyn AeroModel,
     green: Option<GreenConfig>,
 ) -> ShotResult {
     let ground = GroundPhysics::new(RangeTerrain::new(green));
-    dimple::trajectory::simulate_shot(input, ball, env, &ground)
+    dimple::trajectory::simulate_shot(input, model, &ground)
 }
 
 #[cfg(test)]
 mod tests {
+    use dimple::Tour;
     use dimple::trajectory::simulate_flight;
 
     use super::*;
@@ -80,12 +79,12 @@ mod tests {
     use crate::range::Range;
 
     fn shot(input: &ShotInput, green: Option<GreenConfig>) -> ShotResult {
-        simulate_shot(input, &BallModel::TOUR, &Environment::SEA_LEVEL, green)
+        simulate_shot(input, &Tour::SEA_LEVEL, green)
     }
 
     /// A green of `radius` m on the target line at the downrange distance
     /// of the dimple position `p`.
-    fn green_at(p: dimple::Vec3, radius: f64) -> Option<GreenConfig> {
+    fn green_at(p: Vec3, radius: f64) -> Option<GreenConfig> {
         Some(GreenConfig {
             distance_m: physics_to_scene(p).z as f32,
             diameter_m: (2.0 * radius) as f32,
@@ -107,8 +106,8 @@ mod tests {
         }
     }
 
-    fn landing(input: &ShotInput) -> dimple::Vec3 {
-        let flight = simulate_flight(input, &BallModel::TOUR, &Environment::SEA_LEVEL);
+    fn landing(input: &ShotInput) -> Vec3 {
+        let flight = simulate_flight(input, &Tour::SEA_LEVEL);
         flight.points.last().expect("flight has points").pos
     }
 
@@ -163,7 +162,7 @@ mod tests {
         let on = terrain.sample(100.0, 0.0);
         assert_eq!(on.surface, Surface::GREEN);
         assert_eq!(on.height, 0.0);
-        assert_eq!(on.normal, dimple::Vec3::Y);
+        assert_eq!(on.normal, Vec3::Y);
         assert_eq!(terrain.sample(100.0, 4.9).surface, Surface::GREEN);
         assert_eq!(terrain.sample(100.0, -5.1).surface, Surface::FAIRWAY);
         assert_eq!(terrain.sample(0.0, 100.0).surface, Surface::FAIRWAY);
@@ -220,7 +219,7 @@ mod tests {
         let green = green_at(landing(&input), 3.0);
         let result = shot(&input, green);
         assert_eq!(result.ground.contacts[0].surface, Surface::GREEN);
-        let rest = physics_to_scene(result.final_pos);
+        let rest = physics_to_scene(result.ground.rest.pos);
         assert_eq!(surface_at(rest.x, rest.z, green), Surface::FAIRWAY);
     }
 
@@ -276,13 +275,13 @@ mod tests {
 
         let sliced = shot(&slice, green);
         assert!(sliced.flight.lateral_m > 10.0, "slice lands right");
-        assert!(sliced.final_pos.z > 10.0, "slice finishes right");
-        let rest = physics_to_scene(sliced.final_pos);
+        assert!(sliced.ground.rest.pos.z > 10.0, "slice finishes right");
+        let rest = physics_to_scene(sliced.ground.rest.pos);
         assert!(rest.x < -10.0, "scene X of a slice: {:.1}", rest.x);
         assert!(screen_x(rest) > 0.05, "slice on screen: {}", screen_x(rest));
 
         let hooked = shot(&hook, green);
-        assert!((hooked.final_pos.z + sliced.final_pos.z).abs() < 1e-6);
-        assert!(screen_x(physics_to_scene(hooked.final_pos)) < -0.05);
+        assert!((hooked.ground.rest.pos.z + sliced.ground.rest.pos.z).abs() < 1e-6);
+        assert!(screen_x(physics_to_scene(hooked.ground.rest.pos)) < -0.05);
     }
 }

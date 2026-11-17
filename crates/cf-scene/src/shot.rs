@@ -135,6 +135,24 @@ fn finite(field: &'static str, value: f64) -> Result<f64, RejectReason> {
     }
 }
 
+/// `shot`, with a launch whose backspin and sidespin are both exactly 0 (and
+/// that has no total spin) stripped of its spin: a device that reports 0/0
+/// has not measured the spin.
+fn without_zero_spin(shot: &flightrelay::CompletedShot) -> flightrelay::CompletedShot {
+    let mut shot = shot.clone();
+    if let Some(launch) = shot.launch.as_mut()
+        && launch.backspin_rpm == Some(0)
+        && launch.sidespin_rpm == Some(0)
+        && launch.total_spin_rpm.is_none_or(|total| total == 0)
+    {
+        launch.backspin_rpm = None;
+        launch.sidespin_rpm = None;
+        launch.total_spin_rpm = None;
+        launch.spin_axis = None;
+    }
+    shot
+}
+
 impl ReceivedShot {
     /// Convert an FRP `CompletedShot` into a `ReceivedShot`.
     ///
@@ -149,8 +167,11 @@ impl ReceivedShot {
     /// Spin comes from the FRP components, or from `total_spin_rpm` +
     /// `spin_axis` when the device sends only that pair. A total spin
     /// without an axis is taken as backspin (less any measured sidespin).
-    /// Without any spin, measured or assumed, the simulation uses
-    /// [`ASSUMED_BACKSPIN_RPM`] and no sidespin. Spin the device did not
+    /// A backspin and sidespin that are both exactly 0, with no total spin,
+    /// count as no spin: a device that sends 0/0 has not measured it. Any
+    /// nonzero spin is used as measured. Without any spin, measured or
+    /// assumed, the simulation uses [`ASSUMED_BACKSPIN_RPM`] and no
+    /// sidespin. Spin the device did not
     /// measure is flagged in [`backspin_measured`](Self::backspin_measured)
     /// and [`sidespin_measured`](Self::sidespin_measured).
     ///
@@ -161,6 +182,7 @@ impl ReceivedShot {
     ///
     /// Returns why the shot cannot be simulated.
     pub fn from_frp(shot: &flightrelay::CompletedShot) -> Result<Self, RejectReason> {
+        let shot = &without_zero_spin(shot);
         let mut ball = shot.launch_for_flight().ok_or(RejectReason::NoLaunch)?;
         // The axis only splits a total spin sent without components.
         let axis_used = ball.backspin_rpm.is_none()
@@ -267,8 +289,7 @@ impl ReceivedShot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dimple::aero::BallModel;
-    use dimple::environment::Environment;
+    use dimple::Tour;
     use dimple::trajectory::simulate_flight;
     use flightrelay::{
         AssumedLaunch, Basis, ClubData, CompletedShot, Distance, Flight, FlightResult, Launch,
@@ -367,6 +388,42 @@ mod tests {
     }
 
     #[test]
+    fn zero_backspin_and_sidespin_count_as_missing() {
+        let mut data = sample_completed_shot();
+        ball(&mut data).backspin_rpm = Some(0);
+        ball(&mut data).sidespin_rpm = Some(0);
+        ball(&mut data).total_spin_rpm = None;
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!((shot.input.backspin_rpm - ASSUMED_BACKSPIN_RPM).abs() < 0.01);
+        assert!((shot.input.sidespin_rpm - 0.0).abs() < 0.01);
+        assert!(!shot.backspin_measured);
+        assert!(!shot.sidespin_measured);
+    }
+
+    #[test]
+    fn any_nonzero_spin_is_measured() {
+        for (back, side) in [(0, 1), (1, 0), (0, -300), (2700, 0)] {
+            let mut data = sample_completed_shot();
+            ball(&mut data).backspin_rpm = Some(back);
+            ball(&mut data).sidespin_rpm = Some(side);
+            let shot = ReceivedShot::from_frp(&data).unwrap();
+            assert!((shot.input.backspin_rpm - f64::from(back)).abs() < 0.01);
+            assert!((shot.input.sidespin_rpm - f64::from(side)).abs() < 0.01);
+            assert!(shot.backspin_measured && shot.sidespin_measured);
+        }
+    }
+
+    #[test]
+    fn zero_spin_takes_the_flight_models_assumption() {
+        let mut data = modeled_chip();
+        ball(&mut data).backspin_rpm = Some(0);
+        ball(&mut data).sidespin_rpm = Some(0);
+        let shot = ReceivedShot::from_frp(&data).unwrap();
+        assert!((shot.input.backspin_rpm - 6200.0).abs() < 0.01);
+        assert!(!shot.backspin_measured);
+    }
+
+    #[test]
     fn uses_total_spin_without_axis_as_backspin() {
         let mut data = sample_completed_shot();
         let b = ball(&mut data);
@@ -400,8 +457,8 @@ mod tests {
         let shot = ReceivedShot::from_frp(&data).unwrap();
         assert!((shot.input.backspin_rpm - -1500.0).abs() < 0.01);
         assert!(shot.clamped.is_empty());
-        let flight = simulate_flight(&shot.input, &BallModel::TOUR, &Environment::SEA_LEVEL);
-        assert!(flight.carry_yards.is_finite() && flight.carry_yards > 0.0);
+        let flight = simulate_flight(&shot.input, &Tour::SEA_LEVEL);
+        assert!(flight.carry_m.is_finite() && flight.carry_m > 0.0);
     }
 
     #[test]
