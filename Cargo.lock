@@ -232,7 +232,7 @@ checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cf-render"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "ash",
  "ash-window",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "cf-scene"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "dimple",
  "flightrelay",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "cf-test"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "image",
  "image-compare",
@@ -430,7 +430,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cyberflight"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "anyhow",
  "cf-render",
