@@ -9,10 +9,9 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 
 use cf_scene::shot::ReceivedShot;
-use flightrelay::types::roles;
 use flightrelay::{
     BusActor, BusState, DEFAULT_HEARTBEAT, EndpointConfig, FrpBody, FrpConnection, FrpEndpoint,
-    FrpMessage, ShotAccumulator, ShotEvent, Target,
+    FrpMessage, ShotAccumulator, ShotEvent, Target, roles,
 };
 
 /// FRP spec version we support.

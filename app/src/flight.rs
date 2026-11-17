@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use glam::{DVec3, Vec3};
+use glam::Vec3;
 
 use cf_render::flight::FlightRenderData;
 use cf_scene::camera::Camera;
@@ -31,7 +31,7 @@ pub const DEFAULT_TRAIL_SUBSAMPLE: usize = 1;
 pub const MAX_UNSETTLED_GROUND_TIME_S: f64 = 8.0;
 
 /// A dimple-frame vector as a scene-frame render position.
-fn to_scene(p: DVec3) -> Vec3 {
+fn to_scene(p: dimple::Vec3) -> Vec3 {
     physics_to_scene(p).as_vec3()
 }
 
@@ -65,7 +65,7 @@ pub struct AnimatedFlight {
     pub total_time: f64,
     /// Where the animation ends: dimple's rest position, or the last shown
     /// position when the ball did not settle.
-    pub rest_pos: DVec3,
+    pub rest_pos: dimple::Vec3,
     pub launch_time: f64,
     pub club: ClubDelivery,
     pub lm_carry_yards: Option<f64>,
@@ -105,7 +105,7 @@ impl AnimatedFlight {
                 timeline.push(TrajectoryPoint {
                     time: end,
                     pos: cut,
-                    vel: DVec3::ZERO,
+                    vel: dimple::Vec3::ZERO,
                 });
             }
             eprintln!(
@@ -155,7 +155,7 @@ impl AnimatedFlight {
         let pos = if shot_t >= self.total_time {
             self.rest_pos
         } else {
-            interpolate_trajectory(&self.timeline, t_clamped).unwrap_or(DVec3::ZERO)
+            interpolate_trajectory(&self.timeline, t_clamped).unwrap_or(dimple::Vec3::ZERO)
         };
 
         let total_m = pos.x.hypot(pos.z);
@@ -247,7 +247,7 @@ impl AnimatedFlight {
                 let dt = (b.time - a.time).max(1e-6);
                 (b.pos - a.pos) / dt
             } else {
-                DVec3::new(1.0, 0.0, 0.0)
+                dimple::Vec3::X
             };
             let velocity = to_scene(vel);
 
@@ -620,7 +620,7 @@ mod tests {
             f.timeline.windows(2).all(|w| w[1].time > w[0].time),
             "times strictly increase"
         );
-        assert_eq!(f.timeline[0].pos, DVec3::ZERO);
+        assert_eq!(f.timeline[0].pos, dimple::Vec3::ZERO);
         let landing = r.flight.points.last().expect("flight has points");
         let i = f
             .timeline

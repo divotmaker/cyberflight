@@ -21,15 +21,15 @@ use glam::DVec3;
 /// Map a dimple vector `(downrange, up, right)` to the scene frame:
 /// scene `(−right, up, downrange)`.
 #[must_use]
-pub fn physics_to_scene(p: DVec3) -> DVec3 {
+pub fn physics_to_scene(p: dimple::Vec3) -> DVec3 {
     DVec3::new(-p.z, p.y, p.x)
 }
 
 /// Map a scene vector to dimple's frame; the inverse of
 /// [`physics_to_scene`].
 #[must_use]
-pub fn scene_to_physics(p: DVec3) -> DVec3 {
-    DVec3::new(p.z, p.y, -p.x)
+pub fn scene_to_physics(p: DVec3) -> dimple::Vec3 {
+    dimple::Vec3::new(p.z, p.y, -p.x)
 }
 
 /// Horizontal NDC position of a scene point under the range camera, as the
@@ -50,41 +50,42 @@ mod tests {
 
     #[test]
     fn downrange_maps_to_scene_z() {
-        let p = physics_to_scene(DVec3::new(100.0, 5.0, 0.0));
+        let p = physics_to_scene(dimple::Vec3::new(100.0, 5.0, 0.0));
         assert_eq!(p, DVec3::new(0.0, 5.0, 100.0));
     }
 
     #[test]
     fn golfer_right_maps_to_negative_scene_x() {
-        let p = physics_to_scene(DVec3::new(100.0, 5.0, 10.0));
+        let p = physics_to_scene(dimple::Vec3::new(100.0, 5.0, 10.0));
         assert_eq!(p, DVec3::new(-10.0, 5.0, 100.0));
     }
 
     #[test]
     fn round_trips() {
-        let p = DVec3::new(123.0, 4.5, -6.7);
-        assert_eq!(scene_to_physics(physics_to_scene(p)), p);
-        assert_eq!(physics_to_scene(scene_to_physics(p)), p);
+        let physics = dimple::Vec3::new(123.0, 4.5, -6.7);
+        assert_eq!(scene_to_physics(physics_to_scene(physics)), physics);
+        let scene = DVec3::new(123.0, 4.5, -6.7);
+        assert_eq!(physics_to_scene(scene_to_physics(scene)), scene);
     }
 
     #[test]
     fn is_a_rotation() {
         // Right-handed to right-handed: X × Y = Z survives the map, so spin
         // vectors keep their sense.
-        let x = physics_to_scene(DVec3::X);
-        let y = physics_to_scene(DVec3::Y);
-        let z = physics_to_scene(DVec3::Z);
+        let x = physics_to_scene(dimple::Vec3::X);
+        let y = physics_to_scene(dimple::Vec3::Y);
+        let z = physics_to_scene(dimple::Vec3::Z);
         assert_eq!(x.cross(y), z);
     }
 
     #[test]
     fn golfer_right_renders_on_screen_right() {
-        let right = physics_to_scene(DVec3::new(100.0, 0.0, 10.0));
-        let left = physics_to_scene(DVec3::new(100.0, 0.0, -10.0));
+        let right = physics_to_scene(dimple::Vec3::new(100.0, 0.0, 10.0));
+        let left = physics_to_scene(dimple::Vec3::new(100.0, 0.0, -10.0));
         assert!(screen_x(right) > 0.0, "right of line: {}", screen_x(right));
         assert!(screen_x(left) < 0.0, "left of line: {}", screen_x(left));
         // The target line itself stays centered.
-        let center = physics_to_scene(DVec3::new(100.0, 0.0, 0.0));
+        let center = physics_to_scene(dimple::Vec3::new(100.0, 0.0, 0.0));
         assert!(screen_x(center).abs() < 1e-6);
     }
 }

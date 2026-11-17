@@ -11,7 +11,6 @@ use dimple::aero::BallModel;
 use dimple::environment::Environment;
 use dimple::ground::{GroundPhysics, GroundSample, Surface, Terrain};
 use dimple::trajectory::{ShotInput, ShotResult};
-use glam::DVec3;
 
 use crate::frame::physics_to_scene;
 use crate::green::GreenConfig;
@@ -48,10 +47,10 @@ impl RangeTerrain {
 
 impl Terrain for RangeTerrain {
     fn sample(&self, x: f64, z: f64) -> GroundSample {
-        let scene = physics_to_scene(DVec3::new(x, 0.0, z));
+        let scene = physics_to_scene(dimple::Vec3::new(x, 0.0, z));
         GroundSample {
             height: 0.0,
-            normal: DVec3::Y,
+            normal: dimple::Vec3::Y,
             surface: surface_at(scene.x, scene.z, self.green),
         }
     }
@@ -86,7 +85,7 @@ mod tests {
 
     /// A green of `radius` m on the target line at the downrange distance
     /// of the dimple position `p`.
-    fn green_at(p: DVec3, radius: f64) -> Option<GreenConfig> {
+    fn green_at(p: dimple::Vec3, radius: f64) -> Option<GreenConfig> {
         Some(GreenConfig {
             distance_m: physics_to_scene(p).z as f32,
             diameter_m: (2.0 * radius) as f32,
@@ -108,7 +107,7 @@ mod tests {
         }
     }
 
-    fn landing(input: &ShotInput) -> DVec3 {
+    fn landing(input: &ShotInput) -> dimple::Vec3 {
         let flight = simulate_flight(input, &BallModel::TOUR, &Environment::SEA_LEVEL);
         flight.points.last().expect("flight has points").pos
     }
@@ -164,7 +163,7 @@ mod tests {
         let on = terrain.sample(100.0, 0.0);
         assert_eq!(on.surface, Surface::GREEN);
         assert_eq!(on.height, 0.0);
-        assert_eq!(on.normal, DVec3::Y);
+        assert_eq!(on.normal, dimple::Vec3::Y);
         assert_eq!(terrain.sample(100.0, 4.9).surface, Surface::GREEN);
         assert_eq!(terrain.sample(100.0, -5.1).surface, Surface::FAIRWAY);
         assert_eq!(terrain.sample(0.0, 100.0).surface, Surface::FAIRWAY);
