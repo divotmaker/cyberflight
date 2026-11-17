@@ -456,21 +456,22 @@ fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flight::{ArrivedShot, IntakeEvent, ShotIntake};
     use flightrelay::{
-        EndpointConfig, FrpEndpoint, FrpMessage, Launch, ShotFinished, ShotKey, ShotLaunch,
-        ShotTrigger, Transport, Velocity,
+        FrpMessage, Launch, ShotFinished, ShotKey, ShotLaunch, ShotTrigger, Velocity,
     };
+    use std::sync::mpsc;
 
-    /// An app whose FRP bus at `url` is dialled from now.
-    fn app_of(url: &str) -> App {
-        let start = Instant::now();
-        let frp = FrpState::new(url, start, || {}).expect("intake");
-        App::new(true, frp, start)
+    /// An app on the clock started now, and the channel its intake reports on.
+    fn app_and_intake() -> (App, mpsc::Sender<IntakeEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let app = App::new(true, FrpState::from_events(rx), Instant::now());
+        (app, tx)
     }
 
-    /// An app whose FRP bus refuses the connection.
+    /// An app that takes in no shots.
     fn app() -> App {
-        app_of("ws://127.0.0.1:9/frp")
+        app_and_intake().0
     }
 
     #[test]
@@ -539,64 +540,46 @@ mod tests {
     /// Shots that arrive while nothing is drawn launch when they arrived.
     #[test]
     fn advance_launches_shots_without_a_renderer() {
-        let mut device = FrpEndpoint::open(EndpointConfig::new(Transport::listen("127.0.0.1:0")))
-            .expect("device endpoint");
-        let addr = device.local_addr().expect("addr").expect("bound");
-        let server = std::thread::spawn(move || {
-            let mut conn = device.establish().expect("handshake");
-            let key = ShotKey {
-                shot_id: "shot-1".to_owned(),
-                shot_number: 1,
-            };
-            let launch = Launch {
-                launch_speed: Some(Velocity::MilesPerHour(140.0)),
-                launch_elevation: Some(14.0),
-                backspin_rpm: Some(5000),
-                sidespin_rpm: Some(0),
-                ..Launch::default()
-            };
-            let lm = "7d2f9a41c03be856";
-            for msg in [
-                FrpMessage::new(lm, ShotTrigger::new(key.clone())),
-                FrpMessage::new(
-                    lm,
-                    ShotLaunch {
-                        key: key.clone(),
-                        launch,
-                    },
-                ),
-                FrpMessage::new(lm, ShotFinished { key }),
-            ] {
-                conn.send(&msg).expect("send");
-            }
-            (device, conn)
-        });
+        let key = ShotKey {
+            shot_id: "shot-1".to_owned(),
+            shot_number: 1,
+        };
+        let launch = Launch {
+            launch_speed: Some(Velocity::MilesPerHour(140.0)),
+            launch_elevation: Some(14.0),
+            backspin_rpm: Some(5000),
+            sidespin_rpm: Some(0),
+            ..Launch::default()
+        };
+        let lm = "7d2f9a41c03be856";
+        let mut intake = ShotIntake::default();
+        let read = Instant::now();
+        let shot = [
+            FrpMessage::new(lm, ShotTrigger::new(key.clone())),
+            FrpMessage::new(
+                lm,
+                ShotLaunch {
+                    key: key.clone(),
+                    launch,
+                },
+            ),
+            FrpMessage::new(lm, ShotFinished { key }),
+        ]
+        .iter()
+        .find_map(|msg| intake.ingest_at(msg, read))
+        .expect("a shot");
 
-        let mut app = app_of(&format!("ws://{addr}/frp"));
+        // It arrived at 1 s; the next tick, at 2.5 s, takes it in.
+        let (mut app, tx) = app_and_intake();
         app.minimized = true;
-        let start = Instant::now();
-        let mut now = 0.0;
-        while app.flights.flights.is_empty() && start.elapsed().as_secs() < 5 {
-            now += 0.2;
-            let _ = app.advance(now);
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let start = Instant::now();
-        while !server.is_finished() && start.elapsed().as_secs() < 5 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(server.is_finished(), "the device is still running");
-        let (_device, conn) = server
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        tx.send(IntakeEvent::Shot(ArrivedShot { shot, arrival: 1.0 }))
+            .expect("send");
+        let _ = app.advance(2.5);
         assert!(app.renderer.is_none());
         assert_eq!(app.flights.flights.len(), 1);
         let flight = &app.flights.flights[0];
-        // The ticks run ahead of the app's clock, so the tick that took the
-        // shot in is later than its arrival.
-        assert!(flight.launch_time > 0.0);
-        assert!(
-            flight.launch_time < now,
+        assert_eq!(
+            flight.launch_time, 1.0,
             "launched at its arrival, not the tick"
         );
 
@@ -605,10 +588,5 @@ mod tests {
         let _ = app.advance(landed);
         assert!(app.flights.flights[0].landed);
         assert_eq!(app.frame_count, 0, "nothing was drawn");
-
-        // The app goes before the connection, so its intake ends without
-        // dialling again.
-        drop(app);
-        drop(conn);
     }
 }

@@ -455,18 +455,18 @@ pub struct ShotIntake {
 }
 
 impl ShotIntake {
-    /// Process one FRP message. Returns a shot once its `shot.finished`
-    /// arrives and it converts to a simulation input.
+    /// Process one FRP message, read at `now`. Returns a shot once its
+    /// `shot.finished` arrives and it converts to a simulation input.
     ///
     /// A message for a shot that already finished is not shown again: one
     /// from the shot's own launch monitor is logged as a warning, and an
     /// addendum from another actor (e.g. a slow flight model's
     /// `shot.flight`) is noted in the log. The shot has already been shown.
-    pub fn ingest(&mut self, msg: &FrpMessage) -> Option<ReceivedShot> {
-        if self.bus.apply(msg) {
+    pub fn ingest_at(&mut self, msg: &FrpMessage, now: Instant) -> Option<ReceivedShot> {
+        if self.bus.apply_at(msg, now) {
             self.refresh_lm_states();
         }
-        let completed = match self.shots.feed(msg)? {
+        let completed = match self.shots.feed_at(msg, now)? {
             ShotEvent::Finished(shot) => shot,
             ShotEvent::Updated(shot) => {
                 eprintln!(
@@ -500,12 +500,12 @@ impl ShotIntake {
         }
     }
 
-    /// Forget the actors that missed three heartbeats, with their state and
-    /// open shots.
-    pub fn expire(&mut self) {
-        let gone = self.bus.expire();
+    /// Forget the actors that had missed three heartbeats at `now`, with
+    /// their state and open shots.
+    pub fn expire_at(&mut self, now: Instant) {
+        let gone = self.bus.expire_at(now);
         for actor in &gone {
-            self.shots.forget_actor(actor);
+            self.shots.forget_actor_at(actor, now);
         }
         if !gone.is_empty() {
             self.refresh_lm_states();
@@ -551,7 +551,7 @@ pub struct ArrivedShot {
 
 /// What the intake thread tells the app.
 #[derive(Debug)]
-enum IntakeEvent {
+pub(crate) enum IntakeEvent {
     /// A dial has started: not connected.
     Connecting,
     /// The connection is up and cyberflight's actor announced.
@@ -622,7 +622,8 @@ impl FrpState {
         Ok(Self::from_events(events))
     }
 
-    fn from_events(events: mpsc::Receiver<IntakeEvent>) -> Self {
+    /// The app's end of an intake that reports on `events`.
+    pub(crate) fn from_events(events: mpsc::Receiver<IntakeEvent>) -> Self {
         Self {
             events,
             connected: false,
@@ -680,8 +681,8 @@ fn spawn_intake(
     Ok((rx, handle))
 }
 
-/// The intake thread: dial, read until the connection is lost, repeat.
-/// Returns once the app has dropped its end of `tx`.
+/// The intake thread: dial, read until the connection is lost, repeat, as
+/// [`Dialer`] decides. Returns once the app has dropped its end of `tx`.
 fn run_intake(
     url: &str,
     me: &FrpMessage,
@@ -700,149 +701,289 @@ fn run_intake(
         sent
     };
     let mut endpoint = Some(endpoint);
-    let mut last_dial: Option<Instant> = None;
+    let mut dialer = Dialer::new(timing);
+    // The dial that has not finished, if any.
+    let mut pending: Option<mpsc::Receiver<DialResult>> = None;
     loop {
-        if let Some(dialed) = last_dial {
-            thread::sleep(timing.reconnect.saturating_sub(dialed.elapsed()));
-        }
-        // Nothing to wake the app for: it is not connected either way.
-        if tx.send(IntakeEvent::Connecting).is_err() {
-            return;
-        }
-        last_dial = Some(Instant::now());
-        let ep = match endpoint.take() {
-            Some(ep) => ep,
-            None => match frp_endpoint(url) {
-                Ok(ep) => ep,
-                Err(e) => {
-                    eprintln!("WARN: cannot reopen FRP endpoint: {e}");
-                    continue;
+        let wait = match dialer.step(Instant::now()) {
+            DialStep::Wait(wait) => wait,
+            DialStep::Warn(after) => {
+                eprintln!(
+                    "WARN: still connecting to FRP at {url} after {:.0}s: \
+                     the peer has not answered",
+                    after.as_secs_f64()
+                );
+                continue;
+            }
+            DialStep::Dial => {
+                // Nothing to wake the app for: it is not connected either way.
+                if tx.send(IntakeEvent::Connecting).is_err() {
+                    return;
                 }
-            },
+                let Some(ep) = endpoint.take().or_else(|| reopen(url)) else {
+                    dialer.finished();
+                    continue;
+                };
+                eprintln!("Connecting to FRP at {url}...");
+                match spawn_dial(ep) {
+                    Ok(dial) => pending = Some(dial),
+                    Err((ep, e)) => {
+                        eprintln!("WARN: cannot start the FRP connect thread: {e}");
+                        endpoint = Some(ep);
+                        dialer.finished();
+                    }
+                }
+                continue;
+            }
         };
-        eprintln!("Connecting to FRP at {url}...");
-        let (ep, conn) = dial(url, ep, timing.dial_warn);
-        endpoint = ep;
+        let Some(dial) = &pending else {
+            thread::sleep(wait);
+            continue;
+        };
+        let conn = match dial.recv_timeout(wait) {
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Ok((ep, Ok(conn))) => {
+                endpoint = Some(ep);
+                Some(conn)
+            }
+            Ok((ep, Err(e))) => {
+                eprintln!("FRP not available at {url} (expected {FRP_VERSION}): {e}");
+                endpoint = Some(ep);
+                None
+            }
+            // The dialing thread died with the endpoint; open a new one.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                endpoint = reopen(url);
+                None
+            }
+        };
+        pending = None;
+        dialer.finished();
         let Some(mut conn) = conn else {
             continue;
         };
-        if let Err(e) = conn.greet(std::slice::from_ref(me), &[]) {
-            eprintln!("FRP disconnected: {e}");
-            continue;
-        }
-        eprintln!("Connected (FRP {FRP_VERSION})");
-        if !report(IntakeEvent::Connected) {
-            return;
-        }
-
-        let mut intake = ShotIntake::default();
-        // The ready states the app has; it clears them when a dial starts.
-        let mut reported = HashMap::new();
-        let mut beat = Instant::now();
-        let mut expired = Instant::now();
-        let reason = loop {
-            // Wait for a message no longer than the next heartbeat or the
-            // next expiry is due.
-            let left = DEFAULT_HEARTBEAT
-                .saturating_sub(beat.elapsed())
-                .min(EXPIRE_INTERVAL.saturating_sub(expired.elapsed()));
-            match conn.recv_timeout(left) {
-                Ok(Some(msg)) if matches!(msg.body, FrpBody::BusSync(_)) => {
-                    if let Err(e) = conn.send(me) {
-                        break e;
-                    }
-                }
-                Ok(Some(msg)) => {
-                    let arrival = start.elapsed().as_secs_f64();
-                    if let Some(shot) = intake.ingest(&msg) {
-                        // The ready states first, so a shot's own state
-                        // change is on the app before the shot.
-                        if intake.lm_states != reported {
-                            reported.clone_from(&intake.lm_states);
-                            if !report(IntakeEvent::LmStates(reported.clone())) {
-                                return;
-                            }
-                        }
-                        eprintln!(
-                            "Shot #{} from {} arrived at {arrival:.3}s",
-                            shot.shot_number, shot.device
-                        );
-                        if !report(IntakeEvent::Shot(ArrivedShot { shot, arrival })) {
-                            return;
-                        }
-                    }
-                }
-                // Nothing arrived in time.
-                Ok(None) => {}
-                // Not an FRP message: ignore it and keep reading.
-                Err(flightrelay::FrpError::Json(_)) => {}
-                Err(e) => break e,
-            }
-            if beat.elapsed() >= DEFAULT_HEARTBEAT {
-                beat = Instant::now();
-                if let Err(e) = conn.send(me) {
-                    break e;
-                }
-            }
-            if expired.elapsed() >= EXPIRE_INTERVAL {
-                expired = Instant::now();
-                intake.expire();
-            }
-            if intake.lm_states != reported {
-                reported.clone_from(&intake.lm_states);
-                if !report(IntakeEvent::LmStates(reported.clone())) {
-                    return;
-                }
-            }
-        };
-        // Device states and partly received shots go with the connection.
-        eprintln!("FRP disconnected: {reason}");
-        if !report(IntakeEvent::Disconnected) {
+        if !read_connection(&mut conn, me, start, &report) {
             return;
         }
     }
 }
 
-/// Dial `url` and wait for the WebSocket upgrade, reporting every `warn`
-/// that it has not finished. A dial that does not finish is left running,
-/// so a redial would not add a second waiting thread.
-///
-/// Returns the endpoint for the next dial (`None` if it was lost and could
-/// not be reopened) and the connection, if one was made.
-fn dial(
-    url: &str,
-    endpoint: FrpEndpoint,
-    warn: Duration,
-) -> (Option<FrpEndpoint>, Option<FrpConnection>) {
-    let pending = match spawn_dial(endpoint) {
-        Ok(pending) => pending,
-        Err((endpoint, e)) => {
-            eprintln!("WARN: cannot start the FRP connect thread: {e}");
-            return (Some(endpoint), None);
+/// A new endpoint for `url`, reporting why there is none.
+fn reopen(url: &str) -> Option<FrpEndpoint> {
+    frp_endpoint(url)
+        .inspect_err(|e| eprintln!("WARN: cannot reopen FRP endpoint: {e}"))
+        .ok()
+}
+
+/// Greet the bus on `conn` and read it until the connection is lost,
+/// telling the app through `report`. Returns false once the app is gone.
+fn read_connection(
+    conn: &mut FrpConnection,
+    me: &FrpMessage,
+    start: Instant,
+    report: &dyn Fn(IntakeEvent) -> bool,
+) -> bool {
+    if let Err(e) = conn.greet(std::slice::from_ref(me), &[]) {
+        eprintln!("FRP disconnected: {e}");
+        return true;
+    }
+    eprintln!("Connected (FRP {FRP_VERSION})");
+    if !report(IntakeEvent::Connected) {
+        return false;
+    }
+
+    let mut reader = IntakeReader::new(start, Instant::now());
+    let reason = 'read: loop {
+        let read = conn.recv_timeout(reader.wait(Instant::now()));
+        let now = Instant::now();
+        let msg = match read {
+            // `None`: nothing arrived in time.
+            Ok(msg) => msg,
+            // Not an FRP message: ignore it and keep reading.
+            Err(flightrelay::FrpError::Json(_)) => None,
+            Err(e) => break e,
+        };
+        for action in reader.read(msg.as_ref(), now) {
+            match action {
+                ReadAction::Announce => {
+                    if let Err(e) = conn.send(me) {
+                        break 'read e;
+                    }
+                }
+                ReadAction::Report(event) => {
+                    if !report(event) {
+                        return false;
+                    }
+                }
+            }
         }
     };
-    let started = Instant::now();
-    loop {
-        match pending.recv_timeout(warn) {
-            Ok((endpoint, Ok(conn))) => return (Some(endpoint), Some(conn)),
-            Ok((endpoint, Err(e))) => {
-                eprintln!("FRP not available at {url} (expected {FRP_VERSION}): {e}");
-                return (Some(endpoint), None);
+    // Device states and partly received shots go with the connection.
+    eprintln!("FRP disconnected: {reason}");
+    report(IntakeEvent::Disconnected)
+}
+
+/// What the intake does next while it is not connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialStep {
+    /// Start a dial.
+    Dial,
+    /// Report that the dial started this long ago has not finished.
+    Warn(Duration),
+    /// Nothing is due for this long: wait for the outstanding dial, or
+    /// sleep if there is none.
+    Wait(Duration),
+}
+
+/// When the intake dials, on the time it is given: at once the first time,
+/// then no sooner than [`IntakeTiming::reconnect`] after the start of the
+/// previous dial. A dial that has not finished is never repeated, so a
+/// device that accepts but does not answer gets one waiting dial, which is
+/// reported every [`IntakeTiming::dial_warn`].
+#[derive(Debug)]
+struct Dialer {
+    timing: IntakeTiming,
+    /// When the last dial started.
+    last: Option<Instant>,
+    /// The dial that has not finished: when it started and when it was
+    /// last reported.
+    out: Option<(Instant, Instant)>,
+}
+
+impl Dialer {
+    fn new(timing: IntakeTiming) -> Self {
+        Self {
+            timing,
+            last: None,
+            out: None,
+        }
+    }
+
+    /// What to do at `now`. After [`DialStep::Dial`], call
+    /// [`finished`](Self::finished) once that dial has ended, whether or
+    /// not it connected (and after the connection it made is lost).
+    fn step(&mut self, now: Instant) -> DialStep {
+        if let Some((started, warned)) = &mut self.out {
+            let quiet = now.saturating_duration_since(*warned);
+            if quiet < self.timing.dial_warn {
+                return DialStep::Wait(self.timing.dial_warn - quiet);
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!(
-                    "WARN: still connecting to FRP at {url} after {:.0}s: \
-                     the peer has not answered",
-                    started.elapsed().as_secs_f64()
-                );
+            *warned = now;
+            return DialStep::Warn(now.saturating_duration_since(*started));
+        }
+        if let Some(last) = self.last {
+            let since = now.saturating_duration_since(last);
+            if since < self.timing.reconnect {
+                return DialStep::Wait(self.timing.reconnect - since);
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The dialing thread died with the endpoint; open a new one.
-                let endpoint = frp_endpoint(url)
-                    .inspect_err(|e| eprintln!("WARN: cannot reopen FRP endpoint: {e}"))
-                    .ok();
-                return (endpoint, None);
+        }
+        self.last = Some(now);
+        self.out = Some((now, now));
+        DialStep::Dial
+    }
+
+    /// The dial last started has ended.
+    fn finished(&mut self) {
+        self.out = None;
+    }
+}
+
+/// What the intake does after a read, in the order given.
+// A few of these live for one pass of the read loop; the event moves on to
+// the app's channel unboxed, as it is sent.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+enum ReadAction {
+    /// Send cyberflight's `bus.actor`.
+    Announce,
+    /// Tell the app.
+    Report(IntakeEvent),
+}
+
+/// The read loop of one connection, on the time it is given: aggregates
+/// shots, stamps each with its arrival, republishes cyberflight's
+/// `bus.actor` every [`DEFAULT_HEARTBEAT`] and on `bus.sync`, forgets
+/// silent actors every [`EXPIRE_INTERVAL`] and reports ready-state changes.
+#[derive(Debug)]
+struct IntakeReader {
+    intake: ShotIntake,
+    /// The ready states the app has; it clears them when a dial starts.
+    reported: HashMap<String, bool>,
+    /// The app's clock: arrival times are seconds since this.
+    start: Instant,
+    /// When `bus.actor` was last republished on the heartbeat.
+    beat: Instant,
+    /// When silent actors were last expired.
+    expired: Instant,
+}
+
+impl IntakeReader {
+    /// A reader for a connection that was greeted at `now`, stamping
+    /// arrivals in seconds since `start`.
+    fn new(start: Instant, now: Instant) -> Self {
+        Self {
+            intake: ShotIntake::default(),
+            reported: HashMap::new(),
+            start,
+            beat: now,
+            expired: now,
+        }
+    }
+
+    /// How long to wait for a message at `now`: no longer than until the
+    /// next heartbeat or the next expiry is due.
+    fn wait(&self, now: Instant) -> Duration {
+        let beat = (self.beat + DEFAULT_HEARTBEAT).saturating_duration_since(now);
+        let expiry = (self.expired + EXPIRE_INTERVAL).saturating_duration_since(now);
+        beat.min(expiry)
+    }
+
+    /// One pass of the read loop at `now`, after `msg` was read (`None`:
+    /// nothing arrived in time, or what arrived was not an FRP message).
+    /// Returns what to do, in order.
+    fn read(&mut self, msg: Option<&FrpMessage>, now: Instant) -> Vec<ReadAction> {
+        let mut actions = Vec::new();
+        match msg {
+            Some(msg) if matches!(msg.body, FrpBody::BusSync(_)) => {
+                actions.push(ReadAction::Announce);
             }
+            Some(msg) => {
+                let arrival = now.saturating_duration_since(self.start).as_secs_f64();
+                if let Some(shot) = self.intake.ingest_at(msg, now) {
+                    // The ready states first, so a shot's own state change
+                    // is on the app before the shot.
+                    self.report_lm_states(&mut actions);
+                    eprintln!(
+                        "Shot #{} from {} arrived at {arrival:.3}s",
+                        shot.shot_number, shot.device
+                    );
+                    actions.push(ReadAction::Report(IntakeEvent::Shot(ArrivedShot {
+                        shot,
+                        arrival,
+                    })));
+                }
+            }
+            None => {}
+        }
+        if now.saturating_duration_since(self.beat) >= DEFAULT_HEARTBEAT {
+            self.beat = now;
+            actions.push(ReadAction::Announce);
+        }
+        if now.saturating_duration_since(self.expired) >= EXPIRE_INTERVAL {
+            self.expired = now;
+            self.intake.expire_at(now);
+        }
+        self.report_lm_states(&mut actions);
+        actions
+    }
+
+    /// Report the ready states if they differ from what the app has.
+    fn report_lm_states(&mut self, actions: &mut Vec<ReadAction>) {
+        if self.intake.lm_states != self.reported {
+            self.reported.clone_from(&self.intake.lm_states);
+            actions.push(ReadAction::Report(IntakeEvent::LmStates(
+                self.reported.clone(),
+            )));
         }
     }
 }
@@ -1052,8 +1193,9 @@ mod tests {
 
     /// Feed `msgs` to `intake`, launching every completed shot at `now`.
     fn deliver(intake: &mut ShotIntake, fm: &mut FlightManager, msgs: &[FrpMessage], now: f64) {
+        let read = Instant::now();
         for msg in msgs {
-            if let Some(shot) = intake.ingest(msg) {
+            if let Some(shot) = intake.ingest_at(msg, read) {
                 fm.launch(&shot, now, &Environment::SEA_LEVEL, Range::new().green);
             }
         }
@@ -1093,11 +1235,10 @@ mod tests {
         }
     }
 
-    // Every port an intake in these tests dials stays bound by the test (a
-    // device endpoint or a held listener) until that intake can dial no
-    // more. A released port can be bound again by anything on the machine,
-    // such as another test's device, whose connection a stray dial would
-    // then take.
+    // Every port an intake in these tests dials stays bound by the test's
+    // device endpoint until that intake can dial no more. A released port
+    // can be bound again by anything on the machine, such as another test's
+    // device, whose connection a stray dial would then take.
 
     /// A device listening on a free local port, and the URL to dial it.
     fn device() -> (FrpEndpoint, String) {
@@ -1105,21 +1246,6 @@ mod tests {
             .expect("device endpoint");
         let addr = device.local_addr().expect("addr").expect("bound");
         (device, format!("ws://{addr}/frp"))
-    }
-
-    /// A local port held by a listener that answers no dial, and the URL to
-    /// dial it. [`turn_away`] fails the dials waiting on it.
-    fn held_port() -> (std::net::TcpListener, String) {
-        let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        holder.set_nonblocking(true).expect("nonblocking");
-        let url = format!("ws://{}/frp", holder.local_addr().expect("addr"));
-        (holder, url)
-    }
-
-    /// Close every connection waiting on `holder`, which fails those dials.
-    /// Returns how many there were.
-    fn turn_away(holder: &std::net::TcpListener) -> usize {
-        std::iter::from_fn(|| holder.accept().ok()).count()
     }
 
     /// Cyberflight's actor id in these tests.
@@ -1138,61 +1264,27 @@ mod tests {
         );
     }
 
-    /// The longest any wait in these tests lasts.
+    /// The longest any wait in these tests lasts: a guard against a hang,
+    /// never a quiet window.
     const PATIENCE: Duration = Duration::from_secs(5);
 
-    /// Quick redials and no slow-dial reports, so tests run in milliseconds.
+    /// Quick redials and no slow-dial reports, so the socket test runs in
+    /// milliseconds.
     const QUICK: IntakeTiming = IntakeTiming {
         reconnect: Duration::from_millis(50),
         dial_warn: Duration::from_secs(60),
     };
 
-    /// An intake of `url` on a clock started now, with [`QUICK`] timing and
-    /// a count of its wakes, and its thread.
-    fn intake(url: &str) -> (FrpState, Instant, Arc<AtomicUsize>, thread::JoinHandle<()>) {
-        let start = Instant::now();
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&wakes);
-        let wake = move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        };
-        let (events, thread) = spawn_intake(url, ME, start, wake, QUICK).expect("intake");
-        (FrpState::from_events(events), start, wakes, thread)
-    }
-
-    /// Wait until `done` or [`PATIENCE`] passes.
-    fn wait_until(mut done: impl FnMut() -> bool) {
-        let start = Instant::now();
-        while !done() && start.elapsed() < PATIENCE {
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// Poll `state` until `done` or [`PATIENCE`] passes; returns the shots.
-    fn poll_until(
-        state: &mut FrpState,
-        done: impl Fn(&FrpState, &[ArrivedShot]) -> bool,
-    ) -> Vec<ArrivedShot> {
-        let start = Instant::now();
-        let mut shots = Vec::new();
-        while !done(state, &shots) && start.elapsed() < PATIENCE {
-            shots.extend(state.poll());
-            thread::sleep(Duration::from_millis(5));
-        }
-        shots
-    }
-
     /// Wait at most [`PATIENCE`] for `thread` to end and return its result.
     /// Fails the test, naming `what`, if it is still running, and with the
     /// thread's own message if it panicked.
-    fn join<T>(thread: thread::JoinHandle<T>, what: &str) -> T {
-        wait_until(|| thread.is_finished());
-        assert!(
-            thread.is_finished(),
-            "{what} is still running after {PATIENCE:?}"
-        );
-        thread
-            .join()
+    fn join<T: Send + 'static>(thread: thread::JoinHandle<T>, what: &str) -> T {
+        let (done_tx, done) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(thread.join());
+        });
+        done.recv_timeout(PATIENCE)
+            .unwrap_or_else(|_| panic!("{what} is still running after {PATIENCE:?}"))
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
@@ -1218,8 +1310,7 @@ mod tests {
         }
     }
 
-    /// The intake events as text, without dial starts: how many dials start
-    /// depends on timing.
+    /// The intake events as text, without dial starts.
     fn labels(events: &[IntakeEvent]) -> Vec<String> {
         events
             .iter()
@@ -1242,144 +1333,189 @@ mod tests {
         )));
     }
 
-    // The dial this test starts stays blocked in the WebSocket upgrade until
-    // the test closes the connection: the upgrade has no timeout.
+    /// `ms` milliseconds after `t0`.
+    fn ms(t0: Instant, ms: u64) -> Instant {
+        t0 + Duration::from_millis(ms)
+    }
+
+    /// Step `dialer` from `from` until `until`, sleeping through each wait
+    /// as the intake thread does. Returns every other step, with its time
+    /// in milliseconds since `from`.
+    fn run_dialer(dialer: &mut Dialer, from: Instant, until: Instant) -> Vec<(u128, DialStep)> {
+        let mut now = from;
+        let mut steps = Vec::new();
+        while now < until {
+            match dialer.step(now) {
+                DialStep::Wait(wait) => now += wait,
+                step => steps.push(((now - from).as_millis(), step)),
+            }
+        }
+        steps
+    }
+
     #[test]
     fn a_silent_device_is_dialled_once() {
-        // Accepts TCP but never answers the WebSocket upgrade.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let url = format!("ws://{}/frp", listener.local_addr().expect("addr"));
-        let (mut state, _, _, intake) = intake(&url);
-        assert!(state.poll().is_empty());
-
-        // Many reconnect intervals pass; the outstanding dial is not repeated.
-        let mut accepted = Vec::new();
-        let start = Instant::now();
-        while start.elapsed() < QUICK.reconnect * 8 {
-            if let Ok((socket, _)) = listener.accept() {
-                accepted.push(socket);
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(accepted.len(), 1);
-        assert!(state.poll().is_empty());
-        assert!(!state.connected);
-
-        // The app goes, then the dial fails and the intake ends.
-        drop(state);
-        drop(accepted);
-        join(intake, "the intake");
+        let t0 = Instant::now();
+        let mut dialer = Dialer::new(IntakeTiming::DEFAULT);
+        // The first dial goes out at once and never finishes: twenty
+        // reconnect intervals pass, and it is only reported.
+        let steps = run_dialer(&mut dialer, t0, ms(t0, 100_000));
+        let secs = Duration::from_secs;
+        assert_eq!(
+            steps,
+            [
+                (0, DialStep::Dial),
+                (30_000, DialStep::Warn(secs(30))),
+                (60_000, DialStep::Warn(secs(60))),
+                (90_000, DialStep::Warn(secs(90))),
+            ]
+        );
+        // Once it ends, the next dial goes out at once: its interval is over.
+        dialer.finished();
+        assert_eq!(dialer.step(ms(t0, 100_000)), DialStep::Dial);
     }
 
     #[test]
-    fn a_refused_device_is_redialled_until_it_listens() {
-        let (holder, url) = held_port();
-        let (mut state, _, _, intake) = intake(&url);
-        // Several dials are refused meanwhile.
-        let mut dials = 0;
-        wait_until(|| {
-            dials += turn_away(&holder);
-            dials >= 3
-        });
-        assert!(dials >= 3, "{dials} dials");
-        assert!(state.poll().is_empty());
-        assert!(!state.connected);
-
-        // The device takes the port over from the holder.
-        let addr = holder.local_addr().expect("addr");
-        drop(holder);
-        let mut device =
-            FrpEndpoint::open(EndpointConfig::new(Transport::listen(addr.to_string())))
-                .expect("device endpoint");
-        let server = thread::spawn(move || {
-            let conn = device.establish().expect("handshake");
-            (device, conn)
-        });
-        let _ = poll_until(&mut state, |s, _| s.connected);
-        assert!(state.connected);
-        let (_device, conn) = join(server, "the device's handshake");
-
-        drop(state);
-        drop(conn);
-        join(intake, "the intake");
+    fn a_refused_device_is_redialled_every_reconnect_interval() {
+        let t0 = Instant::now();
+        let mut dialer = Dialer::new(IntakeTiming::DEFAULT);
+        assert_eq!(dialer.step(t0), DialStep::Dial);
+        // Refused after 200 ms: the interval runs from the start of the dial.
+        dialer.finished();
+        assert_eq!(
+            dialer.step(ms(t0, 200)),
+            DialStep::Wait(Duration::from_millis(4_800))
+        );
+        assert_eq!(
+            dialer.step(ms(t0, 4_999)),
+            DialStep::Wait(Duration::from_millis(1))
+        );
+        assert_eq!(dialer.step(ms(t0, 5_000)), DialStep::Dial);
+        dialer.finished();
+        let steps = run_dialer(&mut dialer, ms(t0, 5_000), ms(t0, 10_001));
+        assert_eq!(steps, [(5_000, DialStep::Dial)]);
     }
 
     #[test]
-    fn connects_in_the_background_and_receives_shots() {
-        let (mut device, url) = device();
-        let server = thread::spawn(move || {
-            let mut conn = device.establish().expect("handshake");
-            for msg in shot_messages(7, 140.0, 14.0) {
-                conn.send(&msg).expect("send");
-            }
-            (device, conn)
-        });
+    fn a_dial_that_ends_late_is_followed_at_once() {
+        let t0 = Instant::now();
+        let mut dialer = Dialer::new(IntakeTiming::DEFAULT);
+        assert_eq!(dialer.step(t0), DialStep::Dial);
+        // It ends (a connection lost, or a slow refusal) after the interval.
+        assert_eq!(
+            dialer.step(ms(t0, 7_000)),
+            DialStep::Wait(Duration::from_secs(23))
+        );
+        dialer.finished();
+        assert_eq!(dialer.step(ms(t0, 7_000)), DialStep::Dial);
+        // The new dial is reported from its own start.
+        let steps = run_dialer(&mut dialer, ms(t0, 7_000), ms(t0, 37_001));
+        assert_eq!(steps, [(30_000, DialStep::Warn(Duration::from_secs(30)))]);
+    }
 
-        let (mut state, _, wakes, intake) = intake(&url);
-        let shots = poll_until(&mut state, |s, shots| s.connected && !shots.is_empty());
-        assert!(state.connected);
-        let (_device, conn) = join(server, "the device");
-        assert_eq!(shots.len(), 1);
-        assert_eq!(shots[0].shot.shot_number, 7);
-        assert!(shots[0].arrival > 0.0);
-        // The intake sends each event before it wakes the app.
-        wait_until(|| wakes.load(Ordering::SeqCst) >= 2);
-        assert_eq!(wakes.load(Ordering::SeqCst), 2, "connected, then the shot");
+    /// The events in `actions`, with each `bus.actor` sent as `"announce"`.
+    fn read_labels(actions: Vec<ReadAction>) -> Vec<String> {
+        actions
+            .into_iter()
+            .map(|action| match action {
+                ReadAction::Announce => "announce".to_owned(),
+                ReadAction::Report(event) => labels(&[event]).concat(),
+            })
+            .collect()
+    }
 
-        drop(state);
-        drop(conn);
-        join(intake, "the intake");
+    /// Read `msgs` at `now`; returns the shots reported.
+    fn read_shots(
+        reader: &mut IntakeReader,
+        msgs: &[FrpMessage],
+        now: Instant,
+    ) -> Vec<ArrivedShot> {
+        msgs.iter()
+            .flat_map(|msg| reader.read(Some(msg), now))
+            .filter_map(|action| match action {
+                ReadAction::Report(IntakeEvent::Shot(shot)) => Some(shot),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
     fn shots_keep_their_arrival_times() {
-        let (mut device, url) = device();
-        let gap = Duration::from_millis(300);
-        let server = thread::spawn(move || {
-            let mut conn = device.establish().expect("handshake");
-            for (i, n) in [1, 2].into_iter().enumerate() {
-                if i > 0 {
-                    thread::sleep(gap);
-                }
-                for msg in shot_messages(n, 140.0, 14.0) {
-                    conn.send(&msg).expect("send");
-                }
+        let start = Instant::now();
+        let connected = start + Duration::from_secs(1);
+        let mut reader = IntakeReader::new(start, connected);
+        let (tx, rx) = mpsc::channel();
+        let mut state = FrpState::from_events(rx);
+        for (n, read) in [(1, 1.1), (2, 1.4)] {
+            let at = start + Duration::from_secs_f64(read);
+            for shot in read_shots(&mut reader, &shot_messages(n, 140.0, 14.0), at) {
+                tx.send(IntakeEvent::Shot(shot)).expect("send");
             }
-            (device, conn)
-        });
+        }
 
-        // Nothing is polled while the shots arrive: the app is not drawing.
-        let (mut state, start, wakes, intake) = intake(&url);
-        wait_until(|| wakes.load(Ordering::SeqCst) >= 3);
-        let (_device, conn) = join(server, "the device");
-        thread::sleep(Duration::from_millis(200));
-        let polled = start.elapsed().as_secs_f64();
+        // The app polls later: the shots keep the times they were read.
         let shots = state.poll();
-
-        assert!(state.connected);
-        assert_eq!(shots.len(), 2);
-        assert_eq!(shots[0].shot.shot_number, 1);
-        assert_eq!(shots[1].shot.shot_number, 2);
-        // Loopback Nagle + delayed ACK can hold the first shot back ~40 ms.
-        let apart = shots[1].arrival - shots[0].arrival;
-        assert!(
-            apart >= gap.as_secs_f64() - 0.1,
-            "arrived {apart:.3}s apart"
-        );
-        assert!(
-            polled - shots[1].arrival >= 0.19,
-            "arrival {:.3}s is not the poll time {polled:.3}s",
-            shots[1].arrival
-        );
-
-        drop(state);
-        drop(conn);
-        join(intake, "the intake");
+        let got: Vec<(u32, f64)> = shots
+            .iter()
+            .map(|s| (s.shot.shot_number, s.arrival))
+            .collect();
+        assert_eq!(got, [(1, 1.1), (2, 1.4)]);
     }
 
     #[test]
-    fn the_intake_reconnects_after_the_peer_closes() {
+    fn the_intake_answers_bus_sync_with_its_actor() {
+        let start = Instant::now();
+        let mut reader = IntakeReader::new(start, start);
+        let sync = FrpMessage::new(LM, flightrelay::BusSync::default());
+        assert_eq!(read_labels(reader.read(Some(&sync), start)), ["announce"]);
+    }
+
+    #[test]
+    fn the_intake_republishes_its_actor_every_heartbeat() {
+        let start = Instant::now();
+        let mut reader = IntakeReader::new(start, start);
+        assert_eq!(reader.wait(start), EXPIRE_INTERVAL.min(DEFAULT_HEARTBEAT));
+        let early = start + DEFAULT_HEARTBEAT - Duration::from_millis(1);
+        assert!(reader.read(None, early).is_empty());
+        assert_eq!(reader.wait(early), Duration::from_millis(1));
+        let due = start + DEFAULT_HEARTBEAT;
+        assert_eq!(read_labels(reader.read(None, due)), ["announce"]);
+        assert!(reader.read(None, due).is_empty());
+        assert_eq!(
+            read_labels(reader.read(None, due + DEFAULT_HEARTBEAT)),
+            ["announce"]
+        );
+    }
+
+    #[test]
+    fn a_silent_launch_monitor_is_forgotten() {
+        let start = Instant::now();
+        let mut reader = IntakeReader::new(start, start);
+        // Heartbeat 2 s: it is forgotten once 6 s pass without its `bus.actor`.
+        let actor = lm(lm_actor("Eagle One", &[]));
+        assert_eq!(
+            read_labels(reader.read(Some(&actor), start)),
+            [r#"ready {"Eagle One": true}"#]
+        );
+        let at = |s: f64| start + Duration::from_secs_f64(s);
+        assert!(
+            !read_labels(reader.read(None, at(5.5)))
+                .iter()
+                .any(|l| l.starts_with("ready"))
+        );
+        let gone = read_labels(reader.read(None, at(6.5)));
+        assert_eq!(
+            gone.last().map(String::as_str),
+            Some("ready {}"),
+            "{gone:?}"
+        );
+    }
+
+    // The intake thread around `Dialer` and `IntakeReader`, on real sockets:
+    // it connects and greets, reads, redials when the peer closes, and ends
+    // at its next report once the app is gone.
+    #[test]
+    fn the_intake_reads_redials_and_ends() {
         let (mut device, url) = device();
         let server = thread::spawn(move || {
             let mut conn = device.establish().expect("handshake");
@@ -1401,10 +1537,14 @@ mod tests {
             (device, conn)
         });
 
-        let (events, intake) =
-            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let wake = move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        };
+        let (events, intake) = spawn_intake(&url, ME, Instant::now(), wake, QUICK).expect("intake");
         let seen = recv_until(&events, |e| matches!(e, IntakeEvent::Shot(_)));
-        let (_device, conn) = join(server, "the device (it accepts twice)");
+        let (_device, mut conn) = join(server, "the device (it accepts twice)");
         assert_eq!(
             labels(&seen),
             [
@@ -1416,11 +1556,19 @@ mod tests {
                 "shot 4",
             ]
         );
-        drop(events);
-        drop(conn);
-        join(intake, "the intake");
 
-        // The app forgets the ready states with the connection.
+        // The app goes; the intake ends at the next shot.
+        drop(events);
+        for msg in shot_messages(5, 140.0, 14.0) {
+            conn.send(&msg).expect("send");
+        }
+        join(intake, "the intake");
+        // One wake per event the app received; none for a dial start.
+        assert_eq!(wakes.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn the_app_forgets_ready_states_with_the_connection() {
         let (tx, rx) = mpsc::channel();
         let mut state = FrpState::from_events(rx);
         let ready = HashMap::from([("Eagle One".to_owned(), true)]);
@@ -1437,30 +1585,6 @@ mod tests {
     }
 
     #[test]
-    fn the_intake_answers_bus_sync_with_its_actor() {
-        let (mut device, url) = device();
-        let server = thread::spawn(move || {
-            let mut conn = device.establish().expect("handshake");
-            greeted(&mut conn);
-            conn.send(&FrpMessage::new(
-                "7d2f9a41c03be856",
-                flightrelay::BusSync::default(),
-            ))
-            .expect("send");
-            let answer = conn.recv().expect("answer to bus.sync");
-            (device, conn, answer)
-        });
-
-        let (events, intake) =
-            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
-        let (_device, conn, answer) = join(server, "the device");
-        assert_eq!(answer, actor_message(ME));
-        drop(events);
-        drop(conn);
-        join(intake, "the intake");
-    }
-
-    #[test]
     fn a_stopped_intake_is_not_connected() {
         let (tx, rx) = mpsc::channel();
         let mut state = FrpState::from_events(rx);
@@ -1469,47 +1593,6 @@ mod tests {
         assert!(state.poll().is_empty());
         assert!(!state.connected);
         assert!(state.stopped);
-    }
-
-    #[test]
-    fn the_intake_ends_when_the_app_is_gone() {
-        // Disconnected: it ends at its next dial.
-        let (holder, url) = held_port();
-        let (events, intake) =
-            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
-        let mut dials = 0;
-        wait_until(|| {
-            dials += turn_away(&holder);
-            dials >= 2
-        });
-        assert!(dials >= 2, "{dials} dials");
-        drop(events);
-        // A dial already started waits on the holder until it is turned away.
-        wait_until(|| {
-            turn_away(&holder);
-            intake.is_finished()
-        });
-        assert!(intake.is_finished(), "ended while disconnected");
-        drop(holder);
-
-        // Connected: it ends at the next shot.
-        let (mut device, url) = device();
-        let (events, intake) =
-            spawn_intake(&url, ME, Instant::now(), || {}, QUICK).expect("intake");
-        let server = thread::spawn(move || {
-            let conn = device.establish().expect("handshake");
-            (device, conn)
-        });
-        // Once the app has heard of the connection, the intake is reading it
-        // and closes it only after the shot.
-        recv_until(&events, |e| matches!(e, IntakeEvent::Connected));
-        let (_device, mut conn) = join(server, "the device's handshake");
-        drop(events);
-        for msg in shot_messages(1, 140.0, 14.0) {
-            conn.send(&msg).expect("send");
-        }
-        wait_until(|| intake.is_finished());
-        assert!(intake.is_finished(), "ended while connected");
     }
 
     #[test]
@@ -1604,28 +1687,32 @@ mod tests {
 
     #[test]
     fn launch_monitors_are_ready_without_blockers() {
+        let now = Instant::now();
         let mut intake = ShotIntake::default();
         assert!(intake.lm_states.is_empty());
-        intake.ingest(&lm(lm_actor("Eagle One", &["not_armed"])));
+        intake.ingest_at(&lm(lm_actor("Eagle One", &["not_armed"])), now);
         assert_eq!(
             intake.lm_states,
             HashMap::from([("Eagle One".to_owned(), false)])
         );
-        intake.ingest(&lm(lm_actor("Eagle One", &[])));
+        intake.ingest_at(&lm(lm_actor("Eagle One", &[])), now);
         assert_eq!(
             intake.lm_states,
             HashMap::from([("Eagle One".to_owned(), true)])
         );
         // Another actor with no launch monitor role is not listed; a second
         // launch monitor with the same name is told apart by its id.
-        intake.ingest(&FrpMessage::new(
-            "aaaa000000000000",
-            BusActor::new("Shot Log", 2.0).with_role(roles::COLLECTOR),
-        ));
-        intake.ingest(&FrpMessage::new(
-            "bbbb000000000000",
-            lm_actor("Eagle One", &["no_ball"]),
-        ));
+        intake.ingest_at(
+            &FrpMessage::new(
+                "aaaa000000000000",
+                BusActor::new("Shot Log", 2.0).with_role(roles::COLLECTOR),
+            ),
+            now,
+        );
+        intake.ingest_at(
+            &FrpMessage::new("bbbb000000000000", lm_actor("Eagle One", &["no_ball"])),
+            now,
+        );
         assert_eq!(
             intake.lm_states,
             HashMap::from([
@@ -1634,10 +1721,13 @@ mod tests {
             ])
         );
         // An actor that leaves is forgotten.
-        intake.ingest(&FrpMessage::new(
-            "bbbb000000000000",
-            flightrelay::Removal::of(flightrelay::StateKind::BusActor),
-        ));
+        intake.ingest_at(
+            &FrpMessage::new(
+                "bbbb000000000000",
+                flightrelay::Removal::of(flightrelay::StateKind::BusActor),
+            ),
+            now,
+        );
         assert_eq!(
             intake.lm_states,
             HashMap::from([("Eagle One".to_owned(), true)])
@@ -1658,7 +1748,7 @@ mod tests {
                 flight: flightrelay::FlightResult::new(flightrelay::Basis::Modeled),
             },
         );
-        assert!(intake.ingest(&late).is_none());
+        assert!(intake.ingest_at(&late, Instant::now()).is_none());
         assert_eq!(fm.flights.len(), 1);
     }
 
