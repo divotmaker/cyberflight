@@ -13,7 +13,8 @@ use cf_render::stream::{OutputMode, StreamConfig, StreamEncoder, StreamPreset};
 use cf_scene::range::Range;
 use dimple::environment::Environment;
 
-use crate::flight::{FlightManager, FrpState};
+use cyberflight::flight::FlightManager;
+use cyberflight::intake::FrpState;
 
 struct StreamArgs {
     config: StreamConfig,

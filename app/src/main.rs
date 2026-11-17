@@ -1,4 +1,3 @@
-mod flight;
 mod logfile;
 mod stream;
 
@@ -22,7 +21,8 @@ use cf_scene::hud::build_notice;
 use cf_scene::range::Range;
 use dimple::environment::Environment;
 
-use flight::{FlightManager, FrpState};
+use cyberflight::flight::FlightManager;
+use cyberflight::intake::{self, FrpState};
 
 /// How often a minimized window wakes to take in shots and advance the
 /// flights without drawing.
@@ -412,7 +412,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let frp_url = flight::frp_url(&args)?;
+    let frp_url = intake::frp_url(&args)?;
     if args.iter().any(|a| a == "--stream") {
         return stream::run_stream(&frp_url);
     }
@@ -456,7 +456,7 @@ fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flight::{ArrivedShot, IntakeEvent, ShotIntake};
+    use cyberflight::intake::{ArrivedShot, IntakeEvent, ShotIntake};
     use flightrelay::{
         FrpMessage, Launch, ShotFinished, ShotKey, ShotLaunch, ShotTrigger, Velocity,
     };
