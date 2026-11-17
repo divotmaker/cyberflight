@@ -40,8 +40,8 @@ pub const DEFAULT_FRP_URL: &str = "ws://127.0.0.1:5880/frp";
 ///
 /// # Errors
 ///
-/// Returns an error if `--frp` has no value or the value is not a
-/// `ws://` or `wss://` URL.
+/// Returns an error if `--frp` has no value or the value is not a `ws://`
+/// URL. A `wss://` URL is refused: this build does not dial TLS.
 pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
     let Some(i) = args.iter().position(|a| a == "--frp") else {
         return Ok(DEFAULT_FRP_URL.to_owned());
@@ -49,20 +49,23 @@ pub fn frp_url(args: &[String]) -> anyhow::Result<String> {
     let url = args
         .get(i + 1)
         .ok_or_else(|| anyhow::anyhow!("--frp needs a URL, e.g. --frp ws://<host>:5880/frp"))?;
-    if url.starts_with("ws://") || url.starts_with("wss://") {
+    if url.starts_with("ws://") {
         Ok(url.clone())
+    } else if url.starts_with("wss://") {
+        anyhow::bail!("--frp {url}: wss:// is not supported (no TLS); use ws://<host>:5880/frp")
     } else {
-        anyhow::bail!("--frp {url}: expected a ws:// or wss:// URL, e.g. ws://<host>:5880/frp")
+        anyhow::bail!("--frp {url}: expected a ws:// URL, e.g. ws://<host>:5880/frp")
     }
 }
 
 /// Open the FRP endpoint cyberflight dials at `url`.
 ///
 /// Cyberflight is an FRP *collector*: an actor on the bus that receives
-/// shots and sends nothing but its own `bus.actor`. Neither the TCP
-/// connect nor the WebSocket upgrade takes longer than [`RECONNECT_INTERVAL`],
-/// so a peer that accepts and never answers is a failed dial. Opening a dialing endpoint performs no I/O, so this only
-/// fails on a malformed configuration.
+/// shots and sends nothing but its own `bus.actor`. Neither the TCP connect
+/// nor the WebSocket upgrade takes longer than [`RECONNECT_INTERVAL`], so a
+/// peer that accepts and never answers is a failed dial. Opening a dialing
+/// endpoint performs no I/O, so this only fails on a malformed
+/// configuration.
 ///
 /// # Errors
 ///
@@ -603,10 +606,6 @@ mod tests {
             .expect("ws"),
             "ws://pc:5880/frp"
         );
-        assert_eq!(
-            frp_url(&args(&["cyberflight", "--frp", "wss://pc/frp"])).expect("wss"),
-            "wss://pc/frp"
-        );
     }
 
     #[test]
@@ -618,6 +617,8 @@ mod tests {
             let err = frp_url(&args(&["cyberflight", "--frp", bad])).unwrap_err();
             assert!(err.to_string().contains("ws://"), "{bad}: {err}");
         }
+        let tls = frp_url(&args(&["cyberflight", "--frp", "wss://pc/frp"])).unwrap_err();
+        assert!(tls.to_string().contains("no TLS"), "{tls}");
     }
 
     // Every port an intake in these tests dials stays bound by the test's
