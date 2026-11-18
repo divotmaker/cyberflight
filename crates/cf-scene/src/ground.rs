@@ -240,9 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn fairway_runs_shorter_than_green() {
-        // Fairway and green bounce alike; the fairway's higher rolling
-        // resistance makes full shots finish shorter there.
+    fn green_under_landing_sets_the_surface_not_the_carry() {
+        // A green under the landing point changes which surface the ball
+        // meets, never the flight. How far each surface runs a full shot is
+        // dimple's physics and is tested there.
         for input in [
             ShotInput::driver(),
             ShotInput::seven_iron(),
@@ -255,12 +256,6 @@ mod tests {
             assert!(
                 (green.flight.carry_m - fairway.flight.carry_m).abs() < 1e-9,
                 "the floor does not change the carry"
-            );
-            assert!(
-                fairway.total_m < green.total_m,
-                "fairway total {:.1} m, green {:.1} m",
-                fairway.total_m,
-                green.total_m
             );
         }
     }
