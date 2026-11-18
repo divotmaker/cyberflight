@@ -374,6 +374,21 @@ fn a_roll_at_the_cup_drops() {
 }
 
 #[test]
+fn a_holed_ball_rests_in_the_cup() {
+    use dimple::AeroModel;
+    let (h, r) = roll_at_the_cup(2.0);
+    let cut = stop_of(&h, &r).expect("holed");
+    assert_eq!(cut.stop, Stop::Cup);
+    let at = physics_to_scene(cut.rest());
+    let (cx, cz) = h.cup;
+    assert_eq!((at.x, at.z), (cx, cz));
+    // The ball is drawn one radius above dimple's point: its top is level
+    // with the green.
+    let radius = Tour::SEA_LEVEL.radius_m();
+    assert!((at.y - (h.height(cx, cz) - 2.0 * radius)).abs() < 1e-9);
+}
+
+#[test]
 fn a_fast_roll_runs_over_the_cup() {
     let (h, r) = roll_at_the_cup(3.0);
     assert_eq!(holed(&h, &r), None);

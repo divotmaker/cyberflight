@@ -5,7 +5,9 @@
 //! a dimple [`Surface`] preset, and [`RangeTerrain`] serves those to
 //! dimple's ground physics, which samples the terrain under the ball at
 //! every step: a ball that lands short of the green and runs onto it rolls
-//! on as a green, and one that runs off it rolls out on fairway.
+//! on as a green, and one that runs off it rolls out on fairway. A hole's
+//! shaped ground plays through [`HoleTerrain`] the same way, with
+//! [`Ground`] choosing between the two.
 
 use dimple::ground::{GroundPhysics, GroundSample, Surface, Terrain};
 use dimple::trajectory::{ShotInput, ShotResult};
@@ -193,7 +195,7 @@ mod tests {
 
     #[test]
     fn default_range_plays_as_fairway() {
-        let green = Range::new().ground.flat_green();
+        let green = None;
         assert_eq!(green, None);
         let result = shot(&ShotInput::seven_iron(), green);
         assert!(
@@ -335,7 +337,7 @@ mod tests {
             sidespin_rpm: -600.0,
             ..ShotInput::driver()
         };
-        let green = Range::new().ground.flat_green();
+        let green = None;
 
         let sliced = shot(&slice, green);
         assert!(sliced.flight.lateral_m > 10.0, "slice lands right");

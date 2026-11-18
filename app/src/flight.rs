@@ -69,6 +69,59 @@ fn end_timeline_at(timeline: &mut Vec<TrajectoryPoint>, end: f64, pos: dimple::V
     });
 }
 
+/// The flight of a shot as shown: when the ball first touches the ground
+/// (s), the horizontal distance from the tee to that point (m) and the
+/// highest point above the tee (m).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Carry {
+    pub flight_time: f64,
+    pub carry_m: f64,
+    pub apex_m: f64,
+}
+
+impl Carry {
+    /// dimple's flight, or the flight up to where `cut` ends it in the air:
+    /// the ball touches the water there, or falls from a tree to the ground
+    /// under it. A cut after the landing (the cup, a roll into the water, a
+    /// hop into a tree) leaves dimple's flight as it is.
+    fn of(result: &ShotResult, cut: Option<&Cut>) -> Self {
+        let flight = &result.flight;
+        let landing = cut
+            .filter(|c| c.time() < flight.flight_time)
+            .and_then(|c| Some((c.path.first()?, c.path.last()?)));
+        let Some((cut_at, ground)) = landing else {
+            return Self {
+                flight_time: flight.flight_time,
+                carry_m: flight.carry_m,
+                apex_m: flight.apex_m,
+            };
+        };
+        let apex_m = flight
+            .points
+            .iter()
+            .take_while(|p| p.time < cut_at.time)
+            .chain([cut_at])
+            .fold(0.0, |apex, p| p.pos.y.max(apex));
+        Self {
+            flight_time: ground.time,
+            carry_m: ground.pos.x.hypot(ground.pos.z),
+            apex_m,
+        }
+    }
+}
+
+/// Distance to the pin (m) and the lie's label at `pos` (dimple's frame) on
+/// `hole`; `HOLED` for a ball at rest in the cup.
+fn pin_and_lie(hole: &Hole, pos: dimple::Vec3, holed: bool) -> (f64, &'static str) {
+    let at = physics_to_scene(pos);
+    let lie = if holed {
+        "HOLED"
+    } else {
+        hole.lie_at(at.x, at.z).label()
+    };
+    (hole.to_cup(at.x, at.z), lie)
+}
+
 /// An in-progress or recently completed shot animation.
 pub struct AnimatedFlight {
     pub input: ShotInput,
@@ -78,6 +131,9 @@ pub struct AnimatedFlight {
     /// Where the animation ends: dimple's rest position, or the last shown
     /// position when the ball did not settle.
     pub rest_pos: dimple::Vec3,
+    /// The flight as shown: dimple's, or cut short in the air by water or
+    /// a tree. The HUD's CARRY, APEX and TIME rows and the log read it.
+    pub carry: Carry,
     pub launch_time: f64,
     pub club: ClubDelivery,
     pub lm_carry_yards: Option<f64>,
@@ -134,6 +190,7 @@ impl AnimatedFlight {
     ) -> Self {
         let mut timeline = build_timeline(&result);
         let stop = cut.as_ref().map(|c| c.stop);
+        let carry = Carry::of(&result, cut.as_ref());
         if let Some(cut) = cut {
             let time = cut.time();
             timeline.retain(|p| p.time < time);
@@ -159,16 +216,11 @@ impl AnimatedFlight {
         let total_time = timeline.last().map_or(0.0, |p| p.time);
         let rest_pos = timeline.last().map_or(result.ground.rest.pos, |p| p.pos);
 
-        let carry_yards = meters_to_yards(result.flight.carry_m);
-        let total_yards = meters_to_yards(result.total_m);
+        let carry_yards = meters_to_yards(carry.carry_m);
+        let total_yards = meters_to_yards(rest_pos.x.hypot(rest_pos.z));
         let rollout_yards = total_yards - carry_yards;
         let on_hole = hole.as_ref().map_or_else(String::new, |h| {
-            let rest = physics_to_scene(rest_pos);
-            let (to_pin, lie) = if stop == Some(Stop::Cup) {
-                (0.0, "HOLED")
-            } else {
-                (h.to_cup(rest.x, rest.z), h.lie_at(rest.x, rest.z).label())
-            };
+            let (to_pin, lie) = pin_and_lie(h, rest_pos, stop == Some(Stop::Cup));
             let tree = if stop == Some(Stop::Tree) {
                 ", hit a tree"
             } else {
@@ -187,6 +239,7 @@ impl AnimatedFlight {
             timeline,
             total_time,
             rest_pos,
+            carry,
             launch_time,
             club: shot.club.clone(),
             lm_carry_yards: shot.lm_carry_yards,
@@ -221,10 +274,11 @@ impl AnimatedFlight {
         let total_m = pos.x.hypot(pos.z);
         let downrange_m = pos.x;
 
-        let carry_yards = if shot_t < self.result.flight.flight_time {
+        let in_flight = shot_t < self.carry.flight_time;
+        let carry_yards = if in_flight {
             dimple::units::meters_to_yards(total_m)
         } else {
-            meters_to_yards(self.result.flight.carry_m)
+            meters_to_yards(self.carry.carry_m)
         };
 
         ShotTelemetry {
@@ -239,7 +293,7 @@ impl AnimatedFlight {
             attack_angle_deg: self.club.attack_angle_deg,
             face_angle_deg: self.club.face_angle_deg,
             dynamic_loft_deg: self.club.dynamic_loft_deg,
-            apex_m: if shot_t < self.result.flight.flight_time {
+            apex_m: if in_flight {
                 // The highest point so far, so the row never falls after the apex.
                 let passed = self.timeline.partition_point(|p| p.time <= t_clamped);
                 self.timeline[..passed]
@@ -247,32 +301,21 @@ impl AnimatedFlight {
                     .map(|p| p.pos.y)
                     .fold(pos.y.max(0.0), f64::max)
             } else {
-                self.result.flight.apex_m
+                self.carry.apex_m
             },
             carry_yards,
             lm_carry_yards: self.lm_carry_yards,
             total_yards: dimple::units::meters_to_yards(total_m),
             downrange_yards: dimple::units::meters_to_yards(downrange_m),
             lateral_yards: dimple::units::meters_to_yards(pos.z),
-            flight_time_s: self.result.flight.flight_time,
+            flight_time_s: self.carry.flight_time,
             elapsed_s: t_clamped,
             hole: self.hole.as_ref().map(|h| {
                 let stopped = shot_t >= self.total_time;
-                let at = physics_to_scene(pos);
-                let to_pin = if stopped && self.holed() {
-                    0.0
-                } else {
-                    h.to_cup(at.x, at.z)
-                };
+                let (to_pin, lie) = pin_and_lie(h, pos, stopped && self.holed());
                 HoleTelemetry {
                     to_pin_yards: meters_to_yards(to_pin),
-                    lie: stopped.then(|| {
-                        if self.holed() {
-                            "HOLED"
-                        } else {
-                            h.lie_at(at.x, at.z).label()
-                        }
-                    }),
+                    lie: stopped.then_some(lie),
                 }
             }),
         }
@@ -348,7 +391,7 @@ impl AnimatedFlight {
         // During carry, snap to the ball's direction of travel so hooks/slices
         // stay visible. Smoothing only kicks in after landing to avoid jarring
         // camera motion from hops and slow roll direction changes.
-        let in_carry = shot_t < self.result.flight.flight_time;
+        let in_carry = shot_t < self.carry.flight_time;
         let smoothed = if in_carry {
             ideal
         } else if let Some((prev, prev_time)) = &self.prev_chase {
@@ -373,8 +416,9 @@ impl AnimatedFlight {
     }
 
     /// Total distance where the animation ends (yards): dimple's total for
-    /// a ball that came to rest, the cut position's for one that did not.
-    /// The HUD shows the same value once the ball has stopped.
+    /// a ball that came to rest, the position where the shot was cut or
+    /// stopped otherwise. The HUD shows the same value once the ball has
+    /// stopped.
     pub fn shown_total_yards(&self) -> f64 {
         dimple::units::meters_to_yards(self.rest_pos.x.hypot(self.rest_pos.z))
     }
@@ -469,7 +513,7 @@ impl FlightManager {
             if !flight.landed && !flight.is_animating(now) && now > flight.launch_time {
                 flight.landed = true;
                 let total_yards = flight.shown_total_yards();
-                let carry_yards = meters_to_yards(flight.result.flight.carry_m);
+                let carry_yards = meters_to_yards(flight.carry.carry_m);
                 eprintln!(
                     "  Stopped: {:.1} total yds ({:.1} carry + {:.1} rollout)",
                     total_yards,
@@ -714,43 +758,57 @@ mod tests {
         assert!(f.total_time > r.flight.flight_time + 1.0, "ball runs out");
     }
 
-    /// The first straight drive (11°, 2500 rpm) from 160 to 163 mph in
-    /// 0.05 mph steps that drops into the hole's cup.
-    fn holed_drive(ground: &Ground) -> AnimatedFlight {
-        (0..=60)
-            .map(|i| ShotInput {
-                ball_speed_mph: 160.0 + 0.05 * f64::from(i),
-                launch_angle_deg: 11.0,
-                launch_azimuth_deg: 0.0,
-                backspin_rpm: 2500.0,
-                sidespin_rpm: 0.0,
-            })
-            .map(|input| animate(input, ground))
-            .find(AnimatedFlight::holed)
-            .expect("a holed drive")
-    }
-
     #[test]
     fn a_holed_shot_ends_in_the_cup() {
         let range = Range::hole();
         let hole = range.ground.hole().expect("a hole").clone();
-        let f = holed_drive(&range.ground);
-        let last = f.timeline.last().expect("timeline");
-        assert_eq!(last.time, f.total_time);
-        assert!(f.total_time < f.result.ground.rest.time);
-        let at = physics_to_scene(last.pos);
-        assert!(hole.to_cup(at.x, at.z) < 1e-9);
-        assert!(at.y < hole.height(at.x, at.z));
+        let shot = received(ShotInput::driver());
+        let model = Tour::SEA_LEVEL;
+        let result = ground::simulate_shot(&shot.input, &model, &range.ground);
+        let time = result.flight.flight_time + 1.0;
+        assert!(time < result.ground.rest.time, "still rolling");
+        let (x, z) = hole.cup;
+        let in_cup = cf_scene::frame::scene_to_physics(glam::DVec3::new(x, hole.height(x, z), z));
+        let cut = Cut {
+            stop: Stop::Cup,
+            path: vec![TrajectoryPoint {
+                time,
+                pos: in_cup,
+                vel: dimple::Vec3::ZERO,
+            }],
+        };
+        let f = AnimatedFlight::from_result(&shot, result, 0.0, Some(hole), Some(cut));
+        assert!(f.holed());
+        assert_eq!(
+            f.timeline.last().map(|p| (p.time, p.pos)),
+            Some((time, in_cup))
+        );
+        assert_eq!(f.total_time, time);
+        assert!(f.timeline.windows(2).all(|w| w[1].time > w[0].time));
+        // Cut on the ground: dimple's flight stands.
+        assert_eq!(f.carry.carry_m, f.result.flight.carry_m);
 
-        let moving = f
-            .telemetry(f.result.flight.flight_time + 0.5)
-            .hole
-            .expect("hole rows");
+        let moving = f.telemetry(time - 0.5).hole.expect("hole rows");
         assert_eq!(moving.lie, None);
         assert!(moving.to_pin_yards > 0.0);
-        let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
+        let stopped = f.telemetry(time + 0.1).hole.expect("hole rows");
         assert_eq!(stopped.lie, Some("HOLED"));
-        assert_eq!(stopped.to_pin_yards, 0.0);
+        assert!(stopped.to_pin_yards < 1e-9);
+    }
+
+    /// The HUD rows of a shot cut in the air, at rest: the carry is where
+    /// it came down, the total is where it rests, the flight time is when it
+    /// came down and the apex is no higher than dimple's.
+    fn assert_cut_in_the_air(f: &AnimatedFlight) {
+        let r = &f.result;
+        assert!(f.carry.carry_m < r.flight.carry_m);
+        assert!(f.carry.apex_m <= r.flight.apex_m);
+        let shown = f.telemetry(f.total_time + 0.1);
+        assert_eq!(shown.carry_yards, meters_to_yards(f.carry.carry_m));
+        assert_eq!(shown.apex_m, f.carry.apex_m);
+        assert_eq!(shown.flight_time_s, f.carry.flight_time);
+        assert_eq!(shown.total_yards, f.shown_total_yards());
+        assert!(shown.total_yards < meters_to_yards(r.total_m));
     }
 
     #[test]
@@ -787,6 +845,11 @@ mod tests {
         let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
         assert_eq!(stopped.lie, Some("WATER"));
         assert!(stopped.to_pin_yards > 50.0);
+        // It comes down in the water, where it rests.
+        assert_cut_in_the_air(&f);
+        assert!(f.carry.flight_time < f.result.flight.flight_time);
+        assert_eq!(f.carry.flight_time, f.total_time);
+        assert_eq!(f.carry.carry_m, f.rest_pos.x.hypot(f.rest_pos.z));
     }
 
     #[test]
@@ -807,6 +870,19 @@ mod tests {
         assert_eq!(f.timeline.last().map(|p| p.pos), Some(f.rest_pos));
         let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
         assert_eq!(stopped.lie, Some("ROUGH"));
+        // It drops straight down: carry and total are the point under the
+        // tree, the flight time is when it reaches the ground there.
+        assert_cut_in_the_air(&f);
+        assert_eq!(f.carry.flight_time, f.total_time);
+        let carry = f.carry.carry_m;
+        assert!((carry - f.rest_pos.x.hypot(f.rest_pos.z)).abs() < 1e-9);
+        let hit = f
+            .timeline
+            .iter()
+            .find(|p| p.vel.x == 0.0 && p.vel.z == 0.0)
+            .expect("the hit, where the fall starts");
+        assert!(hit.pos.y > f.rest_pos.y, "the ball falls from the hit");
+        assert!(f.carry.apex_m >= hit.pos.y);
     }
 
     #[test]

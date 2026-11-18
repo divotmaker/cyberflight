@@ -5,7 +5,7 @@ pub mod green;
 pub mod grid;
 pub mod ground;
 pub mod hole;
-pub mod hole_draw;
+mod hole_draw;
 pub mod hud;
 pub mod hud_font;
 pub mod range;

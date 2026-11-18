@@ -25,6 +25,9 @@ impl RangeChoice {
 
 /// The menu's items, in order, as they are drawn.
 pub const MENU_ITEMS: [&str; 2] = ["DRIVING RANGE", "THE HOLE   PAR 4   300 YDS"];
+/// The range each of [`MENU_ITEMS`] picks, in the same order.
+const MENU_CHOICES: [RangeChoice; MENU_ITEMS.len()] =
+    [RangeChoice::DrivingRange, RangeChoice::Hole];
 
 /// A key the startup menu reacts to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,13 +51,7 @@ impl Menu {
         match key {
             MenuKey::Up => self.selected = self.selected.saturating_sub(1),
             MenuKey::Down => self.selected = (self.selected + 1).min(MENU_ITEMS.len() - 1),
-            MenuKey::Enter => {
-                return Some(if self.selected == 0 {
-                    RangeChoice::DrivingRange
-                } else {
-                    RangeChoice::Hole
-                });
-            }
+            MenuKey::Enter => return MENU_CHOICES.get(self.selected).copied(),
         }
         None
     }

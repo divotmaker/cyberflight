@@ -19,15 +19,6 @@ pub enum Ground {
 }
 
 impl Ground {
-    /// The green of flat ground, `None` on a hole.
-    #[must_use]
-    pub fn flat_green(&self) -> Option<GreenConfig> {
-        match self {
-            Ground::Flat { green } => *green,
-            Ground::Hole(_) => None,
-        }
-    }
-
     /// The hole, if this ground is one.
     #[must_use]
     pub fn hole(&self) -> Option<&Hole> {

@@ -38,7 +38,7 @@ pub struct Bunker {
 impl Bunker {
     /// `ρ²` of the scene point (`x`, `z`): below 1 inside the ellipse.
     #[must_use]
-    pub fn rho2(&self, x: f64, z: f64) -> f64 {
+    pub(crate) fn rho2(&self, x: f64, z: f64) -> f64 {
         let u = (x - self.x) / self.half_x;
         let v = (z - self.z) / self.half_z;
         u * u + v * v
@@ -73,7 +73,7 @@ pub struct Pond {
 impl Pond {
     /// `ρ²` of the scene point (`x`, `z`): below 1 inside the shoreline.
     #[must_use]
-    pub fn rho2(&self, x: f64, z: f64) -> f64 {
+    pub(crate) fn rho2(&self, x: f64, z: f64) -> f64 {
         let u = (x - self.x) / self.half_x;
         let v = (z - self.z) / self.half_z;
         u * u + v * v
@@ -419,7 +419,7 @@ impl Hole {
     /// Fairway half-width at downrange distance `z`, or `None` outside the
     /// fairway's knots.
     #[must_use]
-    pub fn fairway_half_width(&self, z: f64) -> Option<f64> {
+    pub(crate) fn fairway_half_width(&self, z: f64) -> Option<f64> {
         self.fairway.windows(2).find_map(|pair| {
             let ((za, wa), (zb, wb)) = (pair[0], pair[1]);
             (za..=zb)
@@ -430,7 +430,7 @@ impl Hole {
 
     /// The green's center, scene (x, z).
     #[must_use]
-    pub fn green_center(&self) -> (f64, f64) {
+    pub(crate) fn green_center(&self) -> (f64, f64) {
         let c = self.green.center_vec3();
         (f64::from(c.x), f64::from(c.z))
     }
@@ -574,8 +574,8 @@ impl Hole {
     /// Whether and where a shot stops before dimple brings it to rest:
     /// the first of the ball reaching water ([`water_entry`](Self::water_entry)),
     /// the ball hitting a tree ([`tree_hit`](Self::tree_hit)) and the ball
-    /// dropping into the cup ([`holed_at`], at rest in the cup's center one
-    /// ball radius under the surface). `path` is the shot's timeline and
+    /// dropping into the cup ([`holed_at`], at rest in the cup's center with
+    /// the ball's top level with the green). `path` is the shot's timeline and
     /// `points` its ground points, both in dimple's frame.
     ///
     /// Trees stop the ball and drop it: it loses its travel where it
@@ -598,7 +598,13 @@ impl Hole {
             .map(|(time, at)| self.drop(time, at, gravity));
         let cup = holed_at(points, self.cup, ball_radius, gravity).map(|time| {
             let (x, z) = self.cup;
-            let pos = scene_to_physics(glam::DVec3::new(x, self.height(x, z) - ball_radius, z));
+            // dimple's ball point rides on the ground, and the ball is drawn one radius above
+            // it: two radii under the green, the ball's top is level with the green, in the cup.
+            let pos = scene_to_physics(glam::DVec3::new(
+                x,
+                self.height(x, z) - 2.0 * ball_radius,
+                z,
+            ));
             Cut::at(Stop::Cup, time, pos)
         });
         [water, tree, cup]

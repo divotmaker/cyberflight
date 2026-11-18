@@ -8,25 +8,24 @@
 use dimple::units::yards_to_meters;
 use glam::Vec3;
 
+use crate::green::RING_SEGMENTS;
 use crate::grid::{GridConfig, GridVertex};
 use crate::hole::{Bunker, CANOPY_BASE, CUP_RADIUS_M, Hole, Pond, Tree};
 
 /// How far the terrain mesh lies under the surface (m).
-pub const MESH_DROP_M: f64 = 0.15;
+pub(crate) const MESH_DROP_M: f64 = 0.15;
 /// Cell and segment size of the mesh and the draped grid (yd).
-pub const CELL_YD: f64 = 1.25;
+const CELL_YD: f64 = 1.25;
 /// Height of the outlines above the surface (m).
 const LINE_LIFT_M: f64 = 0.01;
 /// Segments in a bunker's rim.
-pub const RIM_SEGMENTS: u32 = 64;
-/// Segments in the green's ring.
-pub const RING_SEGMENTS: u32 = 96;
+const RIM_SEGMENTS: u32 = 64;
 /// Spacing of a bunker's cross-hatch (m).
 const HATCH_SPACING_M: f64 = 2.0;
 /// Sides of a tree canopy's cross-sections.
-pub const CANOPY_SIDES: u32 = 6;
+const CANOPY_SIDES: u32 = 6;
 /// Cross-sections drawn up a tree's canopy, the base included.
-pub const CANOPY_LEVELS: u32 = 3;
+const CANOPY_LEVELS: u32 = 3;
 /// Height of the pin (m).
 const PIN_HEIGHT_M: f64 = 2.13;
 /// Segments in the cup's disc and rim.
