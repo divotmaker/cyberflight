@@ -17,13 +17,13 @@ use cf_render::context::{GpuConfig, GpuContext};
 use cf_render::mode::RenderMode;
 use cf_render::render::Renderer;
 use cf_render::window::Swapchain;
-use cf_scene::hud::build_notice;
+use cf_scene::hud::{build_menu, build_notice};
 use cf_scene::range::Range;
 use dimple::Tour;
 
 use cyberflight::flight::FlightManager;
 use cyberflight::intake::{self, FrpState};
-use cyberflight::menu::{self, RangeChoice};
+use cyberflight::menu::{self, MENU_ITEMS, Menu, MenuKey, RangeChoice};
 
 /// How often a minimized window wakes to take in shots and advance the
 /// flights without drawing.
@@ -82,6 +82,9 @@ struct App {
     minimized: bool,
     /// The notice shown over the scene and when it was raised.
     notice: Option<(&'static str, Instant)>,
+    /// The startup menu while it is open: drawn over the driving range,
+    /// it takes the arrow keys and Enter, and shots are dropped.
+    menu: Option<Menu>,
     /// Why the event loop was stopped, when the app could not run.
     fatal: Option<anyhow::Error>,
 }
@@ -103,6 +106,7 @@ impl App {
             fps_timer: Instant::now(),
             minimized: false,
             notice: None,
+            menu: None,
             fatal: None,
         }
     }
@@ -174,8 +178,37 @@ impl App {
     /// `now` (seconds since start).
     fn take_in(&mut self, now: f64) {
         for shot in self.frp.poll() {
+            if self.menu.is_some() {
+                eprintln!(
+                    "Shot #{} from {} dropped: no range picked yet",
+                    shot.shot.shot_number, shot.shot.device
+                );
+                continue;
+            }
             self.flights
                 .take_in(&shot, now, &self.model, &self.range.ground);
+        }
+    }
+
+    /// Apply `key` to the open menu. Picking the hole rebuilds the renderer
+    /// for it, once; picking the driving range closes the menu.
+    fn menu_key(&mut self, event_loop: &ActiveEventLoop, key: MenuKey) {
+        let Some(choice) = self.menu.as_mut().and_then(|m| m.key(key)) else {
+            return;
+        };
+        self.menu = None;
+        eprintln!("Range: {choice:?}");
+        if choice == RangeChoice::Hole {
+            self.range = choice.range();
+            self.renderer = None;
+            if let Some(window) = self.window.take() {
+                let init = self.init_renderer(&window);
+                window.request_redraw();
+                self.window = Some(window);
+                if let Err(e) = init {
+                    self.fail(event_loop, e);
+                }
+            }
         }
     }
 
@@ -213,6 +246,11 @@ impl App {
                 let notice = build_notice(text, screen_w, screen_h);
                 lines.extend(notice.lines);
                 fills.extend(notice.fills);
+            }
+            if let Some(menu) = self.menu {
+                let panel = build_menu(&MENU_ITEMS, menu.selected, screen_w, screen_h);
+                lines.extend(panel.lines);
+                fills.extend(panel.fills);
             }
             renderer.update_hud(&lines, &fills);
         }
@@ -310,6 +348,15 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
+                    && self.menu.is_some()
+                    && menu_key(event.physical_key).is_some() =>
+            {
+                if let Some(key) = menu_key(event.physical_key) {
+                    self.menu_key(event_loop, key);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
                     && !event.repeat
                     && event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
                     // The hole draws no reflections to switch.
@@ -393,6 +440,16 @@ fn wake_on_intake(proxy: EventLoopProxy<()>) -> impl Fn() + Send + 'static {
     }
 }
 
+/// The menu key of a physical key: the arrows and Enter.
+fn menu_key(key: PhysicalKey) -> Option<MenuKey> {
+    match key {
+        PhysicalKey::Code(KeyCode::ArrowUp) => Some(MenuKey::Up),
+        PhysicalKey::Code(KeyCode::ArrowDown) => Some(MenuKey::Down),
+        PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => Some(MenuKey::Enter),
+        _ => None,
+    }
+}
+
 fn main() -> ExitCode {
     let log = logfile::start();
     let result = run();
@@ -445,8 +502,16 @@ fn run() -> Result<()> {
         wake_on_intake(event_loop.create_proxy()),
     )
     .context("failed to start the FRP intake")?;
-    let range = range.unwrap_or(RangeChoice::DrivingRange).range();
-    let mut app = App::with_range(windowed, frp, start_time, range);
+    // Without `--range` the driving range is drawn under the startup menu.
+    let mut app = App::with_range(
+        windowed,
+        frp,
+        start_time,
+        range.unwrap_or(RangeChoice::DrivingRange).range(),
+    );
+    if range.is_none() {
+        app.menu = Some(Menu::default());
+    }
     event_loop.run_app(&mut app).context("event loop error")?;
     match app.fatal.take() {
         Some(err) => Err(err),
@@ -544,8 +609,8 @@ mod tests {
     }
 
     /// Shots that arrive while nothing is drawn launch when they arrived.
-    #[test]
-    fn advance_launches_shots_without_a_renderer() {
+    /// A 140 mph shot as the intake hands it over.
+    fn intake_shot() -> cf_scene::shot::ReceivedShot {
         let key = ShotKey {
             shot_id: "shot-1".to_owned(),
             shot_number: 1,
@@ -560,7 +625,7 @@ mod tests {
         let lm = "7d2f9a41c03be856";
         let mut intake = ShotIntake::default();
         let read = Instant::now();
-        let shot = [
+        [
             FrpMessage::new(lm, ShotTrigger::new(key.clone())),
             FrpMessage::new(
                 lm,
@@ -573,8 +638,25 @@ mod tests {
         ]
         .iter()
         .find_map(|msg| intake.ingest_at(msg, read))
-        .expect("a shot");
+        .expect("a shot")
+    }
 
+    #[test]
+    fn shots_are_dropped_while_the_menu_is_open() {
+        let (mut app, tx) = app_and_intake();
+        app.menu = Some(Menu::default());
+        tx.send(IntakeEvent::Shot(ArrivedShot {
+            shot: intake_shot(),
+            arrival: 1.0,
+        }))
+        .expect("send");
+        let _ = app.advance(2.5);
+        assert!(app.flights.flights.is_empty());
+    }
+
+    #[test]
+    fn advance_launches_shots_without_a_renderer() {
+        let shot = intake_shot();
         // It arrived at 1 s; the next tick, at 2.5 s, takes it in.
         let (mut app, tx) = app_and_intake();
         app.minimized = true;

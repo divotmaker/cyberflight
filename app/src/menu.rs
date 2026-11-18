@@ -1,4 +1,5 @@
-//! Which range cyberflight plays: the `--range` argument.
+//! Which range cyberflight plays: the `--range` argument, or the startup
+//! menu when it is absent.
 
 use cf_scene::range::Range;
 
@@ -19,6 +20,43 @@ impl RangeChoice {
             RangeChoice::DrivingRange => Range::new(),
             RangeChoice::Hole => Range::hole(),
         }
+    }
+}
+
+/// The menu's items, in order, as they are drawn.
+pub const MENU_ITEMS: [&str; 2] = ["DRIVING RANGE", "THE HOLE   PAR 4   300 YDS"];
+
+/// A key the startup menu reacts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKey {
+    Up,
+    Down,
+    Enter,
+}
+
+/// The startup menu: one of [`MENU_ITEMS`] is selected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Menu {
+    /// Index into [`MENU_ITEMS`].
+    pub selected: usize,
+}
+
+impl Menu {
+    /// Apply `key`: Up and Down move the selection and stop at the ends;
+    /// Enter returns the selected range.
+    pub fn key(&mut self, key: MenuKey) -> Option<RangeChoice> {
+        match key {
+            MenuKey::Up => self.selected = self.selected.saturating_sub(1),
+            MenuKey::Down => self.selected = (self.selected + 1).min(MENU_ITEMS.len() - 1),
+            MenuKey::Enter => {
+                return Some(if self.selected == 0 {
+                    RangeChoice::DrivingRange
+                } else {
+                    RangeChoice::Hole
+                });
+            }
+        }
+        None
     }
 }
 
@@ -49,6 +87,18 @@ mod tests {
             .chain(list.iter().copied())
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn the_menu_picks_a_range() {
+        let mut menu = Menu::default();
+        assert_eq!(menu.key(MenuKey::Enter), Some(RangeChoice::DrivingRange));
+        assert_eq!(menu.key(MenuKey::Up), None);
+        assert_eq!(menu.selected, 0, "Up at the top stays");
+        assert_eq!(menu.key(MenuKey::Down), None);
+        assert_eq!(menu.key(MenuKey::Down), None);
+        assert_eq!(menu.selected, 1, "Down at the bottom stays");
+        assert_eq!(menu.key(MenuKey::Enter), Some(RangeChoice::Hole));
     }
 
     #[test]

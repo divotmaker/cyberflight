@@ -33,6 +33,8 @@
 //!   - `hole_holed.png` — a straight drive that drops into the cup, at rest
 //!     (the first holed one scanning 150-185 mph in 0.05 mph steps)
 //!
+//!   - `menu.png` — the startup menu over the idle driving range (raster)
+//!
 //! The hole images are raster (`RtMode::Off`): the hole draws no
 //! reflections.
 //!
@@ -51,10 +53,11 @@ use cf_render::mode::{RenderMode, RtMode};
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::Frame;
 use cf_scene::camera::Camera;
-use cf_scene::hud::build_hud;
+use cf_scene::hud::{build_hud, build_menu};
 use cf_scene::range::Range;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cyberflight::flight::{AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE};
+use cyberflight::menu::MENU_ITEMS;
 use dimple::Tour;
 use dimple::trajectory::ShotInput;
 
@@ -426,6 +429,22 @@ fn render_hole() -> Result<()> {
     render_at_rest(&mut renderer, &range, &mut holed, "hole_holed")
 }
 
+/// Render the startup menu over the idle driving range, as the windowed app
+/// draws it before a range is picked.
+fn render_menu(range: &Range) -> Result<()> {
+    eprintln!("Rendering menu...");
+    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Off)
+        .context("failed to create menu renderer")?;
+    let mut hud = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
+    let panel = build_menu(&MENU_ITEMS, 0, WIDTH as f32, HEIGHT as f32);
+    hud.lines.extend(panel.lines);
+    hud.fills.extend(panel.fills);
+    renderer.update_hud(&hud.lines, &hud.fills);
+    let frame = renderer.render(&range.camera).context("render failed")?;
+    save_png(&frame, &out_path("menu.png"))
+}
+
 /// Render `flight` just after it stopped, with its HUD and chase camera,
 /// as the screenshot `name`.
 fn render_at_rest(
@@ -496,6 +515,7 @@ fn main() -> Result<()> {
     // ── Streaming path (dynamic geometry, as `--stream` renders it) ──
     render_stream(&range, &mut hero, hero_now)?;
 
-    // ── The hole range ──
+    // ── The startup menu, then the hole range ──
+    render_menu(&range)?;
     render_hole()
 }

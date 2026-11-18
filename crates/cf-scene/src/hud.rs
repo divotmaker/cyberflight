@@ -435,9 +435,83 @@ pub fn build_notice(text: &str, screen_w: f32, screen_h: f32) -> HudGeometry {
     HudGeometry { lines, fills }
 }
 
+/// Fade of a menu item that is not selected.
+const MENU_DIM_FADE: f32 = 0.55;
+
+/// Build the HUD geometry of the startup menu: a centered panel with the
+/// title `CYBERFLIGHT`, a rule, and `items` one per line. The item at
+/// `selected` is at full brightness with a bar under it; the others are
+/// dimmed.
+#[must_use]
+pub fn build_menu(items: &[&str], selected: usize, screen_w: f32, screen_h: f32) -> HudGeometry {
+    let sc = HudScale::new(screen_h);
+    let pad = 2.0 * REF_SECTION_GAP * screen_h / REF_HEIGHT;
+    let title = "CYBERFLIGHT";
+    let text_w = items
+        .iter()
+        .chain(std::iter::once(&title))
+        .map(|t| hud_font::text_width(t, sc.char_height))
+        .fold(0.0, f32::max);
+    // Rows 1.6 lines apart, so the bar under the selected item stands clear.
+    let pitch = 1.6 * sc.line_height;
+    let rows = items.len() as f32 + 2.0;
+    let panel_h = (rows - 1.0) * pitch + sc.char_height;
+    let x_left = (screen_w - text_w) * 0.5;
+    let y_top = (screen_h - panel_h) * 0.5;
+
+    let mut lines = hud_font::build_text(title, x_left, y_top, sc.char_height, HEADER_FADE);
+    let rule_y = y_top + pitch + sc.char_height * 0.5;
+    lines.extend(hud_font::build_hline(
+        x_left,
+        x_left + text_w,
+        rule_y,
+        DECOR_FADE,
+    ));
+    for (i, item) in items.iter().enumerate() {
+        let y = y_top + (i as f32 + 2.0) * pitch;
+        let fade = if i == selected {
+            VALUE_FADE
+        } else {
+            MENU_DIM_FADE
+        };
+        lines.extend(hud_font::build_text(item, x_left, y, sc.char_height, fade));
+        if i == selected {
+            let bar_y = y + sc.char_height + 0.25 * (pitch - sc.char_height);
+            let item_w = hud_font::text_width(item, sc.char_height);
+            lines.extend(hud_font::build_hline(
+                x_left,
+                x_left + item_w,
+                bar_y,
+                VALUE_FADE,
+            ));
+        }
+    }
+    let fills = build_rect_fill(
+        x_left - pad,
+        x_left + text_w + pad,
+        y_top - pad,
+        y_top + panel_h + pad,
+    );
+    HudGeometry { lines, fills }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_menu_marks_its_selected_item() {
+        let items = ["DRIVING RANGE", "THE HOLE"];
+        let first = build_menu(&items, 0, 1920.0, 1080.0);
+        let second = build_menu(&items, 1, 1920.0, 1080.0);
+        assert!(!first.lines.is_empty() && !first.fills.is_empty());
+        // The bar moves with the selection: same geometry size, other lines.
+        assert_ne!(first.lines, second.lines);
+        // The panel is centered.
+        let xs = first.fills.iter().map(|v| v.position[0]);
+        let (lo, hi) = xs.fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+        assert!(((lo + hi) * 0.5 - 960.0).abs() < 1.0);
+    }
 
     fn sample() -> ShotTelemetry {
         ShotTelemetry {
