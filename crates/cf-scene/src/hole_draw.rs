@@ -9,7 +9,7 @@ use dimple::units::yards_to_meters;
 use glam::Vec3;
 
 use crate::grid::{GridConfig, GridVertex};
-use crate::hole::{Bunker, CUP_RADIUS_M, Hole};
+use crate::hole::{Bunker, CUP_RADIUS_M, Hole, Pond};
 
 /// How far the terrain mesh lies under the surface (m).
 pub const MESH_DROP_M: f64 = 0.15;
@@ -179,6 +179,33 @@ pub fn bunker_lines(hole: &Hole, b: &Bunker) -> Vec<GridVertex> {
     out
 }
 
+/// A pond's shoreline ([`RIM_SEGMENTS`] segments) and straight hatch lines
+/// across the water every 2 m along Z, all flat, 1 cm above the water's
+/// surface. Unfaded.
+#[must_use]
+pub fn pond_lines(hole: &Hole, p: &Pond) -> Vec<GridVertex> {
+    let y = hole.water_level(p) + LINE_LIFT_M;
+    let mut out = Vec::new();
+    let shore: Vec<_> = (0..=RIM_SEGMENTS)
+        .map(|k| {
+            let a = f64::from(k) / f64::from(RIM_SEGMENTS) * std::f64::consts::TAU;
+            vertex(p.x + p.half_x * a.cos(), y, p.z + p.half_z * a.sin(), 0.0)
+        })
+        .collect();
+    polyline(&mut out, &shore);
+    let n = (p.half_z / HATCH_SPACING_M).floor() as i32;
+    for k in -n..=n {
+        let z = p.z + f64::from(k) * HATCH_SPACING_M;
+        let v = (z - p.z) / p.half_z;
+        let reach = p.half_x * (1.0 - v * v).max(0.0).sqrt();
+        if reach > 0.0 {
+            out.push(vertex(p.x - reach, y, z, 0.0));
+            out.push(vertex(p.x + reach, y, z, 0.0));
+        }
+    }
+    out
+}
+
 /// The green's edge: one ring of [`RING_SEGMENTS`] segments on the pad,
 /// 1 cm above the surface. Unfaded.
 #[must_use]
@@ -297,6 +324,21 @@ mod tests {
             let [x, y, z] = v.position.map(f64::from);
             assert!(((x - gx).hypot(z - gz) - 13.0).abs() < 1e-3);
             assert!(y > h.height(x, z));
+        }
+    }
+
+    #[test]
+    fn pond_lines_are_flat_on_the_water_inside_the_shore() {
+        let h = hole();
+        for p in &h.ponds {
+            let level = h.water_level(p);
+            let lines = pond_lines(&h, p);
+            assert!(lines.len() > 2 * RIM_SEGMENTS as usize);
+            for v in lines {
+                let [x, y, z] = v.position.map(f64::from);
+                assert!((y - level - LINE_LIFT_M).abs() < 1e-4);
+                assert!(p.rho2(x, z) < 1.0 + 1e-4, "({x}, {z})");
+            }
         }
     }
 

@@ -4,15 +4,17 @@
 //! bunkers, a green on a raised pad and a cup. [`Hole::height`] is the one
 //! height function that the physics ([`HoleTerrain`]) and the drawing both
 //! read; [`Hole::normal`] is its slope and [`Hole::lie_at`] the surface at a
-//! point. All positions are in the scene frame (see [`frame`](crate::frame)),
+//! point. [`Hole::stop`] ends a shot early: in the cup or in the water. All positions are in the scene frame (see [`frame`](crate::frame)),
 //! in meters: the tee at the origin, +Z downrange, +X the golfer's left.
 //!
 //! The ground is smooth everywhere: smoothstep joins between profile knots
-//! and across the green pad's shoulder, and a bowl `(1 − ρ²)³` for each
-//! bunker, so heights and normals are continuous.
+//! and across the green pad's and each pond's shoulder, and a bowl
+//! `(1 − ρ²)³` for each bunker and pond, so heights and normals are
+//! continuous.
 
 use dimple::Vec3;
 use dimple::ground::{GroundPoint, GroundSample, Phase, Restitution, Surface, Terrain};
+use dimple::trajectory::TrajectoryPoint;
 
 use crate::frame::{physics_to_scene, scene_to_physics};
 use crate::green::GreenConfig;
@@ -48,6 +50,68 @@ impl Bunker {
     }
 }
 
+/// A pond: an elliptical bowl filled with water. The ground around it is
+/// leveled to the water's surface, so the shoreline is the ellipse.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pond {
+    /// Center, scene X (m).
+    pub x: f64,
+    /// Center, scene Z (m).
+    pub z: f64,
+    /// Half-axis along X (m).
+    pub half_x: f64,
+    /// Half-axis along Z (m).
+    pub half_z: f64,
+    /// Depth of the bowl under the surface at its center (m).
+    pub depth: f64,
+    /// Width of the smoothstep bank from the level shore back to the
+    /// hole's ground, measured along the shorter half-axis (m).
+    pub bank: f64,
+}
+
+impl Pond {
+    /// `ρ²` of the scene point (`x`, `z`): below 1 inside the shoreline.
+    #[must_use]
+    pub fn rho2(&self, x: f64, z: f64) -> f64 {
+        let u = (x - self.x) / self.half_x;
+        let v = (z - self.z) / self.half_z;
+        u * u + v * v
+    }
+
+    /// Whether the scene point (`x`, `z`) is in the water.
+    #[must_use]
+    pub fn contains(&self, x: f64, z: f64) -> bool {
+        self.rho2(x, z) < 1.0
+    }
+
+    /// Weight of the level shore at `rho2`: 1 inside the shoreline, down to
+    /// 0 across the bank.
+    fn shore_weight(&self, rho2: f64) -> f64 {
+        let past = (rho2.sqrt() - 1.0) * self.half_x.min(self.half_z);
+        1.0 - smoothstep(past / self.bank)
+    }
+}
+
+/// How a shot on a hole stops before dimple brings it to rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// The ball dropped into the cup.
+    Cup,
+    /// The ball reached a pond's water.
+    Water,
+}
+
+/// The end of a shot cut short by [`Hole::stop`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cut {
+    /// Why the shot stops.
+    pub stop: Stop,
+    /// Shot time at which the ball stops (s).
+    pub time: f64,
+    /// Where the ball stops, dimple's frame (its center).
+    pub pos: Vec3,
+}
+
 /// The raised pad the green sits on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GreenPad {
@@ -74,6 +138,7 @@ pub struct Hole {
     /// the last.
     pub fairway: Vec<(f64, f64)>,
     pub bunkers: Vec<Bunker>,
+    pub ponds: Vec<Pond>,
     /// The green: a circle on the target line.
     pub green: GreenConfig,
     pub green_pad: GreenPad,
@@ -88,6 +153,7 @@ pub enum Lie {
     Rough,
     Sand,
     Green,
+    Water,
 }
 
 /// Rough: softer than fairway, with more rolling resistance. Chosen, not
@@ -119,6 +185,9 @@ impl Lie {
             Lie::Rough => ROUGH,
             Lie::Sand => SAND,
             Lie::Green => Surface::GREEN,
+            // The bowl under the water: a shot ends at the surface (see
+            // `Hole::stop`), so this only keeps dimple's ball quiet there.
+            Lie::Water => SAND,
         }
     }
 
@@ -130,6 +199,7 @@ impl Lie {
             Lie::Rough => "ROUGH",
             Lie::Sand => "SAND",
             Lie::Green => "GREEN",
+            Lie::Water => "WATER",
         }
     }
 }
@@ -145,7 +215,8 @@ const NORMAL_EPS: f64 = 1e-3;
 
 impl Hole {
     /// Hole 1: a straight 300 yd par 4 from an elevated tee, two fairway
-    /// bunkers at drive distance and a raised green guarded by three more.
+    /// bunkers at drive distance, a pond in the left rough short of them
+    /// and a raised green guarded by three more bunkers.
     #[must_use]
     pub fn no_1() -> Self {
         let bunker = |x, z, half_x, half_z, depth| Bunker {
@@ -154,6 +225,14 @@ impl Hole {
             half_x,
             half_z,
             depth,
+        };
+        let pond = |x, z, half_x, half_z, depth, bank| Pond {
+            x,
+            z,
+            half_x,
+            half_z,
+            depth,
+            bank,
         };
         Self {
             profile: vec![(5.0, 0.0), (110.0, -9.5), (205.0, -10.5), (240.0, -11.0)],
@@ -172,6 +251,7 @@ impl Hole {
                 bunker(-19.0, 276.0, 5.0, 8.0, 0.8),
                 bunker(9.0, 292.0, 7.0, 4.5, 0.7),
             ],
+            ponds: vec![pond(31.0, 176.0, 8.0, 24.0, 1.5, 5.0)],
             green: GreenConfig {
                 distance_m: 274.32,
                 diameter_m: 26.0,
@@ -231,6 +311,16 @@ impl Hole {
         let level = f64::from(self.green.radius_m()) + pad.collar;
         let weight = 1.0 - smoothstep((d - level) / pad.shoulder);
         let mut h = self.profile_at(z) + weight * (pad.height + pad.tilt * (z - gz));
+        for p in &self.ponds {
+            let rho2 = p.rho2(x, z);
+            let shore = p.shore_weight(rho2);
+            if shore > 0.0 {
+                h += shore * (self.water_level(p) - h);
+            }
+            if rho2 < 1.0 {
+                h -= p.depth * (1.0 - rho2).powi(3);
+            }
+        }
         for b in &self.bunkers {
             let rho2 = b.rho2(x, z);
             if rho2 < 1.0 {
@@ -250,12 +340,22 @@ impl Hole {
         glam::DVec3::new(-dx, 1.0, -dz).normalize()
     }
 
+    /// Height of the water surface of `pond`: the profile's height at its
+    /// center. The shore is level at this height and the bowl dips under
+    /// it.
+    #[must_use]
+    pub fn water_level(&self, pond: &Pond) -> f64 {
+        self.profile_at(pond.z)
+    }
+
     /// The lie at the scene point (`x`, `z`). First match wins: green,
-    /// sand, fairway, rough.
+    /// water, sand, fairway, rough.
     #[must_use]
     pub fn lie_at(&self, x: f64, z: f64) -> Lie {
         if self.green.contains(x, z) {
             Lie::Green
+        } else if self.ponds.iter().any(|p| p.contains(x, z)) {
+            Lie::Water
         } else if self.bunkers.iter().any(|b| b.contains(x, z)) {
             Lie::Sand
         } else if self.fairway_half_width(z).is_some_and(|w| x.abs() <= w) {
@@ -269,6 +369,71 @@ impl Hole {
     #[must_use]
     pub fn to_cup(&self, x: f64, z: f64) -> f64 {
         (x - self.cup.0).hypot(z - self.cup.1)
+    }
+}
+
+impl Hole {
+    /// Where the ball first reaches water along `path` (a shot's timeline
+    /// in dimple's frame, flight then ground): the first point inside a
+    /// pond's shoreline at or under its surface, interpolated to where the
+    /// path crosses the surface. The time and the ball's center there, on
+    /// the surface, in dimple's frame; `None` if it never does.
+    #[must_use]
+    pub fn water_entry(&self, path: &[TrajectoryPoint]) -> Option<(f64, Vec3)> {
+        path.windows(2).find_map(|pair| {
+            let (a, b) = (&pair[0], &pair[1]);
+            let (pa, pb) = (physics_to_scene(a.pos), physics_to_scene(b.pos));
+            self.ponds.iter().find_map(|pond| {
+                let level = self.water_level(pond);
+                if !pond.contains(pb.x, pb.z) || pb.y >= level {
+                    return None;
+                }
+                let t = if pa.y > level {
+                    (pa.y - level) / (pa.y - pb.y)
+                } else {
+                    1.0
+                };
+                let mut at = pa.lerp(pb, t);
+                if !pond.contains(at.x, at.z) {
+                    at = pb;
+                }
+                at.y = level;
+                Some((a.time + (b.time - a.time) * t, scene_to_physics(at)))
+            })
+        })
+    }
+
+    /// Whether and where a shot stops before dimple brings it to rest:
+    /// the first of the ball reaching water ([`water_entry`](Self::water_entry))
+    /// and the ball dropping into the cup ([`holed_at`], at rest in the
+    /// cup's center one ball radius under the surface). `path` is the
+    /// shot's timeline and `points` its ground points, both in dimple's
+    /// frame.
+    #[must_use]
+    pub fn stop(
+        &self,
+        path: &[TrajectoryPoint],
+        points: &[GroundPoint],
+        ball_radius: f64,
+        gravity: f64,
+    ) -> Option<Cut> {
+        let water = self.water_entry(path).map(|(time, pos)| Cut {
+            stop: Stop::Water,
+            time,
+            pos,
+        });
+        let cup = holed_at(points, self.cup, ball_radius, gravity).map(|time| {
+            let (x, z) = self.cup;
+            Cut {
+                stop: Stop::Cup,
+                time,
+                pos: scene_to_physics(glam::DVec3::new(x, self.height(x, z) - ball_radius, z)),
+            }
+        });
+        [water, cup]
+            .into_iter()
+            .flatten()
+            .min_by(|a, b| a.time.total_cmp(&b.time))
     }
 }
 

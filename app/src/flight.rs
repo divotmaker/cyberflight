@@ -7,9 +7,9 @@ use glam::Vec3;
 
 use cf_render::flight::FlightRenderData;
 use cf_scene::camera::Camera;
-use cf_scene::frame::{physics_to_scene, scene_to_physics};
+use cf_scene::frame::physics_to_scene;
 use cf_scene::ground;
-use cf_scene::hole::{Hole, holed_at};
+use cf_scene::hole::{Cut, Hole, Stop};
 use cf_scene::hud::{HoleTelemetry, ShotTelemetry, build_hud};
 use cf_scene::range::Ground;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
@@ -92,8 +92,8 @@ pub struct AnimatedFlight {
     pub prev_chase: Option<(Camera, f64)>,
     /// The hole the shot is played on; `None` on the driving range.
     pub hole: Option<Hole>,
-    /// Whether the ball dropped into the hole's cup.
-    pub holed: bool,
+    /// How the shot stopped early on the hole (cup or water), if it did.
+    pub stop: Option<Stop>,
 }
 
 impl AnimatedFlight {
@@ -109,31 +109,32 @@ impl AnimatedFlight {
             ground::simulate_shot(&shot.input, model, ground)
         };
         let hole = ground.hole();
-        let holed = hole.and_then(|h| {
-            let radius = model.radius_m();
-            let time = holed_at(&result.ground.points, h.cup, radius, model.gravity())?;
-            // At rest in the cup: its center, one ball radius under the surface.
-            let (x, z) = h.cup;
-            let pos = scene_to_physics(glam::DVec3::new(x, h.height(x, z) - radius, z));
-            Some((time, pos))
+        let cut = hole.and_then(|h| {
+            h.stop(
+                &build_timeline(&result),
+                &result.ground.points,
+                model.radius_m(),
+                model.gravity(),
+            )
         });
-        Self::from_result(shot, result, launch_time, hole.cloned(), holed)
+        Self::from_result(shot, result, launch_time, hole.cloned(), cut)
     }
 
     /// Animate a simulated shot on `hole` (`None` on the driving range).
-    /// A ball `holed` (the time and the position in the cup) stops there; a
-    /// ball that did not come to rest stops [`MAX_UNSETTLED_GROUND_TIME_S`]
-    /// after landing at the latest.
+    /// A shot `cut` short (in the cup or the water) stops there; a ball that
+    /// did not come to rest stops [`MAX_UNSETTLED_GROUND_TIME_S`] after
+    /// landing at the latest.
     fn from_result(
         shot: &ReceivedShot,
         result: ShotResult,
         launch_time: f64,
         hole: Option<Hole>,
-        holed: Option<(f64, dimple::Vec3)>,
+        cut: Option<Cut>,
     ) -> Self {
         let mut timeline = build_timeline(&result);
-        if let Some((time, pos)) = holed {
-            end_timeline_at(&mut timeline, time, pos);
+        let stop = cut.map(|c| c.stop);
+        if let Some(cut) = cut {
+            end_timeline_at(&mut timeline, cut.time, cut.pos);
         } else if result.ground.termination != Termination::Rest {
             let end = result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
             if let Some(cut) = timeline
@@ -160,7 +161,7 @@ impl AnimatedFlight {
         let rollout_yards = total_yards - carry_yards;
         let on_hole = hole.as_ref().map_or_else(String::new, |h| {
             let rest = physics_to_scene(rest_pos);
-            let (to_pin, lie) = if holed.is_some() {
+            let (to_pin, lie) = if stop == Some(Stop::Cup) {
                 (0.0, "HOLED")
             } else {
                 (h.to_cup(rest.x, rest.z), h.lie_at(rest.x, rest.z).label())
@@ -186,9 +187,15 @@ impl AnimatedFlight {
             rolled: shot.rolled,
             landed: false,
             prev_chase: None,
-            holed: holed.is_some(),
+            stop,
             hole,
         }
+    }
+
+    /// Whether the ball dropped into the hole's cup.
+    #[must_use]
+    pub fn holed(&self) -> bool {
+        self.stop == Some(Stop::Cup)
     }
 
     pub fn telemetry(&self, now: f64) -> ShotTelemetry {
@@ -244,7 +251,7 @@ impl AnimatedFlight {
             hole: self.hole.as_ref().map(|h| {
                 let stopped = shot_t >= self.total_time;
                 let at = physics_to_scene(pos);
-                let to_pin = if stopped && self.holed {
+                let to_pin = if stopped && self.holed() {
                     0.0
                 } else {
                     h.to_cup(at.x, at.z)
@@ -252,7 +259,7 @@ impl AnimatedFlight {
                 HoleTelemetry {
                     to_pin_yards: meters_to_yards(to_pin),
                     lie: stopped.then(|| {
-                        if self.holed {
+                        if self.holed() {
                             "HOLED"
                         } else {
                             h.lie_at(at.x, at.z).label()
@@ -711,7 +718,7 @@ mod tests {
                 sidespin_rpm: 0.0,
             })
             .map(|input| animate(input, ground))
-            .find(|f| f.holed)
+            .find(AnimatedFlight::holed)
             .expect("a holed drive")
     }
 
@@ -742,7 +749,7 @@ mod tests {
     fn a_shot_that_misses_reads_its_lie() {
         let range = Range::hole();
         let f = animate(ShotInput::wedge(), &range.ground);
-        assert!(!f.holed);
+        assert!(!f.holed());
         let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
         assert_eq!(stopped.lie, Some("FAIRWAY"));
         assert!(
@@ -751,6 +758,27 @@ mod tests {
                 .hole
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_shot_into_the_water_stops_there() {
+        let range = Range::hole();
+        let f = animate(
+            ShotInput {
+                ball_speed_mph: 120.0,
+                launch_angle_deg: 13.0,
+                launch_azimuth_deg: -9.0,
+                backspin_rpm: 3000.0,
+                sidespin_rpm: 0.0,
+            },
+            &range.ground,
+        );
+        assert_eq!(f.stop, Some(Stop::Water));
+        assert!(f.total_time < f.result.ground.rest.time);
+        assert_eq!(f.timeline.last().map(|p| p.pos), Some(f.rest_pos));
+        let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
+        assert_eq!(stopped.lie, Some("WATER"));
+        assert!(stopped.to_pin_yards > 50.0);
     }
 
     #[test]

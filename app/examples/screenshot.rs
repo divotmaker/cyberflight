@@ -32,6 +32,8 @@
 //!     (`TO PIN`, `LIE`) and the chase camera
 //!   - `hole_holed.png` — a straight drive that drops into the cup, at rest
 //!     (the first holed one scanning 150-185 mph in 0.05 mph steps)
+//!   - `hole_water.png` — a pulled 120 mph drive at rest in the pond, from
+//!     20 m short of the ball, over the fairway side
 //!
 //!   - `menu.png` — the startup menu over the idle driving range (raster)
 //!
@@ -53,6 +55,7 @@ use cf_render::mode::{RenderMode, RtMode};
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::Frame;
 use cf_scene::camera::Camera;
+use cf_scene::frame::physics_to_scene;
 use cf_scene::hud::{build_hud, build_menu};
 use cf_scene::range::Range;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
@@ -411,7 +414,7 @@ fn render_hole() -> Result<()> {
     save_png(&frame, &out_path("hole_flight.png"))?;
 
     eprintln!("Rendering hole_hud...");
-    render_at_rest(&mut renderer, &range, &mut flight, "hole_hud")?;
+    render_at_rest(&mut renderer, range.camera, &mut flight, "hole_hud")?;
 
     eprintln!("Finding a holed drive...");
     let mut holed = (0..=700)
@@ -423,10 +426,21 @@ fn render_hole() -> Result<()> {
             sidespin_rpm: 0.0,
         })
         .map(|input| animate(&range, input, 0.0).0)
-        .find(|f| f.holed)
+        .find(AnimatedFlight::holed)
         .context("no holed drive from 150 to 185 mph")?;
     eprintln!("Rendering hole_holed...");
-    render_at_rest(&mut renderer, &range, &mut holed, "hole_holed")
+    render_at_rest(&mut renderer, range.camera, &mut holed, "hole_holed")?;
+
+    eprintln!("Rendering hole_water...");
+    let pulled = ShotInput {
+        ball_speed_mph: 120.0,
+        launch_azimuth_deg: -9.0,
+        ..drive
+    };
+    let mut wet = animate(&range, pulled, 0.0).0;
+    let ball = physics_to_scene(wet.rest_pos).as_vec3();
+    let pond = look_at(ball + Vec3::new(-12.0, 4.0, -16.0), ball);
+    render_at_rest(&mut renderer, pond, &mut wet, "hole_water")
 }
 
 /// Render the startup menu over the idle driving range, as the windowed app
@@ -445,11 +459,11 @@ fn render_menu(range: &Range) -> Result<()> {
     save_png(&frame, &out_path("menu.png"))
 }
 
-/// Render `flight` just after it stopped, with its HUD and chase camera,
-/// as the screenshot `name`.
+/// Render `flight` just after it stopped, from `camera` with its HUD and
+/// chase camera, as the screenshot `name`.
 fn render_at_rest(
     renderer: &mut OffscreenRenderer,
-    range: &Range,
+    camera: Camera,
     flight: &mut AnimatedFlight,
     name: &str,
 ) -> Result<()> {
@@ -466,7 +480,7 @@ fn render_at_rest(
         HEIGHT as f32,
     );
     renderer.update_hud(&hud.lines, &hud.fills);
-    let frame = renderer.render(&range.camera).context("render failed")?;
+    let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path(&format!("{name}.png")))
 }
 

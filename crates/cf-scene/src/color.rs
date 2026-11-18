@@ -18,6 +18,10 @@ pub const GREEN_EDGE: Vec4 = Vec4::new(0.041, 1.0, 0.007, 0.9);
 /// Sand — orange, #FF8800 as linear RGB: a hole's bunkers.
 pub const SAND: Vec4 = Vec4::new(1.0, 0.246, 0.0, 1.0);
 
+/// Water — neon blue, #3070FF as linear RGB: a hole's ponds. Bluer and
+/// darker than the cyan grid, so the water reads as its own surface.
+pub const WATER: Vec4 = Vec4::new(0.030, 0.162, 1.0, 1.0);
+
 /// Pin — white: a hole's cup rim, pin and flag.
 pub const PIN: Vec4 = Vec4::new(1.0, 1.0, 1.0, 1.0);
 

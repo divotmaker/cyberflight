@@ -1,6 +1,6 @@
-use dimple::Tour;
 use dimple::ground::{GroundPoint, Termination};
-use dimple::trajectory::{ShotInput, ShotResult};
+use dimple::trajectory::{ShotInput, ShotResult, TrajectoryPoint};
+use dimple::{AeroModel, Tour};
 use glam::DVec3;
 
 use super::*;
@@ -108,6 +108,16 @@ fn the_ground_is_continuous_across_every_seam() {
             seams.push((b.x + b.half_x * c, b.z + b.half_z * s, c, s));
         }
     }
+    for p in &h.ponds {
+        let bank = 1.0 + p.bank / p.half_x.min(p.half_z);
+        for scale in [1.0, bank] {
+            for k in 0..16 {
+                let a = f64::from(k) * std::f64::consts::TAU / 16.0;
+                let (c, s) = (a.cos(), a.sin());
+                seams.push((p.x + scale * p.half_x * c, p.z + scale * p.half_z * s, c, s));
+            }
+        }
+    }
     for r in [level, level + h.green_pad.shoulder] {
         for k in 0..16 {
             let a = f64::from(k) * std::f64::consts::TAU / 16.0;
@@ -130,14 +140,14 @@ fn the_ground_is_continuous_across_every_seam() {
 }
 
 #[test]
-fn every_lie_but_sand_holds_a_ball_at_rest() {
+fn every_lie_but_sand_and_water_holds_a_ball_at_rest() {
     let h = hole();
     let mut z = -5.0;
     while z < 340.0 {
         let mut x = -45.0;
         while x <= 45.0 {
             let lie = h.lie_at(x, z);
-            if lie != Lie::Sand {
+            if lie != Lie::Sand && lie != Lie::Water {
                 let n = h.normal(x, z);
                 let sample = GroundSample {
                     height: h.height(x, z),
@@ -375,4 +385,100 @@ fn a_slow_roll_stops_short() {
     let (h, r) = roll_at_the_cup(1.3);
     assert_eq!(holed(&h, &r), None);
     assert!(physics_to_scene(r.ground.rest.pos).z < h.cup.1);
+}
+
+#[test]
+fn the_pond_is_a_bowl_under_a_level_surface() {
+    let h = hole();
+    let p = h.ponds[0];
+    let level = h.water_level(&p);
+    assert!((h.height(p.x, p.z) - (level - p.depth)).abs() < 1e-9);
+    assert_eq!(h.lie_at(p.x, p.z), Lie::Water);
+    for k in 0..32 {
+        let a = f64::from(k) * std::f64::consts::TAU / 32.0;
+        let (x, z) = (p.x + p.half_x * a.cos(), p.z + p.half_z * a.sin());
+        assert!((h.height(x, z) - level).abs() < 1e-9, "shore at ({x}, {z})");
+        let (ix, iz) = (p.x + 0.9 * (x - p.x), p.z + 0.9 * (z - p.z));
+        assert!(h.height(ix, iz) < level, "under water at ({ix}, {iz})");
+        assert_eq!(h.lie_at(ix, iz), Lie::Water);
+    }
+}
+
+#[test]
+fn the_pond_and_its_bank_stay_clear_of_bunkers_and_fairway() {
+    let h = hole();
+    for p in &h.ponds {
+        let reach = 1.0 + p.bank / p.half_x.min(p.half_z);
+        let mut z = p.z - reach * p.half_z;
+        while z <= p.z + reach * p.half_z {
+            let mut x = p.x - reach * p.half_x;
+            while x <= p.x + reach * p.half_x {
+                if p.rho2(x, z) < reach * reach {
+                    assert!(!h.bunkers.iter().any(|b| b.contains(x, z)), "({x}, {z})");
+                    let fairway = h.fairway_half_width(z).is_some_and(|w| x.abs() <= w);
+                    assert!(!fairway, "fairway at ({x}, {z})");
+                }
+                x += 0.5;
+            }
+            z += 0.5;
+        }
+    }
+}
+
+/// The shot's timeline: flight points, then ground points.
+fn path(r: &ShotResult) -> Vec<TrajectoryPoint> {
+    let ground = r.ground.points.iter().map(|p| TrajectoryPoint {
+        time: p.time,
+        pos: p.pos,
+        vel: p.vel,
+    });
+    r.flight.points.iter().copied().chain(ground).collect()
+}
+
+fn stop_of(h: &Hole, r: &ShotResult) -> Option<Cut> {
+    let model = Tour::SEA_LEVEL;
+    h.stop(
+        &path(r),
+        &r.ground.points,
+        model.radius_m(),
+        model.gravity(),
+    )
+}
+
+#[test]
+fn a_pulled_drive_ends_in_the_water() {
+    let (h, r) = play(&ShotInput {
+        ball_speed_mph: 120.0,
+        ..drive(-9.0)
+    });
+    let cut = stop_of(&h, &r).expect("in the water");
+    assert_eq!(cut.stop, Stop::Water);
+    assert!(cut.time < r.ground.rest.time);
+    let at = physics_to_scene(cut.pos);
+    let p = h.ponds[0];
+    assert!(p.contains(at.x, at.z), "({:.1}, {:.1})", at.x, at.z);
+    assert!((at.y - h.water_level(&p)).abs() < 1e-9);
+    assert_eq!(h.lie_at(at.x, at.z), Lie::Water);
+}
+
+#[test]
+fn a_drive_that_carries_the_pond_stays_dry() {
+    let (h, r) = play(&drive(-9.0));
+    assert_eq!(stop_of(&h, &r), None);
+    let first = physics_to_scene(r.ground.contacts[0].pos);
+    assert!(first.z > h.ponds[0].z + h.ponds[0].half_z);
+}
+
+#[test]
+fn a_ball_that_rolls_into_the_pond_ends_at_its_shore() {
+    // Lands in the rough short and right of the pond and runs into it.
+    let (h, r) = play(&ShotInput {
+        ball_speed_mph: 110.0,
+        ..drive(-8.0)
+    });
+    let first = physics_to_scene(r.ground.contacts[0].pos);
+    assert_eq!(h.lie_at(first.x, first.z), Lie::Rough);
+    let cut = stop_of(&h, &r).expect("in the water");
+    assert_eq!(cut.stop, Stop::Water);
+    assert!(cut.time > r.flight.flight_time);
 }
