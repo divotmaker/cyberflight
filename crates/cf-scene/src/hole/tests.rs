@@ -453,8 +453,9 @@ fn a_pulled_drive_ends_in_the_water() {
     });
     let cut = stop_of(&h, &r).expect("in the water");
     assert_eq!(cut.stop, Stop::Water);
-    assert!(cut.time < r.ground.rest.time);
-    let at = physics_to_scene(cut.pos);
+    assert!(cut.time() < r.ground.rest.time);
+    assert_eq!(cut.path.len(), 1);
+    let at = physics_to_scene(cut.rest());
     let p = h.ponds[0];
     assert!(p.contains(at.x, at.z), "({:.1}, {:.1})", at.x, at.z);
     assert!((at.y - h.water_level(&p)).abs() < 1e-9);
@@ -464,7 +465,7 @@ fn a_pulled_drive_ends_in_the_water() {
 #[test]
 fn a_drive_that_carries_the_pond_stays_dry() {
     let (h, r) = play(&drive(-9.0));
-    assert_eq!(stop_of(&h, &r), None);
+    assert!(stop_of(&h, &r).is_none());
     let first = physics_to_scene(r.ground.contacts[0].pos);
     assert!(first.z > h.ponds[0].z + h.ponds[0].half_z);
 }
@@ -480,5 +481,91 @@ fn a_ball_that_rolls_into_the_pond_ends_at_its_shore() {
     assert_eq!(h.lie_at(first.x, first.z), Lie::Rough);
     let cut = stop_of(&h, &r).expect("in the water");
     assert_eq!(cut.stop, Stop::Water);
-    assert!(cut.time > r.flight.flight_time);
+    assert!(cut.time() > r.flight.flight_time);
+}
+
+#[test]
+fn a_tree_is_a_trunk_under_a_cone() {
+    let t = Tree {
+        x: 0.0,
+        z: 0.0,
+        height: 10.0,
+        radius: 3.0,
+    };
+    let at = |d: f64, y: f64| DVec3::new(d, y + 1.0, 0.0);
+    // Ground at y = 1; the canopy starts at 3 m and narrows to the top.
+    assert!(t.contains(at(0.2, 0.5), 1.0), "trunk");
+    assert!(!t.contains(at(0.3, 0.5), 1.0), "beside the trunk");
+    assert!(t.contains(at(2.9, 3.1), 1.0), "canopy base");
+    assert!(
+        !t.contains(at(2.9, 7.0), 1.0),
+        "outside the cone near the top"
+    );
+    assert!(
+        t.contains(at(1.0, 7.0), 1.0),
+        "inside the cone near the top"
+    );
+    assert!(!t.contains(at(0.0, 10.1), 1.0), "over the top");
+    assert!(!t.contains(at(0.0, -0.1), 1.0), "under the ground");
+}
+
+#[test]
+fn trees_line_both_sides_in_the_rough() {
+    let h = hole();
+    let left = h.trees.iter().filter(|t| t.x > 0.0).count();
+    let right = h.trees.len() - left;
+    assert!(left >= 10 && right >= 10, "left {left}, right {right}");
+    let (gx, gz) = h.green_center();
+    for t in &h.trees {
+        assert!((10.0..=18.0).contains(&t.height), "{t:?}");
+        for k in 0..32 {
+            let a = f64::from(k) * std::f64::consts::TAU / 32.0;
+            for r in [0.0, t.radius] {
+                let (x, z) = (t.x + r * a.cos(), t.z + r * a.sin());
+                assert_eq!(h.lie_at(x, z), Lie::Rough, "{t:?} at ({x}, {z})");
+                assert!((x - gx).hypot(z - gz) > 13.0 + h.green_pad.collar);
+            }
+        }
+    }
+    assert_eq!(h.trees, h.tree_rows(TREE_SEED), "the same trees every time");
+}
+
+#[test]
+fn a_drive_into_the_trees_drops_under_them() {
+    let (h, r) = play(&drive(9.0));
+    let cut = stop_of(&h, &r).expect("in the trees");
+    assert_eq!(cut.stop, Stop::Tree);
+    assert!(cut.time() < r.flight.flight_time, "hit in flight");
+    let hit = physics_to_scene(cut.path[0].pos);
+    let tree = h
+        .trees
+        .iter()
+        .find(|t| t.contains(hit, h.height(t.x, t.z)))
+        .expect("the hit point is in a tree");
+    assert!(tree.x < 0.0, "the right row");
+    let rest = physics_to_scene(cut.rest());
+    assert_eq!((rest.x, rest.z), (hit.x, hit.z), "straight down");
+    assert!((rest.y - h.height(rest.x, rest.z)).abs() < 1e-9);
+    assert_eq!(h.lie_at(rest.x, rest.z), Lie::Rough);
+    let fall = (2.0 * (hit.y - rest.y) / Tour::SEA_LEVEL.gravity()).sqrt();
+    let last = cut.path.last().expect("a rest point");
+    assert!((last.time - cut.time() - fall).abs() < 1e-9);
+    assert_eq!(last.vel, Vec3::ZERO);
+    assert!(
+        cut.path
+            .windows(2)
+            .all(|p| p[1].time > p[0].time && p[1].pos.y < p[0].pos.y)
+    );
+}
+
+#[test]
+fn straight_drives_miss_the_trees() {
+    let h = hole();
+    for speed in [100.0, 140.0, 160.0] {
+        let (_, r) = play(&ShotInput {
+            ball_speed_mph: speed,
+            ..drive(0.0)
+        });
+        assert!(h.tree_hit(&path(&r)).is_none(), "{speed} mph");
+    }
 }

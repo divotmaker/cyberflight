@@ -34,6 +34,8 @@
 //!     (the first holed one scanning 150-185 mph in 0.05 mph steps)
 //!   - `hole_water.png` — a pulled 120 mph drive at rest in the pond, from
 //!     20 m short of the ball, over the fairway side
+//!   - `hole_trees.png` — a 140 mph drive pushed 9° right into the right
+//!     tree row, at rest under the tree, seen along the row
 //!
 //!   - `menu.png` — the startup menu over the idle driving range (raster)
 //!
@@ -440,7 +442,16 @@ fn render_hole() -> Result<()> {
     let mut wet = animate(&range, pulled, 0.0).0;
     let ball = physics_to_scene(wet.rest_pos).as_vec3();
     let pond = look_at(ball + Vec3::new(-12.0, 4.0, -16.0), ball);
-    render_at_rest(&mut renderer, pond, &mut wet, "hole_water")
+    render_at_rest(&mut renderer, pond, &mut wet, "hole_water")?;
+
+    eprintln!("Rendering hole_trees...");
+    let pushed = ShotInput {
+        launch_azimuth_deg: 9.0,
+        ..drive
+    };
+    let mut treed = animate(&range, pushed, 0.0).0;
+    let row = look_at(Vec3::new(-20.0, 0.0, 110.0), Vec3::new(-33.0, -8.0, 220.0));
+    render_at_rest(&mut renderer, row, &mut treed, "hole_trees")
 }
 
 /// Render the startup menu over the idle driving range, as the windowed app

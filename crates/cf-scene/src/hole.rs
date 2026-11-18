@@ -4,7 +4,8 @@
 //! bunkers, a green on a raised pad and a cup. [`Hole::height`] is the one
 //! height function that the physics ([`HoleTerrain`]) and the drawing both
 //! read; [`Hole::normal`] is its slope and [`Hole::lie_at`] the surface at a
-//! point. [`Hole::stop`] ends a shot early: in the cup or in the water. All positions are in the scene frame (see [`frame`](crate::frame)),
+//! point. [`Hole::stop`] ends a shot early: in the cup, in the water or
+//! under a tree. All positions are in the scene frame (see [`frame`](crate::frame)),
 //! in meters: the tee at the origin, +Z downrange, +X the golfer's left.
 //!
 //! The ground is smooth everywhere: smoothstep joins between profile knots
@@ -92,6 +93,43 @@ impl Pond {
     }
 }
 
+/// A tree: a trunk and a cone-shaped canopy on the ground of a hole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tree {
+    /// Trunk, scene X (m).
+    pub x: f64,
+    /// Trunk, scene Z (m).
+    pub z: f64,
+    /// Height of the top above the ground at the trunk (m).
+    pub height: f64,
+    /// Radius of the canopy at its base (m).
+    pub radius: f64,
+}
+
+/// Radius of a tree's trunk (m).
+pub const TRUNK_RADIUS_M: f64 = 0.25;
+/// Height of a tree's canopy base, as a share of the tree's height.
+pub const CANOPY_BASE: f64 = 0.3;
+
+impl Tree {
+    /// Whether the scene point `p` is in the tree (trunk or canopy), with
+    /// `ground` the ground's height at the trunk.
+    #[must_use]
+    pub fn contains(&self, p: glam::DVec3, ground: f64) -> bool {
+        let d = (p.x - self.x).hypot(p.z - self.z);
+        let up = p.y - ground;
+        if !(0.0..=self.height).contains(&up) || d > self.radius {
+            return false;
+        }
+        let base = CANOPY_BASE * self.height;
+        if up < base {
+            d <= TRUNK_RADIUS_M
+        } else {
+            d <= self.radius * (self.height - up) / (self.height - base)
+        }
+    }
+}
+
 /// How a shot on a hole stops before dimple brings it to rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
@@ -99,17 +137,46 @@ pub enum Stop {
     Cup,
     /// The ball reached a pond's water.
     Water,
+    /// The ball hit a tree and dropped to the ground under it.
+    Tree,
 }
 
 /// The end of a shot cut short by [`Hole::stop`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Cut {
     /// Why the shot stops.
     pub stop: Stop,
-    /// Shot time at which the ball stops (s).
-    pub time: f64,
-    /// Where the ball stops, dimple's frame (its center).
-    pub pos: Vec3,
+    /// The ball from the moment its travel is cut to where it rests, in
+    /// dimple's frame (its center): the first point is the cut, the last
+    /// the rest, with zero velocity. One point when the ball rests where it
+    /// is cut.
+    pub path: Vec<TrajectoryPoint>,
+}
+
+impl Cut {
+    /// A cut where the ball rests at `pos` from shot time `time`.
+    fn at(stop: Stop, time: f64, pos: Vec3) -> Self {
+        Self {
+            stop,
+            path: vec![TrajectoryPoint {
+                time,
+                pos,
+                vel: Vec3::ZERO,
+            }],
+        }
+    }
+
+    /// Shot time at which the ball's travel is cut (s).
+    #[must_use]
+    pub fn time(&self) -> f64 {
+        self.path.first().map_or(0.0, |p| p.time)
+    }
+
+    /// Where the ball rests, dimple's frame (its center).
+    #[must_use]
+    pub fn rest(&self) -> Vec3 {
+        self.path.last().map_or(Vec3::ZERO, |p| p.pos)
+    }
 }
 
 /// The raised pad the green sits on.
@@ -139,6 +206,7 @@ pub struct Hole {
     pub fairway: Vec<(f64, f64)>,
     pub bunkers: Vec<Bunker>,
     pub ponds: Vec<Pond>,
+    pub trees: Vec<Tree>,
     /// The green: a circle on the target line.
     pub green: GreenConfig,
     pub green_pad: GreenPad,
@@ -210,6 +278,14 @@ fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Seed of [`Hole::no_1`]'s tree rows.
+pub const TREE_SEED: u32 = 0x5EED_2870;
+/// Spacing of the trees down each row (m).
+pub const TREE_ROW_SPACING_M: f64 = 13.0;
+/// Room left between a tree's canopy and the fairway, bunkers, ponds and
+/// green (m).
+pub const TREE_CLEARANCE_M: f64 = 2.0;
+
 /// Step for the central differences of [`Hole::normal`] (m).
 const NORMAL_EPS: f64 = 1e-3;
 
@@ -234,7 +310,7 @@ impl Hole {
             depth,
             bank,
         };
-        Self {
+        let mut hole = Self {
             profile: vec![(5.0, 0.0), (110.0, -9.5), (205.0, -10.5), (240.0, -11.0)],
             fairway: vec![
                 (105.0, 0.0),
@@ -252,6 +328,7 @@ impl Hole {
                 bunker(9.0, 292.0, 7.0, 4.5, 0.7),
             ],
             ponds: vec![pond(31.0, 176.0, 8.0, 24.0, 1.5, 5.0)],
+            trees: Vec::new(),
             green: GreenConfig {
                 distance_m: 274.32,
                 diameter_m: 26.0,
@@ -263,7 +340,63 @@ impl Hole {
                 shoulder: 18.0,
             },
             cup: (0.0, 274.32),
+        };
+        hole.trees = hole.tree_rows(TREE_SEED);
+        hole
+    }
+
+    /// Two rows of trees in the rough, one down each side of the hole: a
+    /// tree every [`TREE_ROW_SPACING_M`] from 20 m to 330 m downrange, 29
+    /// to 35 m off the line, 10 to 18 m tall with a canopy radius of 0.28 ×
+    /// its height, each drawn from the xorshift sequence of `seed`. A tree
+    /// is left out where its canopy, widened by [`TREE_CLEARANCE_M`], would
+    /// reach the fairway, a bunker, a pond's bank or the green's collar.
+    #[must_use]
+    pub fn tree_rows(&self, seed: u32) -> Vec<Tree> {
+        let mut state = seed.max(1);
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            f64::from(state) / f64::from(u32::MAX)
+        };
+        let mut trees = Vec::new();
+        for side in [1.0, -1.0] {
+            let mut z = 20.0;
+            while z <= 330.0 {
+                let height = 10.0 + 8.0 * next();
+                let tree = Tree {
+                    x: side * (29.0 + 6.0 * next()),
+                    z: z + 4.0 * (next() - 0.5),
+                    height,
+                    radius: 0.28 * height,
+                };
+                if self.tree_is_clear(&tree) {
+                    trees.push(tree);
+                }
+                z += TREE_ROW_SPACING_M;
+            }
         }
+        trees
+    }
+
+    /// Whether `tree`'s canopy, widened by [`TREE_CLEARANCE_M`], stays in
+    /// the rough, off every pond's bank and outside the green's collar.
+    fn tree_is_clear(&self, tree: &Tree) -> bool {
+        let reach = tree.radius + TREE_CLEARANCE_M;
+        let (gx, gz) = self.green_center();
+        let collar = f64::from(self.green.radius_m()) + self.green_pad.collar;
+        (0..=16).all(|k| {
+            let a = f64::from(k) / 16.0 * std::f64::consts::TAU;
+            let r = if k == 16 { 0.0 } else { reach };
+            let (x, z) = (tree.x + r * a.cos(), tree.z + r * a.sin());
+            self.lie_at(x, z) == Lie::Rough
+                && self
+                    .ponds
+                    .iter()
+                    .all(|p| p.shore_weight(p.rho2(x, z)) == 0.0)
+                && (x - gx).hypot(z - gz) > collar
+        })
     }
 
     /// Profile elevation at downrange distance `z`.
@@ -403,12 +536,52 @@ impl Hole {
         })
     }
 
+    /// Where the ball first enters a tree along `path` (a shot's timeline
+    /// in dimple's frame): the time and the ball's center there, scene
+    /// frame, or `None`. Each segment is checked every
+    /// [`TREE_STEP_M`] against every tree's trunk and canopy.
+    #[must_use]
+    pub fn tree_hit(&self, path: &[TrajectoryPoint]) -> Option<(f64, glam::DVec3)> {
+        let trees: Vec<_> = self
+            .trees
+            .iter()
+            .map(|t| (t, self.height(t.x, t.z)))
+            .collect();
+        path.windows(2).find_map(|pair| {
+            let (a, b) = (&pair[0], &pair[1]);
+            let (pa, pb) = (physics_to_scene(a.pos), physics_to_scene(b.pos));
+            let near: Vec<_> = trees
+                .iter()
+                .filter(|(t, _)| {
+                    let reach = t.radius + pa.distance(pb);
+                    (pa.x - t.x).hypot(pa.z - t.z) <= reach
+                })
+                .collect();
+            if near.is_empty() {
+                return None;
+            }
+            let n = (pa.distance(pb) / TREE_STEP_M).ceil().max(1.0) as u32;
+            (1..=n).find_map(|i| {
+                let f = f64::from(i) / f64::from(n);
+                let p = pa.lerp(pb, f);
+                near.iter()
+                    .any(|(t, ground)| t.contains(p, *ground))
+                    .then_some((a.time + (b.time - a.time) * f, p))
+            })
+        })
+    }
+
     /// Whether and where a shot stops before dimple brings it to rest:
-    /// the first of the ball reaching water ([`water_entry`](Self::water_entry))
-    /// and the ball dropping into the cup ([`holed_at`], at rest in the
-    /// cup's center one ball radius under the surface). `path` is the
-    /// shot's timeline and `points` its ground points, both in dimple's
-    /// frame.
+    /// the first of the ball reaching water ([`water_entry`](Self::water_entry)),
+    /// the ball hitting a tree ([`tree_hit`](Self::tree_hit)) and the ball
+    /// dropping into the cup ([`holed_at`], at rest in the cup's center one
+    /// ball radius under the surface). `path` is the shot's timeline and
+    /// `points` its ground points, both in dimple's frame.
+    ///
+    /// Trees stop the ball and drop it: it loses its travel where it
+    /// enters a trunk or canopy and falls straight down under gravity to
+    /// the ground, where the shot ends. This is a placeholder rule: no
+    /// deflection off branches, no bounce at the foot of the tree.
     #[must_use]
     pub fn stop(
         &self,
@@ -417,25 +590,59 @@ impl Hole {
         ball_radius: f64,
         gravity: f64,
     ) -> Option<Cut> {
-        let water = self.water_entry(path).map(|(time, pos)| Cut {
-            stop: Stop::Water,
-            time,
-            pos,
-        });
+        let water = self
+            .water_entry(path)
+            .map(|(time, pos)| Cut::at(Stop::Water, time, pos));
+        let tree = self
+            .tree_hit(path)
+            .map(|(time, at)| self.drop(time, at, gravity));
         let cup = holed_at(points, self.cup, ball_radius, gravity).map(|time| {
             let (x, z) = self.cup;
-            Cut {
-                stop: Stop::Cup,
-                time,
-                pos: scene_to_physics(glam::DVec3::new(x, self.height(x, z) - ball_radius, z)),
-            }
+            let pos = scene_to_physics(glam::DVec3::new(x, self.height(x, z) - ball_radius, z));
+            Cut::at(Stop::Cup, time, pos)
         });
-        [water, cup]
+        [water, tree, cup]
             .into_iter()
             .flatten()
-            .min_by(|a, b| a.time.total_cmp(&b.time))
+            .min_by(|a, b| a.time().total_cmp(&b.time()))
+    }
+
+    /// The ball falling from the scene point `at` at shot time `time`
+    /// straight down to the ground, [`DROP_POINTS`] points in free fall.
+    fn drop(&self, time: f64, at: glam::DVec3, gravity: f64) -> Cut {
+        let ground = self.height(at.x, at.z);
+        let fall = (2.0 * (at.y - ground).max(0.0) / gravity).sqrt();
+        if fall == 0.0 {
+            return Cut::at(Stop::Tree, time, scene_to_physics(at));
+        }
+        let path = (0..=DROP_POINTS)
+            .map(|i| {
+                let t = fall * f64::from(i) / f64::from(DROP_POINTS);
+                let y = if i == DROP_POINTS {
+                    ground
+                } else {
+                    at.y - 0.5 * gravity * t * t
+                };
+                let speed = if i == DROP_POINTS { 0.0 } else { gravity * t };
+                TrajectoryPoint {
+                    time: time + t,
+                    pos: scene_to_physics(glam::DVec3::new(at.x, y, at.z)),
+                    vel: Vec3::new(0.0, -speed, 0.0),
+                }
+            })
+            .collect();
+        Cut {
+            stop: Stop::Tree,
+            path,
+        }
     }
 }
+
+/// Step along a shot's path at which [`Hole::tree_hit`] looks for trees
+/// (m): under a trunk's diameter.
+pub const TREE_STEP_M: f64 = 0.1;
+/// Points in the fall of a ball that hit a tree, after the hit.
+const DROP_POINTS: u32 = 8;
 
 /// Radius of the cup (m): 4.25 in across.
 pub const CUP_RADIUS_M: f64 = 0.054;

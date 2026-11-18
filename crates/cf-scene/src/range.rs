@@ -88,7 +88,7 @@ impl Range {
     /// green's edge when there is a green, over the reflective floor of the
     /// grid. A hole: the black terrain mesh and the cup's disc as fills;
     /// the draped grid (cyan), the fairway outline (cyan), the bunkers
-    /// (sand), the ponds (water), the green's ring and the cup's rim, pin and flag (white) as
+    /// (sand), the ponds (water), the trees (tree), the green's ring and the cup's rim, pin and flag (white) as
     /// lines; no floor, so no reflections.
     #[must_use]
     pub fn scenery(&self) -> Scenery {
@@ -122,6 +122,11 @@ impl Range {
                     .iter()
                     .flat_map(|p| hole_draw::pond_lines(hole, p))
                     .collect();
+                let trees = hole
+                    .trees
+                    .iter()
+                    .flat_map(|t| hole_draw::tree_lines(hole, t))
+                    .collect();
                 Scenery {
                     fills: vec![
                         layer(color::BACKGROUND, hole_draw::terrain_mesh(hole, &self.grid)),
@@ -132,6 +137,7 @@ impl Range {
                         layer(color::CYAN, hole_draw::fairway_outline(hole)),
                         layer(color::SAND, bunkers),
                         layer(color::WATER, ponds),
+                        layer(color::TREE, trees),
                         layer(color::GREEN_EDGE, hole_draw::green_ring(hole)),
                         layer(color::PIN, hole_draw::cup_and_pin(hole)),
                     ],

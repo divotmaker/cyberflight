@@ -9,7 +9,7 @@ use dimple::units::yards_to_meters;
 use glam::Vec3;
 
 use crate::grid::{GridConfig, GridVertex};
-use crate::hole::{Bunker, CUP_RADIUS_M, Hole, Pond};
+use crate::hole::{Bunker, CANOPY_BASE, CUP_RADIUS_M, Hole, Pond, Tree};
 
 /// How far the terrain mesh lies under the surface (m).
 pub const MESH_DROP_M: f64 = 0.15;
@@ -23,6 +23,10 @@ pub const RIM_SEGMENTS: u32 = 64;
 pub const RING_SEGMENTS: u32 = 96;
 /// Spacing of a bunker's cross-hatch (m).
 const HATCH_SPACING_M: f64 = 2.0;
+/// Sides of a tree canopy's cross-sections.
+pub const CANOPY_SIDES: u32 = 6;
+/// Cross-sections drawn up a tree's canopy, the base included.
+pub const CANOPY_LEVELS: u32 = 3;
 /// Height of the pin (m).
 const PIN_HEIGHT_M: f64 = 2.13;
 /// Segments in the cup's disc and rim.
@@ -206,6 +210,34 @@ pub fn pond_lines(hole: &Hole, p: &Pond) -> Vec<GridVertex> {
     out
 }
 
+/// A tree as a lattice: the trunk from the ground to the canopy's base,
+/// then the canopy as a [`CANOPY_SIDES`]-sided pyramid: its ridges from
+/// the base to the top and [`CANOPY_LEVELS`] cross-sections, the lowest at
+/// the base. Polygons, not circles, so no part reads as a ring on the
+/// ground. Unfaded.
+#[must_use]
+pub fn tree_lines(hole: &Hole, t: &Tree) -> Vec<GridVertex> {
+    let ground = hole.height(t.x, t.z);
+    let base = ground + CANOPY_BASE * t.height;
+    let top = ground + t.height;
+    let corner = |k: u32, y: f64| {
+        let a = f64::from(k) / f64::from(CANOPY_SIDES) * std::f64::consts::TAU;
+        let r = t.radius * (top - y) / (top - base);
+        vertex(t.x + r * a.cos(), y, t.z + r * a.sin(), 0.0)
+    };
+    let mut out = vec![vertex(t.x, ground, t.z, 0.0), vertex(t.x, base, t.z, 0.0)];
+    for k in 0..CANOPY_SIDES {
+        out.push(corner(k, base));
+        out.push(vertex(t.x, top, t.z, 0.0));
+    }
+    for level in 0..CANOPY_LEVELS {
+        let y = base + (top - base) * f64::from(level) / f64::from(CANOPY_LEVELS);
+        let ring: Vec<_> = (0..=CANOPY_SIDES).map(|k| corner(k, y)).collect();
+        polyline(&mut out, &ring);
+    }
+    out
+}
+
 /// The green's edge: one ring of [`RING_SEGMENTS`] segments on the pad,
 /// 1 cm above the surface. Unfaded.
 #[must_use]
@@ -338,6 +370,29 @@ mod tests {
                 let [x, y, z] = v.position.map(f64::from);
                 assert!((y - level - LINE_LIFT_M).abs() < 1e-4);
                 assert!(p.rho2(x, z) < 1.0 + 1e-4, "({x}, {z})");
+            }
+        }
+    }
+
+    #[test]
+    fn tree_lines_stay_inside_the_tree() {
+        let h = hole();
+        for t in &h.trees {
+            let ground = h.height(t.x, t.z);
+            let lines = tree_lines(&h, t);
+            let want = 2 + 2 * CANOPY_SIDES * (1 + CANOPY_LEVELS);
+            assert_eq!(lines.len(), want as usize);
+            let base = CANOPY_BASE * t.height;
+            for v in lines {
+                let [x, y, z] = v.position.map(f64::from);
+                let (d, up) = ((x - t.x).hypot(z - t.z), y - ground);
+                assert!((-1e-3..=t.height + 1e-3).contains(&up), "{t:?}: up {up}");
+                let allowed = if up < base - 1e-3 {
+                    0.0
+                } else {
+                    t.radius * (t.height - up).max(0.0) / (t.height - base)
+                };
+                assert!(d <= allowed + 1e-3, "{t:?}: ({x}, {y}, {z})");
             }
         }
     }

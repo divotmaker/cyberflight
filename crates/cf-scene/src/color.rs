@@ -22,6 +22,11 @@ pub const SAND: Vec4 = Vec4::new(1.0, 0.246, 0.0, 1.0);
 /// darker than the cyan grid, so the water reads as its own surface.
 pub const WATER: Vec4 = Vec4::new(0.030, 0.162, 1.0, 1.0);
 
+/// Tree — dim violet, #9D4DFF as linear RGB at 75% alpha: a hole's
+/// trees. Clear of the green ring's green and the tracer's magenta, and
+/// dimmer than both.
+pub const TREE: Vec4 = Vec4::new(0.337, 0.074, 1.0, 0.75);
+
 /// Pin — white: a hole's cup rim, pin and flag.
 pub const PIN: Vec4 = Vec4::new(1.0, 1.0, 1.0, 1.0);
 

@@ -92,7 +92,8 @@ pub struct AnimatedFlight {
     pub prev_chase: Option<(Camera, f64)>,
     /// The hole the shot is played on; `None` on the driving range.
     pub hole: Option<Hole>,
-    /// How the shot stopped early on the hole (cup or water), if it did.
+    /// How the shot stopped early on the hole (cup, water or tree), if it
+    /// did.
     pub stop: Option<Stop>,
 }
 
@@ -121,7 +122,7 @@ impl AnimatedFlight {
     }
 
     /// Animate a simulated shot on `hole` (`None` on the driving range).
-    /// A shot `cut` short (in the cup or the water) stops there; a ball that
+    /// A shot `cut` short (cup, water, tree) ends as the cut says; a ball that
     /// did not come to rest stops [`MAX_UNSETTLED_GROUND_TIME_S`] after
     /// landing at the latest.
     fn from_result(
@@ -132,9 +133,11 @@ impl AnimatedFlight {
         cut: Option<Cut>,
     ) -> Self {
         let mut timeline = build_timeline(&result);
-        let stop = cut.map(|c| c.stop);
+        let stop = cut.as_ref().map(|c| c.stop);
         if let Some(cut) = cut {
-            end_timeline_at(&mut timeline, cut.time, cut.pos);
+            let time = cut.time();
+            timeline.retain(|p| p.time < time);
+            timeline.extend(cut.path);
         } else if result.ground.termination != Termination::Rest {
             let end = result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
             if let Some(cut) = timeline
@@ -166,7 +169,12 @@ impl AnimatedFlight {
             } else {
                 (h.to_cup(rest.x, rest.z), h.lie_at(rest.x, rest.z).label())
             };
-            format!(", {:.1} yds to pin, {lie}", meters_to_yards(to_pin))
+            let tree = if stop == Some(Stop::Tree) {
+                ", hit a tree"
+            } else {
+                ""
+            };
+            format!(", {:.1} yds to pin, {lie}{tree}", meters_to_yards(to_pin))
         });
         eprintln!(
             "Shot #{} from {}: {:.1} carry + {:.1} rollout = {:.1} total yds, {:.2}s{on_hole}",
@@ -779,6 +787,26 @@ mod tests {
         let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
         assert_eq!(stopped.lie, Some("WATER"));
         assert!(stopped.to_pin_yards > 50.0);
+    }
+
+    #[test]
+    fn a_shot_into_the_trees_drops_and_reads_its_lie() {
+        let range = Range::hole();
+        let f = animate(
+            ShotInput {
+                ball_speed_mph: 140.0,
+                launch_angle_deg: 13.0,
+                launch_azimuth_deg: 9.0,
+                backspin_rpm: 3000.0,
+                sidespin_rpm: 0.0,
+            },
+            &range.ground,
+        );
+        assert_eq!(f.stop, Some(Stop::Tree));
+        assert!(f.timeline.windows(2).all(|p| p[1].time > p[0].time));
+        assert_eq!(f.timeline.last().map(|p| p.pos), Some(f.rest_pos));
+        let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
+        assert_eq!(stopped.lie, Some("ROUGH"));
     }
 
     #[test]
