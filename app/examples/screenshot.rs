@@ -28,6 +28,10 @@
 //!     flight, through the streaming calls, with HUD and chase camera
 //!   - `hole_green.png` — the green, its bank and bunkers and the pin, from
 //!     beside the fairway
+//!   - `hole_hud.png` — the same drive at rest, with the hole's HUD rows
+//!     (`TO PIN`, `LIE`) and the chase camera
+//!   - `hole_holed.png` — a straight drive that drops into the cup, at rest
+//!     (the first holed one scanning 150-185 mph in 0.05 mph steps)
 //!
 //! The hole images are raster (`RtMode::Off`): the hole draws no
 //! reflections.
@@ -401,7 +405,50 @@ fn render_hole() -> Result<()> {
     );
     renderer.update_hud(&hud.lines, &hud.fills);
     let frame = renderer.render(&range.camera).context("render failed")?;
-    save_png(&frame, &out_path("hole_flight.png"))
+    save_png(&frame, &out_path("hole_flight.png"))?;
+
+    eprintln!("Rendering hole_hud...");
+    render_at_rest(&mut renderer, &range, &mut flight, "hole_hud")?;
+
+    eprintln!("Finding a holed drive...");
+    let mut holed = (0..=700)
+        .map(|i| ShotInput {
+            ball_speed_mph: 150.0 + 0.05 * f64::from(i),
+            launch_angle_deg: 11.0,
+            launch_azimuth_deg: 0.0,
+            backspin_rpm: 2500.0,
+            sidespin_rpm: 0.0,
+        })
+        .map(|input| animate(&range, input, 0.0).0)
+        .find(|f| f.holed)
+        .context("no holed drive from 150 to 185 mph")?;
+    eprintln!("Rendering hole_holed...");
+    render_at_rest(&mut renderer, &range, &mut holed, "hole_holed")
+}
+
+/// Render `flight` just after it stopped, with its HUD and chase camera,
+/// as the screenshot `name`.
+fn render_at_rest(
+    renderer: &mut OffscreenRenderer,
+    range: &Range,
+    flight: &mut AnimatedFlight,
+    name: &str,
+) -> Result<()> {
+    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
+    let now = flight.total_time + 0.5;
+    renderer.update_flight(&[render_data(flight, now)?]);
+    renderer.set_chase_camera(Some(chase_camera(flight, now)?));
+    let hud = build_hud(
+        Some(&flight.telemetry(now)),
+        true,
+        &lm,
+        true,
+        WIDTH as f32,
+        HEIGHT as f32,
+    );
+    renderer.update_hud(&hud.lines, &hud.fills);
+    let frame = renderer.render(&range.camera).context("render failed")?;
+    save_png(&frame, &out_path(&format!("{name}.png")))
 }
 
 fn main() -> Result<()> {

@@ -7,9 +7,10 @@ use glam::Vec3;
 
 use cf_render::flight::FlightRenderData;
 use cf_scene::camera::Camera;
-use cf_scene::frame::physics_to_scene;
+use cf_scene::frame::{physics_to_scene, scene_to_physics};
 use cf_scene::ground;
-use cf_scene::hud::{ShotTelemetry, build_hud};
+use cf_scene::hole::{Hole, holed_at};
+use cf_scene::hud::{HoleTelemetry, ShotTelemetry, build_hud};
 use cf_scene::range::Ground;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::trail::{TrailPoint, tracer_tail};
@@ -57,6 +58,17 @@ pub fn build_timeline(result: &ShotResult) -> Vec<TrajectoryPoint> {
     timeline
 }
 
+/// End `timeline` at `end` with the ball stopped at `pos`: points from
+/// `end` on are dropped.
+fn end_timeline_at(timeline: &mut Vec<TrajectoryPoint>, end: f64, pos: dimple::Vec3) {
+    timeline.retain(|p| p.time < end);
+    timeline.push(TrajectoryPoint {
+        time: end,
+        pos,
+        vel: dimple::Vec3::ZERO,
+    });
+}
+
 /// An in-progress or recently completed shot animation.
 pub struct AnimatedFlight {
     pub input: ShotInput,
@@ -78,6 +90,10 @@ pub struct AnimatedFlight {
     pub rolled: bool,
     pub landed: bool,
     pub prev_chase: Option<(Camera, f64)>,
+    /// The hole the shot is played on; `None` on the driving range.
+    pub hole: Option<Hole>,
+    /// Whether the ball dropped into the hole's cup.
+    pub holed: bool,
 }
 
 impl AnimatedFlight {
@@ -92,27 +108,41 @@ impl AnimatedFlight {
         } else {
             ground::simulate_shot(&shot.input, model, ground)
         };
-        Self::from_result(shot, result, launch_time)
+        let hole = ground.hole();
+        let holed = hole.and_then(|h| {
+            let radius = model.radius_m();
+            let time = holed_at(&result.ground.points, h.cup, radius, model.gravity())?;
+            // At rest in the cup: its center, one ball radius under the surface.
+            let (x, z) = h.cup;
+            let pos = scene_to_physics(glam::DVec3::new(x, h.height(x, z) - radius, z));
+            Some((time, pos))
+        });
+        Self::from_result(shot, result, launch_time, hole.cloned(), holed)
     }
 
-    /// Animate a simulated shot. A ball that did not come to rest stops
-    /// [`MAX_UNSETTLED_GROUND_TIME_S`] after landing at the latest.
-    fn from_result(shot: &ReceivedShot, result: ShotResult, launch_time: f64) -> Self {
+    /// Animate a simulated shot on `hole` (`None` on the driving range).
+    /// A ball `holed` (the time and the position in the cup) stops there; a
+    /// ball that did not come to rest stops [`MAX_UNSETTLED_GROUND_TIME_S`]
+    /// after landing at the latest.
+    fn from_result(
+        shot: &ReceivedShot,
+        result: ShotResult,
+        launch_time: f64,
+        hole: Option<Hole>,
+        holed: Option<(f64, dimple::Vec3)>,
+    ) -> Self {
         let mut timeline = build_timeline(&result);
-        if result.ground.termination != Termination::Rest {
+        if let Some((time, pos)) = holed {
+            end_timeline_at(&mut timeline, time, pos);
+        } else if result.ground.termination != Termination::Rest {
             let end = result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
             if let Some(cut) = timeline
                 .last()
                 .filter(|last| last.time > end)
                 .and_then(|_| interpolate_trajectory(&timeline, end))
             {
-                timeline.retain(|p| p.time < end);
                 // The animation stops the ball here.
-                timeline.push(TrajectoryPoint {
-                    time: end,
-                    pos: cut,
-                    vel: dimple::Vec3::ZERO,
-                });
+                end_timeline_at(&mut timeline, end, cut);
             }
             eprintln!(
                 "WARN: shot #{} from {}: ball did not come to rest ({:?}), animation ends at {:.1}s",
@@ -128,8 +158,17 @@ impl AnimatedFlight {
         let carry_yards = meters_to_yards(result.flight.carry_m);
         let total_yards = meters_to_yards(result.total_m);
         let rollout_yards = total_yards - carry_yards;
+        let on_hole = hole.as_ref().map_or_else(String::new, |h| {
+            let rest = physics_to_scene(rest_pos);
+            let (to_pin, lie) = if holed.is_some() {
+                (0.0, "HOLED")
+            } else {
+                (h.to_cup(rest.x, rest.z), h.lie_at(rest.x, rest.z).label())
+            };
+            format!(", {:.1} yds to pin, {lie}", meters_to_yards(to_pin))
+        });
         eprintln!(
-            "Shot #{} from {}: {:.1} carry + {:.1} rollout = {:.1} total yds, {:.2}s",
+            "Shot #{} from {}: {:.1} carry + {:.1} rollout = {:.1} total yds, {:.2}s{on_hole}",
             shot.shot_number, shot.device, carry_yards, rollout_yards, total_yards, total_time,
         );
 
@@ -147,6 +186,8 @@ impl AnimatedFlight {
             rolled: shot.rolled,
             landed: false,
             prev_chase: None,
+            holed: holed.is_some(),
+            hole,
         }
     }
 
@@ -200,6 +241,25 @@ impl AnimatedFlight {
             lateral_yards: dimple::units::meters_to_yards(pos.z),
             flight_time_s: self.result.flight.flight_time,
             elapsed_s: t_clamped,
+            hole: self.hole.as_ref().map(|h| {
+                let stopped = shot_t >= self.total_time;
+                let at = physics_to_scene(pos);
+                let to_pin = if stopped && self.holed {
+                    0.0
+                } else {
+                    h.to_cup(at.x, at.z)
+                };
+                HoleTelemetry {
+                    to_pin_yards: meters_to_yards(to_pin),
+                    lie: stopped.then(|| {
+                        if self.holed {
+                            "HOLED"
+                        } else {
+                            h.lie_at(at.x, at.z).label()
+                        }
+                    }),
+                }
+            }),
         }
     }
 
@@ -639,6 +699,60 @@ mod tests {
         assert!(f.total_time > r.flight.flight_time + 1.0, "ball runs out");
     }
 
+    /// The first straight drive (11°, 2500 rpm) from 160 to 163 mph in
+    /// 0.05 mph steps that drops into the hole's cup.
+    fn holed_drive(ground: &Ground) -> AnimatedFlight {
+        (0..=60)
+            .map(|i| ShotInput {
+                ball_speed_mph: 160.0 + 0.05 * f64::from(i),
+                launch_angle_deg: 11.0,
+                launch_azimuth_deg: 0.0,
+                backspin_rpm: 2500.0,
+                sidespin_rpm: 0.0,
+            })
+            .map(|input| animate(input, ground))
+            .find(|f| f.holed)
+            .expect("a holed drive")
+    }
+
+    #[test]
+    fn a_holed_shot_ends_in_the_cup() {
+        let range = Range::hole();
+        let hole = range.ground.hole().expect("a hole").clone();
+        let f = holed_drive(&range.ground);
+        let last = f.timeline.last().expect("timeline");
+        assert_eq!(last.time, f.total_time);
+        assert!(f.total_time < f.result.ground.rest.time);
+        let at = physics_to_scene(last.pos);
+        assert!(hole.to_cup(at.x, at.z) < 1e-9);
+        assert!(at.y < hole.height(at.x, at.z));
+
+        let moving = f
+            .telemetry(f.result.flight.flight_time + 0.5)
+            .hole
+            .expect("hole rows");
+        assert_eq!(moving.lie, None);
+        assert!(moving.to_pin_yards > 0.0);
+        let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
+        assert_eq!(stopped.lie, Some("HOLED"));
+        assert_eq!(stopped.to_pin_yards, 0.0);
+    }
+
+    #[test]
+    fn a_shot_that_misses_reads_its_lie() {
+        let range = Range::hole();
+        let f = animate(ShotInput::wedge(), &range.ground);
+        assert!(!f.holed);
+        let stopped = f.telemetry(f.total_time + 0.1).hole.expect("hole rows");
+        assert_eq!(stopped.lie, Some("FAIRWAY"));
+        assert!(
+            animate(ShotInput::wedge(), &FLAT)
+                .telemetry(0.0)
+                .hole
+                .is_none()
+        );
+    }
+
     #[test]
     fn unsettled_ball_stops_animating() {
         let input = ShotInput::driver();
@@ -654,7 +768,7 @@ mod tests {
         result.ground.rest.pos = late.pos;
         result.total_m = late.pos.x.hypot(late.pos.z);
 
-        let f = AnimatedFlight::from_result(&received(input), result, 0.0);
+        let f = AnimatedFlight::from_result(&received(input), result, 0.0, None, None);
         let end = f.result.flight.flight_time + MAX_UNSETTLED_GROUND_TIME_S;
         // The log reports the distance the HUD shows, not dimple's.
         let shown = f.telemetry(end + 1.0).total_yards;

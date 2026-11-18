@@ -9,7 +9,7 @@ use dimple::units::yards_to_meters;
 use glam::Vec3;
 
 use crate::grid::{GridConfig, GridVertex};
-use crate::hole::{Bunker, Hole};
+use crate::hole::{Bunker, CUP_RADIUS_M, Hole};
 
 /// How far the terrain mesh lies under the surface (m).
 pub const MESH_DROP_M: f64 = 0.15;
@@ -23,8 +23,6 @@ pub const RIM_SEGMENTS: u32 = 64;
 pub const RING_SEGMENTS: u32 = 96;
 /// Spacing of a bunker's cross-hatch (m).
 const HATCH_SPACING_M: f64 = 2.0;
-/// Radius of the cup (m).
-pub const CUP_RADIUS_M: f64 = 0.054;
 /// Height of the pin (m).
 const PIN_HEIGHT_M: f64 = 2.13;
 /// Segments in the cup's disc and rim.

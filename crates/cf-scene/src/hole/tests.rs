@@ -1,5 +1,5 @@
 use dimple::Tour;
-use dimple::ground::Termination;
+use dimple::ground::{GroundPoint, Termination};
 use dimple::trajectory::{ShotInput, ShotResult};
 use glam::DVec3;
 
@@ -296,4 +296,83 @@ fn a_topped_shot_stops_on_the_hill() {
     assert_eq!(rest, Lie::Rough);
     assert!((5.0..110.0).contains(&at.z), "z {:.1}", at.z);
     assert!(at.y < 0.0, "below the tee: y {:.2}", at.y);
+}
+
+const BALL_R: f64 = 0.021_335;
+const G: f64 = 9.81;
+
+/// A ground point at scene (x, z) moving downrange at `v` m/s.
+fn gp(time: f64, x: f64, z: f64, v: f64, phase: dimple::ground::Phase) -> GroundPoint {
+    let state = dimple::BallState {
+        time,
+        pos: scene_to_physics(DVec3::new(x, 0.0, z)),
+        vel: Vec3::new(v, 0.0, 0.0),
+        spin: Vec3::ZERO,
+    };
+    GroundPoint::new(&state, phase)
+}
+
+/// A straight roll at `v` m/s across the cup at (0, 10), `off` m to the
+/// side, from 0.5 m short to 0.5 m past, in `phase`.
+fn across(off: f64, v: f64, phase: dimple::ground::Phase) -> Option<f64> {
+    let points = [gp(1.0, off, 9.5, v, phase), gp(2.0, off, 10.5, v, phase)];
+    holed_at(&points, (0.0, 10.0), BALL_R, G)
+}
+
+#[test]
+fn the_cup_takes_a_slow_enough_ball() {
+    use dimple::ground::Phase::{Hop, Roll, Slide};
+    let t = across(0.0, 1.2, Roll).expect("holed through the center");
+    assert!((t - 1.5).abs() < 1e-9, "at the crossing: {t}");
+    assert_eq!(across(0.0, 1.4, Roll), None);
+    assert!(across(0.04, 0.7, Slide).is_some());
+    assert_eq!(across(0.04, 0.9, Roll), None);
+    assert_eq!(across(0.06, 0.1, Roll), None);
+    assert_eq!(across(0.0, 0.5, Hop), None);
+    // A ball that stops inside the cup's radius.
+    let stops = [gp(1.0, 0.0, 9.9, 0.2, Roll), gp(2.0, 0.03, 10.0, 0.0, Roll)];
+    assert!(holed_at(&stops, (0.0, 10.0), BALL_R, G).is_some());
+}
+
+/// A ball started at `v` m/s with no spin (it slides, then rolls) from 1 m
+/// short of the cup on the green.
+fn roll_at_the_cup(v: f64) -> (Hole, ShotResult) {
+    let h = hole();
+    let (cx, cz) = h.cup;
+    let z = cz - 1.0;
+    let start = dimple::BallState {
+        time: 0.0,
+        pos: scene_to_physics(DVec3::new(cx, h.height(cx, z) - 1e-6, z)),
+        vel: Vec3::new(v, 0.0, 0.0),
+        spin: Vec3::ZERO,
+    };
+    let physics = dimple::ground::GroundPhysics::new(HoleTerrain(&h));
+    let r = dimple::trajectory::simulate_shot_from(&start, &Tour::SEA_LEVEL, &physics);
+    (h, r)
+}
+
+fn holed(h: &Hole, r: &ShotResult) -> Option<f64> {
+    use dimple::AeroModel;
+    let model = Tour::SEA_LEVEL;
+    holed_at(&r.ground.points, h.cup, model.radius_m(), model.gravity())
+}
+
+#[test]
+fn a_roll_at_the_cup_drops() {
+    let (h, r) = roll_at_the_cup(2.0);
+    assert!(holed(&h, &r).is_some());
+}
+
+#[test]
+fn a_fast_roll_runs_over_the_cup() {
+    let (h, r) = roll_at_the_cup(3.0);
+    assert_eq!(holed(&h, &r), None);
+    assert!(physics_to_scene(r.ground.rest.pos).z > h.cup.1);
+}
+
+#[test]
+fn a_slow_roll_stops_short() {
+    let (h, r) = roll_at_the_cup(1.3);
+    assert_eq!(holed(&h, &r), None);
+    assert!(physics_to_scene(r.ground.rest.pos).z < h.cup.1);
 }

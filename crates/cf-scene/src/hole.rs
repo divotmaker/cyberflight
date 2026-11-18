@@ -12,7 +12,7 @@
 //! bunker, so heights and normals are continuous.
 
 use dimple::Vec3;
-use dimple::ground::{GroundSample, Restitution, Surface, Terrain};
+use dimple::ground::{GroundPoint, GroundSample, Phase, Restitution, Surface, Terrain};
 
 use crate::frame::{physics_to_scene, scene_to_physics};
 use crate::green::GreenConfig;
@@ -270,6 +270,53 @@ impl Hole {
     pub fn to_cup(&self, x: f64, z: f64) -> f64 {
         (x - self.cup.0).hypot(z - self.cup.1)
     }
+}
+
+/// Radius of the cup (m): 4.25 in across.
+pub const CUP_RADIUS_M: f64 = 0.054;
+
+/// When the ball drops into the cup at scene (x, z) `cup`: the shot time,
+/// or `None`.
+///
+/// `points` are dimple's ground points (its frame). Each segment the ball
+/// slides or rolls along (never a hop) is checked at its closest approach
+/// `d` to the cup's center, with the ball's horizontal speed `v` there. The
+/// ball drops if `d < R` and `v ≤ (2·√(R² − d²) − r)·√(g / 2r)`, with `R`
+/// the cup's radius and `r` = `ball_radius`: it falls its own radius before
+/// it has crossed the chord of the cup under it. A ball that flies or hops
+/// over the cup, lips out or is deflected is not modeled.
+#[must_use]
+pub fn holed_at(
+    points: &[GroundPoint],
+    cup: (f64, f64),
+    ball_radius: f64,
+    gravity: f64,
+) -> Option<f64> {
+    let r_cup = CUP_RADIUS_M;
+    let fall = (gravity / (2.0 * ball_radius)).sqrt();
+    points.windows(2).find_map(|pair| {
+        let (a, b) = (&pair[0], &pair[1]);
+        if a.phase == Phase::Hop {
+            return None;
+        }
+        let (pa, pb) = (physics_to_scene(a.pos), physics_to_scene(b.pos));
+        let (ax, az) = (pa.x - cup.0, pa.z - cup.1);
+        let (sx, sz) = (pb.x - pa.x, pb.z - pa.z);
+        let len2 = sx * sx + sz * sz;
+        let t = if len2 > 0.0 {
+            (-(ax * sx + az * sz) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let d = (ax + t * sx).hypot(az + t * sz);
+        if d >= r_cup {
+            return None;
+        }
+        let speed = |p: &GroundPoint| p.vel.x.hypot(p.vel.z);
+        let v = speed(a) + (speed(b) - speed(a)) * t;
+        let limit = (2.0 * (r_cup * r_cup - d * d).sqrt() - ball_radius) * fall;
+        (v <= limit).then_some(a.time + (b.time - a.time) * t)
+    })
 }
 
 /// A [`Hole`] as a dimple [`Terrain`]: each sample maps dimple's (x, z) to

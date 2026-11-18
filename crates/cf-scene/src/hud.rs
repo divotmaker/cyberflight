@@ -45,6 +45,19 @@ pub struct ShotTelemetry {
     pub flight_time_s: f64,
     /// Time since launch, counting until the ball comes to rest.
     pub elapsed_s: f64,
+    /// On a hole: distance to the pin and the lie; `None` on the driving
+    /// range.
+    pub hole: Option<HoleTelemetry>,
+}
+
+/// The telemetry a shot on a hole adds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoleTelemetry {
+    /// Live horizontal distance from the ball to the cup; 0 once holed.
+    pub to_pin_yards: f64,
+    /// The lie once the ball has stopped (`FAIRWAY`, `ROUGH`, `SAND`,
+    /// `GREEN` or `HOLED`); `None` while it moves.
+    pub lie: Option<&'static str>,
 }
 
 /// Pre-built HUD geometry for one frame.
@@ -183,6 +196,12 @@ fn telemetry_rows(t: &ShotTelemetry) -> Vec<HudRow> {
         Value("DOWNRANGE", fmt_dist(t.downrange_yards)),
         Value("LATERAL", fmt_lateral(t.lateral_yards)),
     ]);
+    if let Some(hole) = &t.hole {
+        rows.extend([
+            Value("TO PIN", fmt_dist(hole.to_pin_yards)),
+            Value("LIE", hole.lie.unwrap_or("-").to_owned()),
+        ]);
+    }
     rows
 }
 
@@ -441,7 +460,38 @@ mod tests {
             lateral_yards: -4.6,
             flight_time_s: 5.8,
             elapsed_s: 3.2,
+            hole: None,
         }
+    }
+
+    #[test]
+    fn the_hole_rows_appear_only_on_a_hole() {
+        let has = |rows: &[HudRow], label: &str| {
+            rows.iter()
+                .any(|r| matches!(r, HudRow::Value(l, _) if *l == label))
+        };
+        let range = telemetry_rows(&sample());
+        assert!(!has(&range, "TO PIN") && !has(&range, "LIE"));
+        let moving = ShotTelemetry {
+            hole: Some(HoleTelemetry {
+                to_pin_yards: 42.04,
+                lie: None,
+            }),
+            ..sample()
+        };
+        let rows = telemetry_rows(&moving);
+        assert_eq!(value(&rows, "RESULT", "TO PIN"), "42.0 YDS");
+        assert_eq!(value(&rows, "RESULT", "LIE"), "-");
+        let holed = ShotTelemetry {
+            hole: Some(HoleTelemetry {
+                to_pin_yards: 0.0,
+                lie: Some("HOLED"),
+            }),
+            ..sample()
+        };
+        let rows = telemetry_rows(&holed);
+        assert_eq!(value(&rows, "RESULT", "TO PIN"), "0.0 YDS");
+        assert_eq!(value(&rows, "RESULT", "LIE"), "HOLED");
     }
 
     /// The value shown for `label` in `section`.
