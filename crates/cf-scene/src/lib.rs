@@ -8,6 +8,7 @@ pub mod hole;
 pub mod hud;
 pub mod hud_font;
 pub mod range;
+pub mod scenery;
 pub mod shot;
 pub mod tee;
 pub mod trail;

@@ -143,11 +143,8 @@ impl App {
             size.height,
         )
         .context("failed to create swapchain")?;
-        let mut renderer =
-            Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
-        renderer
-            .set_green(self.range.ground.flat_green().as_ref())
-            .context("failed to upload the green")?;
+        let renderer = Renderer::new(gpu, swapchain, &self.range.scenery())
+            .context("failed to create renderer")?;
         eprintln!(
             "Renderer initialized: {}x{}",
             renderer.extent().width,

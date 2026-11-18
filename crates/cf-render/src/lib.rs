@@ -6,7 +6,6 @@ pub mod flight;
 mod frame;
 mod framebuffer;
 mod gpu;
-mod green;
 mod mirror;
 pub mod mode;
 pub mod offscreen;

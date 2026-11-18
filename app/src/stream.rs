@@ -96,11 +96,8 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
     // Create headless renderer, ray-traced when the GPU supports it.
     eprintln!("Initializing headless Vulkan renderer...");
     let mut renderer =
-        OffscreenRenderer::new(config.width, config.height, &range.grid, RtMode::Auto)
+        OffscreenRenderer::new(config.width, config.height, &range.scenery(), RtMode::Auto)
             .context("failed to create offscreen renderer")?;
-    renderer
-        .set_green(range.ground.flat_green().as_ref())
-        .context("failed to upload the green")?;
 
     // Start ffmpeg encoder.
     let mut encoder =

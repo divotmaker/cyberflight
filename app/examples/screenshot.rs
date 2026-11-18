@@ -224,7 +224,7 @@ fn range_shots(data: &FlightRenderData) -> (Vec<Shot>, Vec<Shot>) {
 /// tracing and the renderer does not ray-trace.
 fn render_shot(range: &Range, flight: &AnimatedFlight, now: f64, shot: &Shot) -> Result<bool> {
     eprintln!("Rendering {}...", shot.name);
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, shot.rt)
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), shot.rt)
         .context("failed to create renderer")?;
     if shot.rt == RtMode::Auto && renderer.render_mode() != RenderMode::RayTraced {
         return Ok(false);
@@ -232,9 +232,6 @@ fn render_shot(range: &Range, flight: &AnimatedFlight, now: f64, shot: &Shot) ->
     if shot.flight {
         renderer.update_flight(&[render_data(flight, now)?]);
     }
-    renderer
-        .set_green(range.ground.flat_green().as_ref())
-        .context("failed to upload the green")?;
     if shot.hud {
         let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
         let hud = build_hud(
@@ -280,12 +277,9 @@ fn render_hero(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result<(
     );
 
     // Reflections, main camera at the tee box, chase camera on the right 20%
-    let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.grid, RtMode::Auto)
+    let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.scenery(), RtMode::Auto)
         .context("failed to create hero renderer")?;
     renderer.update_flight(&[render_data(flight, now)?]);
-    renderer
-        .set_green(range.ground.flat_green().as_ref())
-        .context("failed to upload the green")?;
 
     renderer.set_chase_camera(Some(chase));
     renderer.update_hud(&hud.lines, &hud.fills);
@@ -319,11 +313,8 @@ fn render_stream(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result
     let camera = Camera::driving_range();
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
 
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Auto)
         .context("failed to create stream renderer")?;
-    renderer
-        .set_green(range.ground.flat_green().as_ref())
-        .context("failed to upload the green")?;
 
     renderer.update_flight(&[render_data(flight, now)?]);
     renderer.set_chase_camera(Some(chase_camera(flight, now)?));

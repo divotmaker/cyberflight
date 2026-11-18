@@ -3,8 +3,8 @@ use std::mem::ManuallyDrop;
 use ash::vk;
 
 use cf_scene::camera::Camera;
-use cf_scene::green::GreenConfig;
-use cf_scene::grid::{GridConfig, GridVertex};
+use cf_scene::grid::GridVertex;
+use cf_scene::scenery::Scenery;
 
 use crate::context::{GpuConfig, GpuContext};
 use crate::error::RenderError;
@@ -36,17 +36,17 @@ const FRAMES_IN_FLIGHT: usize = 1;
 const FRAME: usize = 0;
 
 impl OffscreenRenderer {
-    /// Create a `width` × `height` renderer of the range `grid_config`, with
+    /// Create a `width` × `height` renderer of a range's `scenery`, with
     /// the ball on the tee and no HUD.
     ///
     /// `RtMode::Off` creates the device without ray tracing; `Auto` requests
     /// it and ray-traces floor reflections when the GPU supports them and
     /// they set up (otherwise it mirrors them across the floor and says so on
-    /// stderr).
+    /// stderr). Scenery without a floor draws no reflections.
     pub fn new(
         width: u32,
         height: u32,
-        grid_config: &GridConfig,
+        scenery: &Scenery,
         rt: RtMode,
     ) -> Result<Self, RenderError> {
         let config = GpuConfig {
@@ -61,7 +61,7 @@ impl OffscreenRenderer {
             OFFSCREEN_FORMAT,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             vk::Extent2D { width, height },
-            grid_config,
+            scenery,
             rt,
             FRAMES_IN_FLIGHT,
         )?;
@@ -136,13 +136,6 @@ impl OffscreenRenderer {
     /// [`render_mode`](Self::render_mode) for the result.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
         self.recorder.set_mode(mode);
-    }
-
-    /// Draw the edge of `green` as one ring on the range floor, faded like
-    /// the renderer's grid; `None` draws nothing. Replaces any green set
-    /// before.
-    pub fn set_green(&mut self, green: Option<&GreenConfig>) -> Result<(), RenderError> {
-        self.recorder.set_green(&mut self.gpu, green)
     }
 
     /// Set or clear the chase camera for the right 20% split viewport.

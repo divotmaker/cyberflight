@@ -1,12 +1,12 @@
-//! The static scene both renderers draw: grid, optional green edge, tee box
-//! and the ball on the tee, followed by the frame's flights.
+//! The static scene both renderers draw: the range's scenery layers, the
+//! tee box and the ball on the tee, followed by the frame's flights.
 
 use ash::vk;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::color;
-use cf_scene::green::GreenConfig;
-use cf_scene::grid::{GridConfig, GridVertex, generate_grid_vertices};
+use cf_scene::grid::GridVertex;
+use cf_scene::scenery::{Layer, Scenery};
 use cf_scene::tee::{
     TeeBox, generate_ball, generate_ball_glow, generate_tee_border, generate_tee_fill,
 };
@@ -14,13 +14,101 @@ use cf_scene::tee::{
 use crate::error::RenderError;
 use crate::frame::FrameResources;
 use crate::gpu::{HostBuffer, push_constants};
-use crate::green::GreenEdge;
 use crate::pipeline::{GridPushConstants, ScenePipelines};
+
+/// One kind of scenery layer (fills or lines) in one vertex buffer: each
+/// layer's color, first vertex and vertex count.
+struct LayerSet {
+    /// `None` when every layer of the set is empty.
+    buffer: Option<HostBuffer>,
+    draws: Vec<([f32; 4], u32, u32)>,
+}
+
+impl LayerSet {
+    /// Upload `layers` into one buffer, skipping empty ones.
+    fn new(
+        device: &ash::Device,
+        allocator: &mut Allocator,
+        layers: &[Layer],
+        name: &'static str,
+    ) -> Result<Self, RenderError> {
+        let mut verts: Vec<GridVertex> = Vec::new();
+        let mut draws = Vec::new();
+        for layer in layers.iter().filter(|l| !l.vertices.is_empty()) {
+            draws.push((
+                layer.color.into(),
+                verts.len() as u32,
+                layer.vertices.len() as u32,
+            ));
+            verts.extend_from_slice(&layer.vertices);
+        }
+        let buffer = if verts.is_empty() {
+            None
+        } else {
+            Some(HostBuffer::with_data(
+                device,
+                allocator,
+                &verts,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                name,
+            )?)
+        };
+        Ok(Self { buffer, draws })
+    }
+
+    /// Draw every layer with `pipeline`, each in its color.
+    ///
+    /// # Safety
+    /// Inside a scene pass of `pipes`, with viewport and scissor set.
+    unsafe fn draw(
+        &self,
+        device: &ash::Device,
+        cb: vk::CommandBuffer,
+        pipes: &ScenePipelines,
+        pipeline: vk::Pipeline,
+        view_proj: [[f32; 4]; 4],
+    ) {
+        let Some(buffer) = &self.buffer else {
+            return;
+        };
+        let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
+        // SAFETY: The caller guarantees an active scene pass of `pipes`; the
+        // buffer lives until `destroy`, and the push constants match the layout.
+        unsafe {
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            if pipeline == pipes.line {
+                device.cmd_set_line_width(cb, 1.0);
+            }
+            device.cmd_bind_vertex_buffers(cb, 0, &[buffer.handle()], &[0]);
+            for &(color, first, count) in &self.draws {
+                push_constants(
+                    device,
+                    cb,
+                    pipes.layout,
+                    stages,
+                    &GridPushConstants { view_proj, color },
+                );
+                device.cmd_draw(cb, count, 1, first, 0);
+            }
+        }
+    }
+
+    /// Free the buffer.
+    ///
+    /// # Safety
+    /// No pending GPU work uses it.
+    unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
+        if let Some(buffer) = self.buffer {
+            // SAFETY: The caller guarantees nothing uses the buffer.
+            unsafe { buffer.destroy(device, allocator) };
+        }
+    }
+}
 
 /// Uploaded static scene geometry.
 pub(crate) struct SceneGeometry {
-    grid: HostBuffer,
-    grid_count: u32,
+    fills: LayerSet,
+    lines: LayerSet,
     /// Tee fill, tee border and ball, in that order.
     tee: HostBuffer,
     tee_fill_count: u32,
@@ -28,27 +116,24 @@ pub(crate) struct SceneGeometry {
     tee_ball_count: u32,
     tee_glow: HostBuffer,
     tee_glow_count: u32,
-    /// `None` when there is no green.
-    green_edge: Option<GreenEdge>,
     /// Width of every trail core line: 2 px where wide lines work, else 1 px.
     trail_line_width: f32,
 }
 
 impl SceneGeometry {
-    /// Upload the grid of `grid`, the tee box of `tee` and the ball on the
-    /// tee. No green. Trail cores are drawn 2 px wide when `wide_lines` is
-    /// enabled on the device.
+    /// Upload the layers of `scenery`, the tee box of `tee` and the ball on
+    /// the tee. Trail cores are drawn 2 px wide when `wide_lines` is enabled
+    /// on the device.
     ///
     /// # Errors
     /// An upload fails; what was uploaded is freed first.
     pub(crate) fn new(
         device: &ash::Device,
         allocator: &mut Allocator,
-        grid: &GridConfig,
+        scenery: &Scenery,
         tee: &TeeBox,
         wide_lines: bool,
     ) -> Result<Self, RenderError> {
-        let grid_verts = generate_grid_vertices(grid);
         let tee_fill = generate_tee_fill(tee);
         let tee_border = generate_tee_border(tee);
         let ball = generate_ball(tee, 12, 24);
@@ -60,54 +145,44 @@ impl SceneGeometry {
         tee_verts.extend(tee_border);
         tee_verts.extend(ball);
 
-        let [grid_buffer, tee_buffer, glow_buffer] = upload_all(
+        let fills = LayerSet::new(device, allocator, &scenery.fills, "scenery fills")?;
+        let lines = match LayerSet::new(device, allocator, &scenery.lines, "scenery lines") {
+            Ok(lines) => lines,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used it.
+                unsafe { fills.destroy(device, allocator) };
+                return Err(e);
+            }
+        };
+        let [tee_buffer, glow_buffer] = match upload_all(
             device,
             allocator,
-            [
-                (&grid_verts, "grid"),
-                (&tee_verts, "tee and ball"),
-                (&glow, "ball glow"),
-            ],
-        )?;
+            [(&tee_verts, "tee and ball"), (&glow, "ball glow")],
+        ) {
+            Ok(buffers) => buffers,
+            Err(e) => {
+                // SAFETY: Just created; no GPU work has used them.
+                unsafe {
+                    fills.destroy(device, allocator);
+                    lines.destroy(device, allocator);
+                }
+                return Err(e);
+            }
+        };
         Ok(Self {
-            grid: grid_buffer,
-            grid_count: grid_verts.len() as u32,
+            fills,
+            lines,
             tee: tee_buffer,
             tee_fill_count,
             tee_border_count,
             tee_ball_count,
             tee_glow: glow_buffer,
             tee_glow_count: glow.len() as u32,
-            green_edge: None,
             trail_line_width: if wide_lines { 2.0 } else { 1.0 },
         })
     }
 
-    /// Draw the edge of `green` as one ring on the range floor, faded like
-    /// `grid`; `None` draws nothing. Replaces any green set before, waiting
-    /// for the device to go idle before it frees the old edge.
-    ///
-    /// # Errors
-    /// The wait or the upload fails.
-    pub(crate) fn set_green(
-        &mut self,
-        device: &ash::Device,
-        allocator: &mut Allocator,
-        green: Option<&GreenConfig>,
-        grid: &GridConfig,
-    ) -> Result<(), RenderError> {
-        if let Some(old) = self.green_edge.take() {
-            // SAFETY: Waiting idle so the old edge buffer is unused.
-            unsafe {
-                device.device_wait_idle().map_err(RenderError::Vulkan)?;
-                old.destroy(device, allocator);
-            }
-        }
-        self.green_edge = GreenEdge::new(device, allocator, green, grid)?;
-        Ok(())
-    }
-
-    /// Draw the scene: grid, green edge, tee box; then, with the ball on
+    /// Draw the scene: scenery fills, scenery lines, tee box; then, with the ball on
     /// the tee, its glow and the ball; then `frame`'s flights.
     ///
     /// # Safety
@@ -137,17 +212,10 @@ impl SceneGeometry {
         // SAFETY: The caller guarantees an active scene pass of `pipes`; the
         // buffers live until `destroy`, and the push constants match the layout.
         unsafe {
-            // Grid lines (LINE_LIST, cyan, 1 px)
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.line);
-            device.cmd_set_line_width(cb, 1.0);
-            push_constants(device, cb, pipes.layout, stages, &pc_cyan);
-            device.cmd_bind_vertex_buffers(cb, 0, &[self.grid.handle()], &[0]);
-            device.cmd_draw(cb, self.grid_count, 1, 0, 0);
-
-            // Green edge (LINE_LIST, neon green, 1 px)
-            if let Some(edge) = &self.green_edge {
-                edge.record(device, cb, pipes, view_proj);
-            }
+            // Scenery: fills (TRIANGLE_LIST, depth write), then lines
+            // (LINE_LIST, 1 px), each layer in its color.
+            self.fills.draw(device, cb, pipes, pipes.fill, view_proj);
+            self.lines.draw(device, cb, pipes, pipes.line, view_proj);
 
             // Tee box fill (black quad — masks grid lines under the tee box)
             device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipes.fill);
@@ -185,7 +253,7 @@ impl SceneGeometry {
         }
     }
 
-    /// Free every buffer, including the green edge.
+    /// Free every buffer.
     ///
     /// # Safety
     /// No pending GPU work uses them; `device` and `allocator` are the ones
@@ -193,12 +261,10 @@ impl SceneGeometry {
     pub(crate) unsafe fn destroy(self, device: &ash::Device, allocator: &mut Allocator) {
         // SAFETY: The caller guarantees nothing uses the buffers.
         unsafe {
-            if let Some(edge) = self.green_edge {
-                edge.destroy(device, allocator);
-            }
             self.tee_glow.destroy(device, allocator);
             self.tee.destroy(device, allocator);
-            self.grid.destroy(device, allocator);
+            self.lines.destroy(device, allocator);
+            self.fills.destroy(device, allocator);
         }
     }
 }
