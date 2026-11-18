@@ -4,6 +4,7 @@ pub mod frame;
 pub mod green;
 pub mod grid;
 pub mod ground;
+pub mod hole;
 pub mod hud;
 pub mod hud_font;
 pub mod range;

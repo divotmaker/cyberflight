@@ -146,7 +146,7 @@ impl App {
         let mut renderer =
             Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
         renderer
-            .set_green(self.range.green.as_ref())
+            .set_green(self.range.ground.flat_green().as_ref())
             .context("failed to upload the green")?;
         eprintln!(
             "Renderer initialized: {}x{}",
@@ -177,7 +177,7 @@ impl App {
     fn take_in(&mut self, now: f64) {
         for shot in self.frp.poll() {
             self.flights
-                .take_in(&shot, now, &self.model, self.range.green);
+                .take_in(&shot, now, &self.model, &self.range.ground);
         }
     }
 

@@ -117,7 +117,7 @@ fn animate(range: &Range, input: ShotInput, frac: f64) -> (AnimatedFlight, f64) 
         clamped: Vec::new(),
         rolled: false,
     };
-    let flight = AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, range.green);
+    let flight = AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, &range.ground);
     let now = flight.result.flight.flight_time * frac;
     (flight, now)
 }
@@ -233,7 +233,7 @@ fn render_shot(range: &Range, flight: &AnimatedFlight, now: f64, shot: &Shot) ->
         renderer.update_flight(&[render_data(flight, now)?]);
     }
     renderer
-        .set_green(range.green.as_ref())
+        .set_green(range.ground.flat_green().as_ref())
         .context("failed to upload the green")?;
     if shot.hud {
         let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
@@ -284,7 +284,7 @@ fn render_hero(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result<(
         .context("failed to create hero renderer")?;
     renderer.update_flight(&[render_data(flight, now)?]);
     renderer
-        .set_green(range.green.as_ref())
+        .set_green(range.ground.flat_green().as_ref())
         .context("failed to upload the green")?;
 
     renderer.set_chase_camera(Some(chase));
@@ -322,7 +322,7 @@ fn render_stream(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result
     let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
         .context("failed to create stream renderer")?;
     renderer
-        .set_green(range.green.as_ref())
+        .set_green(range.ground.flat_green().as_ref())
         .context("failed to upload the green")?;
 
     renderer.update_flight(&[render_data(flight, now)?]);

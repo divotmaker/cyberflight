@@ -8,9 +8,9 @@ use glam::Vec3;
 use cf_render::flight::FlightRenderData;
 use cf_scene::camera::Camera;
 use cf_scene::frame::physics_to_scene;
-use cf_scene::green::GreenConfig;
 use cf_scene::ground;
 use cf_scene::hud::{ShotTelemetry, build_hud};
+use cf_scene::range::Ground;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cf_scene::trail::{TrailPoint, tracer_tail};
 use dimple::AeroModel;
@@ -85,12 +85,12 @@ impl AnimatedFlight {
         shot: &ReceivedShot,
         launch_time: f64,
         model: &dyn AeroModel,
-        green: Option<GreenConfig>,
+        ground: &Ground,
     ) -> Self {
         let result = if shot.rolled {
-            ground::simulate_roll(&shot.input, model)
+            ground::simulate_roll(&shot.input, model, ground)
         } else {
-            ground::simulate_shot(&shot.input, model, green)
+            ground::simulate_shot(&shot.input, model, ground)
         };
         Self::from_result(shot, result, launch_time)
     }
@@ -348,7 +348,7 @@ impl FlightManager {
         arrived: &ArrivedShot,
         now: f64,
         model: &dyn AeroModel,
-        green: Option<GreenConfig>,
+        ground: &Ground,
     ) {
         let launch_time = arrived.arrival.min(now);
         let late = now - launch_time;
@@ -358,7 +358,7 @@ impl FlightManager {
                 arrived.shot.shot_number, arrived.shot.device
             );
         }
-        self.launch(&arrived.shot, launch_time, model, green);
+        self.launch(&arrived.shot, launch_time, model, ground);
     }
 
     /// Simulate `shot` and animate it from `launch_time`.
@@ -370,7 +370,7 @@ impl FlightManager {
         shot: &ReceivedShot,
         launch_time: f64,
         model: &dyn AeroModel,
-        green: Option<GreenConfig>,
+        ground: &Ground,
     ) {
         if self.is_animating(launch_time) {
             eprintln!(
@@ -382,7 +382,7 @@ impl FlightManager {
             shot,
             launch_time,
             model,
-            green,
+            ground,
         ));
         self.newest_expired = false;
     }
@@ -476,8 +476,11 @@ mod tests {
         }
     }
 
-    fn animate(input: ShotInput, green: Option<GreenConfig>) -> AnimatedFlight {
-        AnimatedFlight::from_received(&received(input), 0.0, &Tour::SEA_LEVEL, green)
+    /// Flat ground with no green: the default range.
+    const FLAT: Ground = Ground::Flat { green: None };
+
+    fn animate(input: ShotInput, ground: &Ground) -> AnimatedFlight {
+        AnimatedFlight::from_received(&received(input), 0.0, &Tour::SEA_LEVEL, ground)
     }
 
     #[test]
@@ -487,11 +490,11 @@ mod tests {
             shot: received(ShotInput::seven_iron()),
             arrival: 1.0,
         };
-        fm.take_in(&shot, 2.5, &Tour::SEA_LEVEL, None);
+        fm.take_in(&shot, 2.5, &Tour::SEA_LEVEL, &FLAT);
         assert_eq!(fm.flights[0].launch_time, 1.0);
 
         // 1.5 s into its flight, as if it had launched on arrival.
-        let on_time = animate(ShotInput::seven_iron(), None);
+        let on_time = animate(ShotInput::seven_iron(), &FLAT);
         let late = fm.update(2.5);
         let expected = on_time.render_data(1.5, 1).expect("in flight");
         assert_eq!(late.len(), 1);
@@ -509,7 +512,7 @@ mod tests {
         ] {
             let mut shot = received(input);
             shot.shot_number = n;
-            fm.take_in(&ArrivedShot { shot, arrival }, 100.0, &model, None);
+            fm.take_in(&ArrivedShot { shot, arrival }, 100.0, &model, &FLAT);
         }
         assert!(fm.update(100.0).is_empty(), "no ball is drawn");
         assert!(fm.flights.is_empty(), "both have expired");
@@ -517,7 +520,7 @@ mod tests {
         assert!(!fm.is_animating(100.0));
         // The HUD shows the newest shot, at rest.
         let shown = fm.last_telemetry.as_ref().expect("telemetry");
-        let seven_iron = animate(ShotInput::seven_iron(), None);
+        let seven_iron = animate(ShotInput::seven_iron(), &FLAT);
         assert!((shown.ball_speed_mph - seven_iron.telemetry(0.0).ball_speed_mph).abs() < 1e-9);
     }
 
@@ -533,9 +536,9 @@ mod tests {
             launch_angle_deg: 25.0,
             ..ShotInput::seven_iron()
         });
-        fm.launch(&driver, 0.0, &model, None);
-        fm.launch(&chip, 1.0, &model, None);
-        let chip_flight = animate(chip.input, None);
+        fm.launch(&driver, 0.0, &model, &FLAT);
+        fm.launch(&chip, 1.0, &model, &FLAT);
+        let chip_flight = animate(chip.input, &FLAT);
         let chip_expires = 1.0 + chip_flight.total_time + CHASE_LINGER_TIME;
         let driver_expires = fm.flights[0].total_time + CHASE_LINGER_TIME;
         assert!(
@@ -563,7 +566,7 @@ mod tests {
         assert!((shown - chip.input.ball_speed_mph).abs() < 1e-9);
 
         // A newer shot takes both back.
-        fm.launch(&driver, chip_expires + 3.0, &model, None);
+        fm.launch(&driver, chip_expires + 3.0, &model, &FLAT);
         fm.update(chip_expires + 3.5);
         let shown = fm
             .last_telemetry
@@ -581,7 +584,7 @@ mod tests {
             shot: received(ShotInput::seven_iron()),
             arrival: 5.0,
         };
-        fm.take_in(&shot, 4.99, &Tour::SEA_LEVEL, None);
+        fm.take_in(&shot, 4.99, &Tour::SEA_LEVEL, &FLAT);
         assert_eq!(fm.flights[0].launch_time, 4.99);
     }
 
@@ -589,14 +592,14 @@ mod tests {
     fn shot_during_rollout_is_launched() {
         let mut fm = FlightManager::new();
         let model = Tour::SEA_LEVEL;
-        let green = Range::new().green;
-        fm.launch(&received(ShotInput::driver()), 0.0, &model, green);
+        let ground = Range::new().ground;
+        fm.launch(&received(ShotInput::driver()), 0.0, &model, &ground);
 
         // The drive is on the ground but still rolling.
         let now = fm.flights[0].result.flight.flight_time + 1.0;
         assert!(fm.is_animating(now));
         let second = ShotInput::seven_iron();
-        fm.launch(&received(second), now, &model, green);
+        fm.launch(&received(second), now, &model, &ground);
         assert_eq!(fm.flights.len(), 2, "second shot is launched, not dropped");
 
         // Both balls are drawn; the HUD and the chase camera follow the newest.
@@ -614,7 +617,7 @@ mod tests {
 
     #[test]
     fn timeline_is_flight_then_ground() {
-        let f = animate(ShotInput::driver(), Range::new().green);
+        let f = animate(ShotInput::driver(), &Range::new().ground);
         let r = &f.result;
         assert!(
             f.timeline.windows(2).all(|w| w[1].time > w[0].time),
@@ -639,7 +642,8 @@ mod tests {
     #[test]
     fn unsettled_ball_stops_animating() {
         let input = ShotInput::driver();
-        let mut result = ground::simulate_shot(&input, &Tour::SEA_LEVEL, None);
+        let mut result =
+            ground::simulate_shot(&input, &Tour::SEA_LEVEL, &Ground::Flat { green: None });
         assert_eq!(result.ground.termination, Termination::Rest);
         // A ground phase that runs into dimple's time limit.
         let mut late = *result.ground.points.last().expect("ground points");
@@ -671,7 +675,7 @@ mod tests {
 
     #[test]
     fn settled_ball_animates_to_rest() {
-        let f = animate(ShotInput::driver(), None);
+        let f = animate(ShotInput::driver(), &FLAT);
         assert_eq!(f.result.ground.termination, Termination::Rest);
         assert_eq!(f.rest_pos, f.result.ground.rest.pos);
         assert!(f.total_time > f.result.flight.flight_time + 1.0);
@@ -684,7 +688,7 @@ mod tests {
             sidespin_rpm: -900.0,
             ..ShotInput::driver()
         };
-        let mut f = animate(input, Range::new().green);
+        let mut f = animate(input, &Range::new().ground);
         assert!(f.rest_pos.z < -10.0, "hook finishes left");
         let end = f.total_time + CHASE_LINGER_TIME;
         let mut t = 0.0;
@@ -703,7 +707,7 @@ mod tests {
 
     /// A 4.5 mph putt started 1.2° right, as `ReceivedShot::from_frp` makes
     /// it from a putting mat's launch speed and azimuth.
-    fn putt(green: Option<GreenConfig>) -> AnimatedFlight {
+    fn putt(ground: &Ground) -> AnimatedFlight {
         let shot = ReceivedShot {
             backspin_measured: false,
             sidespin_measured: false,
@@ -716,12 +720,12 @@ mod tests {
                 sidespin_rpm: 0.0,
             })
         };
-        AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, green)
+        AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, ground)
     }
 
     #[test]
     fn a_putt_rolls_along_the_ground_from_the_tee() {
-        let f = putt(Range::new().green);
+        let f = putt(&Range::new().ground);
         assert_eq!(f.timeline[0].time, 0.0);
         assert_eq!(f.timeline[0].pos, dimple::Vec3::ZERO);
         assert!(f.timeline.iter().all(|p| p.pos.y == 0.0));
@@ -747,16 +751,19 @@ mod tests {
 
     #[test]
     fn a_putt_rolls_on_green_whatever_the_range_green() {
-        let green = Some(GreenConfig {
+        let green = Some(cf_scene::green::GreenConfig {
             distance_m: 100.0,
             diameter_m: 20.0,
         });
-        assert_eq!(putt(None).rest_pos, putt(green).rest_pos);
+        assert_eq!(
+            putt(&Ground::Flat { green: None }).rest_pos,
+            putt(&Ground::Flat { green }).rest_pos
+        );
     }
 
     #[test]
     fn the_chase_camera_keeps_a_rolling_putt_in_view() {
-        let mut f = putt(Range::new().green);
+        let mut f = putt(&Range::new().ground);
         // The inset is the right fifth of a 16:9 frame.
         let aspect = 0.2 * 16.0 / 9.0;
         let end = f.total_time + CHASE_LINGER_TIME;
@@ -785,7 +792,7 @@ mod tests {
             sidespin_rpm: 0.0,
             ..ShotInput::driver()
         };
-        let f = animate(input, None);
+        let f = animate(input, &FLAT);
         assert_eq!(f.timeline.len(), 1);
         assert_eq!(f.total_time, 0.0);
         assert!(!f.is_animating(1.0));
@@ -793,7 +800,7 @@ mod tests {
 
     #[test]
     fn interpolates_through_the_ground_phase() {
-        let f = animate(ShotInput::seven_iron(), None);
+        let f = animate(ShotInput::seven_iron(), &FLAT);
         let t = f.result.flight.flight_time + 0.5;
         let pos = interpolate_trajectory(&f.timeline, t).expect("inside timeline");
         assert!(pos.x > f.result.flight.carry_m * 0.99);
@@ -807,7 +814,7 @@ mod tests {
             sidespin_rpm: 600.0,
             ..ShotInput::driver()
         };
-        let f = animate(input, Range::new().green);
+        let f = animate(input, &Range::new().ground);
         let t = f.telemetry(f.total_time + 1.0);
         let r = &f.result;
         assert!((t.carry_yards - meters_to_yards(r.flight.carry_m)).abs() < 1e-9);
@@ -823,7 +830,7 @@ mod tests {
 
     #[test]
     fn the_apex_row_holds_the_highest_point_reached() {
-        let f = animate(ShotInput::driver(), None);
+        let f = animate(ShotInput::driver(), &FLAT);
         let flight_time = f.result.flight.flight_time;
         let apex = f.result.flight.apex_m;
         let mut shown = 0.0_f64;
@@ -848,7 +855,7 @@ mod tests {
             sidespin_rpm: 600.0,
             ..ShotInput::driver()
         };
-        let f = animate(input, Range::new().green);
+        let f = animate(input, &Range::new().ground);
         let data = f.render_data(f.total_time, 1).expect("launched");
         // Scene +X is the golfer's left (see `cf_scene::frame`).
         assert!(data.ball_pos.x < -10.0, "ball at {:?}", data.ball_pos);

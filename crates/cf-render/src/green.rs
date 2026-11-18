@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn default_range_draws_no_circle() {
         let range = Range::new();
-        assert!(edge_vertices(range.green.as_ref(), &range.grid).is_empty());
+        assert!(edge_vertices(range.ground.flat_green().as_ref(), &range.grid).is_empty());
     }
 
     #[test]
@@ -114,8 +114,8 @@ mod tests {
             distance_m: 137.16,
             diameter_m: 30.0,
         };
-        range.green = Some(green);
-        let verts = edge_vertices(range.green.as_ref(), &range.grid);
+        range.ground = cf_scene::range::Ground::Flat { green: Some(green) };
+        let verts = edge_vertices(range.ground.flat_green().as_ref(), &range.grid);
         assert_eq!(verts.len(), 2 * RING_SEGMENTS as usize);
         let center = green.center_vec3();
         for v in &verts {

@@ -99,7 +99,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         OffscreenRenderer::new(config.width, config.height, &range.grid, RtMode::Auto)
             .context("failed to create offscreen renderer")?;
     renderer
-        .set_green(range.green.as_ref())
+        .set_green(range.ground.flat_green().as_ref())
         .context("failed to upload the green")?;
 
     // Start ffmpeg encoder.
@@ -157,7 +157,7 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
 
         // Launch the shots that have arrived, each from its arrival time.
         for shot in fh.poll() {
-            fm.take_in(&shot, now, &model, range.green);
+            fm.take_in(&shot, now, &model, &range.ground);
         }
 
         // Update flight animations.

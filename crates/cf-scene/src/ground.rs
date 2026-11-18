@@ -13,6 +13,8 @@ use dimple::{AeroModel, Vec3};
 
 use crate::frame::physics_to_scene;
 use crate::green::GreenConfig;
+use crate::hole::HoleTerrain;
+use crate::range::Ground;
 
 /// Surface at a scene-frame ground point (`x`, `z`) (see
 /// [`frame`](crate::frame)): [`Surface::GREEN`] on `green`,
@@ -56,28 +58,37 @@ impl Terrain for RangeTerrain {
 }
 
 /// Simulate a full shot on the range: flight, then impacts, hops, slide
-/// and roll on the range floor with `green` (all fairway for `None`),
-/// hopping through `model`'s air. The result is in dimple's frame; map
-/// positions to the scene with [`physics_to_scene`].
+/// and roll on `ground` (flat ground with its optional green, or a hole's
+/// [`HoleTerrain`]), hopping through `model`'s air. The result is in
+/// dimple's frame; map positions to the scene with [`physics_to_scene`].
 #[must_use]
-pub fn simulate_shot(
-    input: &ShotInput,
-    model: &dyn AeroModel,
-    green: Option<GreenConfig>,
-) -> ShotResult {
-    let ground = GroundPhysics::new(RangeTerrain::new(green));
-    dimple::trajectory::simulate_shot(input, model, &ground)
+pub fn simulate_shot(input: &ShotInput, model: &dyn AeroModel, ground: &Ground) -> ShotResult {
+    match ground {
+        Ground::Flat { green } => {
+            let physics = GroundPhysics::new(RangeTerrain::new(*green));
+            dimple::trajectory::simulate_shot(input, model, &physics)
+        }
+        Ground::Hole(hole) => {
+            let physics = GroundPhysics::new(HoleTerrain(hole));
+            dimple::trajectory::simulate_shot(input, model, &physics)
+        }
+    }
 }
 
 /// Simulate a ground ball (a [`rolled`](crate::shot::ReceivedShot::rolled)
 /// shot, `input` with a launch angle and spins of 0): it starts on the
-/// ground at the tee, slides until it rolls, and rolls to rest, on level
-/// [`Surface::GREEN`] everywhere, the surface a putt is played on, whatever
-/// the range's green. Its flight has no time, carry or apex. The result is
-/// in dimple's frame; map positions to the scene with [`physics_to_scene`].
+/// ground at the tee, slides until it rolls, and rolls to rest. On flat
+/// ground it rolls on level [`Surface::GREEN`] everywhere, the surface a
+/// putt is played on, whatever the range's green; on a hole it rolls over
+/// the hole's ground from the tee. Its flight has no time, carry or apex.
+/// The result is in dimple's frame; map positions to the scene with
+/// [`physics_to_scene`].
 #[must_use]
-pub fn simulate_roll(input: &ShotInput, model: &dyn AeroModel) -> ShotResult {
-    dimple::trajectory::simulate_shot(input, model, &Surface::GREEN)
+pub fn simulate_roll(input: &ShotInput, model: &dyn AeroModel, ground: &Ground) -> ShotResult {
+    match ground {
+        Ground::Flat { .. } => dimple::trajectory::simulate_shot(input, model, &Surface::GREEN),
+        Ground::Hole(_) => simulate_shot(input, model, ground),
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +102,11 @@ mod tests {
     use crate::range::Range;
 
     fn shot(input: &ShotInput, green: Option<GreenConfig>) -> ShotResult {
-        simulate_shot(input, &Tour::SEA_LEVEL, green)
+        simulate_shot(input, &Tour::SEA_LEVEL, &Ground::Flat { green })
+    }
+
+    fn roll(input: &ShotInput) -> ShotResult {
+        simulate_roll(input, &Tour::SEA_LEVEL, &Range::new().ground)
     }
 
     /// A green of `radius` m on the target line at the downrange distance
@@ -135,7 +150,7 @@ mod tests {
 
     #[test]
     fn a_roll_stays_on_the_green_and_rests() {
-        let result = simulate_roll(&putt(0.0), &Tour::SEA_LEVEL);
+        let result = roll(&putt(0.0));
         assert_eq!(result.flight.flight_time, 0.0);
         assert_eq!(result.flight.carry_m, 0.0);
         assert_eq!(result.flight.apex_m, 0.0);
@@ -156,8 +171,8 @@ mod tests {
     // and is drawn on the right of the screen; a putt started left mirrors it.
     #[test]
     fn a_roll_follows_its_azimuth() {
-        let right = simulate_roll(&putt(3.0), &Tour::SEA_LEVEL).ground.rest.pos;
-        let left = simulate_roll(&putt(-3.0), &Tour::SEA_LEVEL).ground.rest.pos;
+        let right = roll(&putt(3.0)).ground.rest.pos;
+        let left = roll(&putt(-3.0)).ground.rest.pos;
         let angle = right.z.atan2(right.x).to_degrees();
         assert!((angle - 3.0).abs() < 1e-6, "rest at {angle:.3} deg");
         assert!((left.z + right.z).abs() < 1e-9);
@@ -178,7 +193,7 @@ mod tests {
 
     #[test]
     fn default_range_plays_as_fairway() {
-        let green = Range::new().green;
+        let green = Range::new().ground.flat_green();
         assert_eq!(green, None);
         let result = shot(&ShotInput::seven_iron(), green);
         assert!(
@@ -320,7 +335,7 @@ mod tests {
             sidespin_rpm: -600.0,
             ..ShotInput::driver()
         };
-        let green = Range::new().green;
+        let green = Range::new().ground.flat_green();
 
         let sliced = shot(&slice, green);
         assert!(sliced.flight.lateral_m > 10.0, "slice lands right");
