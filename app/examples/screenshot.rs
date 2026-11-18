@@ -103,9 +103,19 @@ fn parse_out_dir(mut args: impl Iterator<Item = String>) -> Result<Option<PathBu
     Ok(Some(out))
 }
 
+/// The frame's RGBA pixels with every alpha byte set to 255. The framebuffer's alpha is what
+/// blending left behind, not coverage; the window and the stream show every pixel opaque.
+fn opaque(pixels: &[u8]) -> Vec<u8> {
+    let mut pixels = pixels.to_vec();
+    for px in pixels.as_chunks_mut::<4>().0 {
+        px[3] = u8::MAX;
+    }
+    pixels
+}
+
 fn save_png(frame: &Frame<'_>, path: &str) -> Result<()> {
     let img: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(frame.width, frame.height, frame.pixels.to_vec())
+        ImageBuffer::from_raw(frame.width, frame.height, opaque(frame.pixels))
             .context("failed to create image buffer")?;
     img.save(path).context("failed to save PNG")?;
 
@@ -310,7 +320,7 @@ fn render_hero(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result<(
 
     // Downscale from render resolution to output resolution
     let hi_res: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(render_w, render_h, frame.pixels.to_vec())
+        ImageBuffer::from_raw(render_w, render_h, opaque(frame.pixels))
             .context("failed to create hi-res buffer")?;
     let downscaled = image::imageops::resize(
         &hi_res,
