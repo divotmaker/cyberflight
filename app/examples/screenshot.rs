@@ -21,6 +21,16 @@
 //!     `--stream` (ray-traced when supported)
 //!   - `stream_idle.png` — the same renderer after the flight clears: no
 //!     flight, no chase camera, idle HUD
+//!   - `hole_tee.png` — the hole range, idle, from its tee camera; with
+//!     `hole_tee_fov30.png` (eye height, 30° field of view) and
+//!     `hole_tee_raised.png` (8 m up, 14 m behind the tee, 40°) to compare
+//!   - `hole_flight.png` — a 140 mph drive on the hole at 55 % of its
+//!     flight, through the streaming calls, with HUD and chase camera
+//!   - `hole_green.png` — the green, its bank and bunkers and the pin, from
+//!     beside the fairway
+//!
+//! The hole images are raster (`RtMode::Off`): the hole draws no
+//! reflections.
 //!
 //! Compare two runs with `cargo run -p cf-test -- compare <dir_a> <dir_b>`.
 
@@ -338,6 +348,62 @@ fn render_stream(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result
     save_png(&frame, &out_path("stream_idle.png"))
 }
 
+/// Render the hole range: the idle tee cameras and the green, then a drive
+/// through the streaming calls.
+fn render_hole() -> Result<()> {
+    let range = Range::hole();
+    let pin = range.camera.target;
+    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Off)
+        .context("failed to create hole renderer")?;
+    let idle = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
+    renderer.update_hud(&idle.lines, &idle.fills);
+
+    let fov30 = Camera {
+        fov_y: 30f32.to_radians(),
+        ..range.camera
+    };
+    let raised = Camera {
+        position: Vec3::new(0.0, 8.0, -14.0),
+        fov_y: 40f32.to_radians(),
+        ..range.camera
+    };
+    let green = look_at(Vec3::new(-30.0, 4.0, 235.0), pin);
+    for (name, camera) in [
+        ("hole_tee", range.camera),
+        ("hole_tee_fov30", fov30),
+        ("hole_tee_raised", raised),
+        ("hole_green", green),
+    ] {
+        eprintln!("Rendering {name}...");
+        let frame = renderer.render(&camera).context("render failed")?;
+        save_png(&frame, &out_path(&format!("{name}.png")))?;
+    }
+
+    eprintln!("Rendering hole_flight...");
+    let drive = ShotInput {
+        ball_speed_mph: 140.0,
+        launch_angle_deg: 13.0,
+        launch_azimuth_deg: 0.0,
+        backspin_rpm: 3000.0,
+        sidespin_rpm: 0.0,
+    };
+    let (mut flight, now) = animate(&range, drive, 0.55);
+    renderer.update_flight(&[render_data(&flight, now)?]);
+    renderer.set_chase_camera(Some(chase_camera(&mut flight, now)?));
+    let hud = build_hud(
+        Some(&flight.telemetry(now)),
+        true,
+        &lm,
+        true,
+        WIDTH as f32,
+        HEIGHT as f32,
+    );
+    renderer.update_hud(&hud.lines, &hud.fills);
+    let frame = renderer.render(&range.camera).context("render failed")?;
+    save_png(&frame, &out_path("hole_flight.png"))
+}
+
 fn main() -> Result<()> {
     let Some(out_dir) = parse_out_dir(std::env::args().skip(1))? else {
         println!("usage: screenshot [--out <dir>]   (default: {DEFAULT_OUTPUT_DIR}/)");
@@ -383,5 +449,6 @@ fn main() -> Result<()> {
     // ── Streaming path (dynamic geometry, as `--stream` renders it) ──
     render_stream(&range, &mut hero, hero_now)?;
 
-    Ok(())
+    // ── The hole range ──
+    render_hole()
 }

@@ -23,6 +23,7 @@ use dimple::Tour;
 
 use cyberflight::flight::FlightManager;
 use cyberflight::intake::{self, FrpState};
+use cyberflight::menu::{self, RangeChoice};
 
 /// How often a minimized window wakes to take in shots and advance the
 /// flights without drawing.
@@ -87,13 +88,13 @@ struct App {
 
 impl App {
     /// The app, taking in shots from `frp`, whose arrival times are seconds
-    /// since `start_time`.
-    fn new(windowed: bool, frp: FrpState, start_time: Instant) -> Self {
+    /// since `start_time`, playing `range`.
+    fn with_range(windowed: bool, frp: FrpState, start_time: Instant, range: Range) -> Self {
         Self {
             windowed,
             window: None,
             renderer: None,
-            range: Range::new(),
+            range,
             model: Tour::SEA_LEVEL,
             frp,
             flights: FlightManager::new(),
@@ -310,7 +311,9 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && !event.repeat
-                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyR) =>
+                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
+                    // The hole draws no reflections to switch.
+                    && self.range.ground.hole().is_none() =>
             {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.set_render_mode(next_reflections(renderer.render_mode()));
@@ -408,8 +411,10 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let frp_url = intake::frp_url(&args)?;
+    let range = menu::parse_range(&args)?;
     if args.iter().any(|a| a == "--stream") {
-        return stream::run_stream(&frp_url);
+        let range = range.unwrap_or(RangeChoice::DrivingRange);
+        return stream::run_stream(&frp_url, range.range());
     }
 
     let windowed = args.iter().any(|a| a == "--windowed");
@@ -440,7 +445,8 @@ fn run() -> Result<()> {
         wake_on_intake(event_loop.create_proxy()),
     )
     .context("failed to start the FRP intake")?;
-    let mut app = App::new(windowed, frp, start_time);
+    let range = range.unwrap_or(RangeChoice::DrivingRange).range();
+    let mut app = App::with_range(windowed, frp, start_time, range);
     event_loop.run_app(&mut app).context("event loop error")?;
     match app.fatal.take() {
         Some(err) => Err(err),
@@ -460,7 +466,12 @@ mod tests {
     /// An app on the clock started now, and the channel its intake reports on.
     fn app_and_intake() -> (App, mpsc::Sender<IntakeEvent>) {
         let (tx, rx) = mpsc::channel();
-        let app = App::new(true, FrpState::from_events(rx), Instant::now());
+        let app = App::with_range(
+            true,
+            FrpState::from_events(rx),
+            Instant::now(),
+            Range::new(),
+        );
         (app, tx)
     }
 

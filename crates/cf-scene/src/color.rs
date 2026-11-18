@@ -15,5 +15,11 @@ pub const MAGENTA: Vec4 = Vec4::new(1.0, 0.0, 1.0, 1.0);
 /// without competing with the ball tracer.
 pub const GREEN_EDGE: Vec4 = Vec4::new(0.041, 1.0, 0.007, 0.9);
 
+/// Sand — orange, #FF8800 as linear RGB: a hole's bunkers.
+pub const SAND: Vec4 = Vec4::new(1.0, 0.246, 0.0, 1.0);
+
+/// Pin — white: a hole's cup rim, pin and flag.
+pub const PIN: Vec4 = Vec4::new(1.0, 1.0, 1.0, 1.0);
+
 /// Black background.
 pub const BACKGROUND: Vec4 = Vec4::new(0.0, 0.0, 0.0, 1.0);

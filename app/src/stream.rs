@@ -80,7 +80,7 @@ fn parse_stream_args() -> StreamArgs {
     }
 }
 
-pub fn run_stream(frp_url: &str) -> Result<()> {
+pub fn run_stream(frp_url: &str, range: Range) -> Result<()> {
     let stream_args = parse_stream_args();
     let config = stream_args.config;
 
@@ -90,7 +90,6 @@ pub fn run_stream(frp_url: &str) -> Result<()> {
         config.width, config.height, config.fps, config.bitrate
     );
 
-    let range = Range::new();
     let model = Tour::SEA_LEVEL;
 
     // Create headless renderer, ray-traced when the GPU supports it.

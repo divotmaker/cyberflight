@@ -205,7 +205,8 @@ impl Hole {
 
     /// Fairway half-width at downrange distance `z`, or `None` outside the
     /// fairway's knots.
-    fn fairway_half_width(&self, z: f64) -> Option<f64> {
+    #[must_use]
+    pub fn fairway_half_width(&self, z: f64) -> Option<f64> {
         self.fairway.windows(2).find_map(|pair| {
             let ((za, wa), (zb, wb)) = (pair[0], pair[1]);
             (za..=zb)

@@ -33,6 +33,16 @@ impl Camera {
         }
     }
 
+    /// The tee camera of [`driving_range`](Self::driving_range), aimed at
+    /// `target` instead of the horizon.
+    #[must_use]
+    pub fn tee(target: Vec3) -> Self {
+        Self {
+            target,
+            ..Self::driving_range()
+        }
+    }
+
     /// Compute the view matrix (world -> camera).
     #[must_use]
     pub fn view_matrix(&self) -> Mat4 {

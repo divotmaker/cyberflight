@@ -3,6 +3,7 @@ use crate::color;
 use crate::green::{DEFAULT_GREEN, GreenConfig, generate_green_edge};
 use crate::grid::{GridConfig, generate_grid_vertices};
 use crate::hole::Hole;
+use crate::hole_draw;
 use crate::scenery::{Layer, Scenery};
 
 /// The ground a range is played on.
@@ -61,9 +62,34 @@ impl Range {
 }
 
 impl Range {
+    /// The hole range: [`Hole::no_1`] on a grid 100 yd wide, seen from the
+    /// tee camera aimed at the foot of the pin.
+    #[must_use]
+    pub fn hole() -> Self {
+        let hole = Hole::no_1();
+        let (cx, cz) = hole.cup;
+        let camera = Camera::tee(glam::Vec3::new(
+            cx as f32,
+            hole.height(cx, cz) as f32,
+            cz as f32,
+        ));
+        Self {
+            grid: GridConfig {
+                spacing: 10.0,
+                downrange: 450.0,
+                lateral: 50.0,
+            },
+            ground: Ground::Hole(hole),
+            camera,
+        }
+    }
+
     /// The static scene to draw. Flat ground: the grid in cyan, then the
     /// green's edge when there is a green, over the reflective floor of the
-    /// grid.
+    /// grid. A hole: the black terrain mesh and the cup's disc as fills;
+    /// the draped grid (cyan), the fairway outline (cyan), the bunkers
+    /// (sand), the green's ring and the cup's rim, pin and flag (white) as
+    /// lines; no floor, so no reflections.
     #[must_use]
     pub fn scenery(&self) -> Scenery {
         match &self.ground {
@@ -84,11 +110,28 @@ impl Range {
                     floor: Some(self.grid),
                 }
             }
-            Ground::Hole(_) => Scenery {
-                fills: Vec::new(),
-                lines: Vec::new(),
-                floor: None,
-            },
+            Ground::Hole(hole) => {
+                let layer = |color, vertices| Layer { color, vertices };
+                let bunkers = hole
+                    .bunkers
+                    .iter()
+                    .flat_map(|b| hole_draw::bunker_lines(hole, b))
+                    .collect();
+                Scenery {
+                    fills: vec![
+                        layer(color::BACKGROUND, hole_draw::terrain_mesh(hole, &self.grid)),
+                        layer(color::BACKGROUND, hole_draw::cup_disc(hole)),
+                    ],
+                    lines: vec![
+                        layer(color::CYAN, hole_draw::draped_grid(hole, &self.grid)),
+                        layer(color::CYAN, hole_draw::fairway_outline(hole)),
+                        layer(color::SAND, bunkers),
+                        layer(color::GREEN_EDGE, hole_draw::green_ring(hole)),
+                        layer(color::PIN, hole_draw::cup_and_pin(hole)),
+                    ],
+                    floor: None,
+                }
+            }
         }
     }
 }
@@ -134,6 +177,19 @@ mod tests {
             let p = Vec3::from(v.position);
             let r = Vec3::new(p.x - center.x, 0.0, p.z - center.z).length();
             assert!((r - green.radius_m()).abs() < 1e-3, "radius {r}");
+        }
+    }
+
+    #[test]
+    fn the_hole_has_no_floor_and_its_mesh_lies_under_the_ground() {
+        let range = Range::hole();
+        let scenery = range.scenery();
+        assert!(scenery.floor.is_none());
+        let hole = range.ground.hole().expect("a hole");
+        for v in scenery.fills[0].vertices.iter().step_by(13) {
+            let [x, y, z] = v.position.map(f64::from);
+            let want = hole.height(x, z) - hole_draw::MESH_DROP_M;
+            assert!((y - want).abs() < 1e-3, "({x}, {z})");
         }
     }
 
