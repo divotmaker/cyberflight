@@ -524,6 +524,26 @@ fn render_hole_rt(range: &Range) -> Result<()> {
     let frame = renderer.render(&front).context("render failed")?;
     save_png(&frame, &out_path("hole_rt_green.png"))?;
 
+    // 40 m above the water, on the line that reflects the ball at the
+    // pond's center: the tracer and its reflection in the flat water.
+    let pond = hole.ponds[0];
+    let water = Vec3::new(pond.x as f32, hole.water_level(&pond) as f32, pond.z as f32);
+    let (flight, now) = animate(range, drive, 0.70);
+    let data = render_data(&flight, now)?;
+    let ball = data.ball_pos;
+    let mirrored = Vec3::new(ball.x, 2.0 * water.y - ball.y, ball.z);
+    let pond_view = Camera {
+        fov_y: 70f32.to_radians(),
+        ..look_at(
+            water + 40.0 / (ball.y - water.y) * (water - mirrored),
+            water + 0.3 * (ball - water),
+        )
+    };
+    renderer.update_flight(&[data]);
+    eprintln!("Rendering hole_rt_pond...");
+    let frame = renderer.render(&pond_view).context("render failed")?;
+    save_png(&frame, &out_path("hole_rt_pond.png"))?;
+
     let (flight, now) = animate(range, drive, 0.70);
     renderer.update_flight(&[render_data(&flight, now)?]);
     renderer.set_render_mode(RenderMode::Rasterized);

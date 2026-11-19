@@ -101,13 +101,17 @@ pub fn terrain_mesh(hole: &Hole, grid: &GridConfig) -> Vec<GridVertex> {
 
 /// The hole's reflective ground (`TRIANGLE_LIST`): the cells of
 /// [`terrain_mesh`], exactly on the surface, each vertex with the surface
-/// normal [`Hole::normal`] there. The tee box lies on it, as it lies on
-/// the flat floor.
+/// normal [`Hole::normal`] there. Inside a pond's shoreline it is the flat
+/// water surface at [`Hole::water_level`] with normal +Y. The tee box lies
+/// on it, as it lies on the flat floor.
 #[must_use]
 pub fn reflective_ground(hole: &Hole, grid: &GridConfig) -> GroundMesh {
     let (positions, normals) = lattice_triangles(grid, |x, z| {
-        let p = Vec3::new(x as f32, hole.height(x, z) as f32, z as f32);
-        (p, hole.normal(x, z).as_vec3())
+        let (y, n) = match hole.ponds.iter().find(|p| p.contains(x, z)) {
+            Some(pond) => (hole.water_level(pond), Vec3::Y),
+            None => (hole.height(x, z), hole.normal(x, z).as_vec3()),
+        };
+        (Vec3::new(x as f32, y as f32, z as f32), n)
     })
     .into_iter()
     .unzip();
@@ -355,6 +359,9 @@ mod tests {
         assert_eq!(mesh.positions.len(), mesh.normals.len());
         for (p, n) in mesh.positions.iter().zip(&mesh.normals).step_by(7) {
             let (x, z) = (f64::from(p.x), f64::from(p.z));
+            if h.ponds.iter().any(|pond| pond.contains(x, z)) {
+                continue;
+            }
             assert!((f64::from(p.y) - h.height(x, z)).abs() < 1e-4, "({x}, {z})");
             let want = h.normal(x, z).as_vec3();
             // `p` is the vertex rounded to f32, `n` was taken before rounding.
@@ -393,6 +400,26 @@ mod tests {
         let (_, far) = near(17.0, 218.0);
         let (_, short) = near(17.0, 206.0);
         assert!(far.z < -0.05 && short.z > 0.05, "{far} {short}");
+    }
+
+    #[test]
+    fn the_reflective_ground_is_flat_water_inside_a_pond() {
+        let h = hole();
+        let pond = h.ponds[0];
+        let level = h.water_level(&pond) as f32;
+        let mesh = reflective_ground(&h, &hole_grid());
+        let inside: Vec<_> = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .filter(|(p, _)| pond.contains(f64::from(p.x), f64::from(p.z)))
+            .collect();
+        assert!(!inside.is_empty());
+        for (p, n) in inside {
+            assert_eq!((p.y, *n), (level, Vec3::Y), "{p}");
+        }
+        // The bowl under the water stays in the height function.
+        assert!(h.height(pond.x, pond.z) < f64::from(level) - 1.0);
     }
 
     #[test]
