@@ -652,6 +652,11 @@ const DROP_POINTS: u32 = 8;
 
 /// Radius of the cup (m): 4.25 in across.
 pub const CUP_RADIUS_M: f64 = 0.054;
+/// Height of the pin (m).
+pub const PIN_HEIGHT_M: f64 = 2.13;
+/// The flag, a triangle off the top of the pin toward +X: its length out
+/// from the pin and its height along the pin (m).
+pub const FLAG_SIZE_M: (f64, f64) = (0.5, 0.35);
 
 /// When the ball drops into the cup at scene (x, z) `cup`: the shot time,
 /// or `None`.

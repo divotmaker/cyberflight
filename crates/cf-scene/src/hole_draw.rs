@@ -11,7 +11,7 @@ use glam::Vec3;
 
 use crate::green::RING_SEGMENTS;
 use crate::grid::{GridConfig, GridVertex};
-use crate::hole::{Bunker, CANOPY_BASE, CUP_RADIUS_M, Hole, Pond, Tree};
+use crate::hole::{Bunker, CANOPY_BASE, CUP_RADIUS_M, FLAG_SIZE_M, Hole, PIN_HEIGHT_M, Pond, Tree};
 use crate::scenery::GroundMesh;
 
 /// How far the terrain mesh lies under the surface (m).
@@ -28,8 +28,6 @@ const HATCH_SPACING_M: f64 = 2.0;
 const CANOPY_SIDES: u32 = 6;
 /// Cross-sections drawn up a tree's canopy, the base included.
 const CANOPY_LEVELS: u32 = 3;
-/// Height of the pin (m).
-const PIN_HEIGHT_M: f64 = 2.13;
 /// Segments in the cup's disc and rim.
 const CUP_SEGMENTS: u32 = 24;
 
@@ -326,11 +324,16 @@ pub fn cup_and_pin(hole: &Hole) -> Vec<GridVertex> {
     let base = hole.height(cx, cz);
     let top = base + PIN_HEIGHT_M;
     let pin = |y: f64, dx: f64| vertex(cx + dx, y, cz, 0.0);
-    // The pin, then a 0.5 × 0.35 m triangular flag to the left (+X).
+    // The pin, then the triangular flag to the left (+X).
+    let (len, drop) = FLAG_SIZE_M;
     polyline(&mut out, &[pin(base, 0.0), pin(top, 0.0)]);
     polyline(
         &mut out,
-        &[pin(top, 0.0), pin(top - 0.175, 0.5), pin(top - 0.35, 0.0)],
+        &[
+            pin(top, 0.0),
+            pin(top - drop / 2.0, len),
+            pin(top - drop, 0.0),
+        ],
     );
     out
 }
