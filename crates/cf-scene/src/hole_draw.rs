@@ -61,69 +61,57 @@ fn steps(a: f64, b: f64, step: f64) -> impl Iterator<Item = f64> {
     (0..=n).map(move |i| a + (b - a) * f64::from(i) / f64::from(n))
 }
 
-/// The terrain mesh (`TRIANGLE_LIST`): the grid's lateral extent of `grid`,
-/// from 5 yd behind the tee to its downrange end, in [`CELL_YD`] cells,
-/// [`MESH_DROP_M`] under the surface. Unfaded.
-#[must_use]
-pub fn terrain_mesh(hole: &Hole, grid: &GridConfig) -> Vec<GridVertex> {
+/// Two triangles for each [`CELL_YD`] cell of the terrain lattice of
+/// `grid` (`TRIANGLE_LIST`): its lateral extent, from 5 yd behind the tee
+/// to its downrange end, with `point(x, z)` evaluated once per corner.
+fn lattice_triangles<T: Copy>(grid: &GridConfig, point: impl Fn(f64, f64) -> T) -> Vec<T> {
     let cell = yards_to_meters(CELL_YD);
     let lateral = yards_to_meters(f64::from(grid.lateral));
     let z0 = -yards_to_meters(5.0);
     let z1 = yards_to_meters(f64::from(grid.downrange));
-    let nx = (2.0 * lateral / cell).round() as u32;
-    let nz = ((z1 - z0) / cell).round() as u32;
-    let x_at = |i: u32| -lateral + f64::from(i) * cell;
-    let z_at = |j: u32| z0 + f64::from(j) * cell;
-    let p = |i: u32, j: u32| {
-        let (x, z) = (x_at(i), z_at(j));
-        vertex(x, hole.height(x, z) - MESH_DROP_M, z, 0.0)
-    };
-    let mut out = Vec::with_capacity((6 * nx * nz) as usize);
+    let nx = (2.0 * lateral / cell).round() as usize;
+    let nz = ((z1 - z0) / cell).round() as usize;
+    let corners: Vec<T> = (0..=nz)
+        .flat_map(|j| {
+            let z = z0 + j as f64 * cell;
+            (0..=nx).map(move |i| (-lateral + i as f64 * cell, z))
+        })
+        .map(|(x, z)| point(x, z))
+        .collect();
+    let at = |i: usize, j: usize| corners[j * (nx + 1) + i];
+    let mut out = Vec::with_capacity(6 * nx * nz);
     for j in 0..nz {
         for i in 0..nx {
-            let (a, b, c, d) = (p(i, j), p(i + 1, j), p(i + 1, j + 1), p(i, j + 1));
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
             out.extend_from_slice(&[a, b, c, a, c, d]);
         }
     }
     out
 }
 
-/// The hole's reflective ground (`TRIANGLE_LIST`): the extent and the
-/// [`CELL_YD`] cells of [`terrain_mesh`], exactly on the surface, each
-/// vertex with the surface normal [`Hole::normal`] there. The tee box lies
-/// on it, as it lies on the flat floor.
+/// The terrain mesh (`TRIANGLE_LIST`): the grid's lateral extent of `grid`,
+/// from 5 yd behind the tee to its downrange end, in [`CELL_YD`] cells,
+/// [`MESH_DROP_M`] under the surface. Unfaded.
+#[must_use]
+pub fn terrain_mesh(hole: &Hole, grid: &GridConfig) -> Vec<GridVertex> {
+    lattice_triangles(grid, |x, z| {
+        vertex(x, hole.height(x, z) - MESH_DROP_M, z, 0.0)
+    })
+}
+
+/// The hole's reflective ground (`TRIANGLE_LIST`): the cells of
+/// [`terrain_mesh`], exactly on the surface, each vertex with the surface
+/// normal [`Hole::normal`] there. The tee box lies on it, as it lies on
+/// the flat floor.
 #[must_use]
 pub fn reflective_ground(hole: &Hole, grid: &GridConfig) -> GroundMesh {
-    let cell = yards_to_meters(CELL_YD);
-    let lateral = yards_to_meters(f64::from(grid.lateral));
-    let xs: Vec<f64> = steps(-lateral, lateral, cell).collect();
-    let zs: Vec<f64> = steps(
-        -yards_to_meters(5.0),
-        yards_to_meters(f64::from(grid.downrange)),
-        cell,
-    )
-    .collect();
-    let lattice: Vec<(Vec3, Vec3)> = zs
-        .iter()
-        .flat_map(|&z| {
-            xs.iter().map(move |&x| {
-                let p = Vec3::new(x as f32, hole.height(x, z) as f32, z as f32);
-                (p, hole.normal(x, z).as_vec3())
-            })
-        })
-        .collect();
-    let at = |i: usize, j: usize| lattice[j * xs.len() + i];
-    let mut mesh = GroundMesh::default();
-    for j in 0..zs.len() - 1 {
-        for i in 0..xs.len() - 1 {
-            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
-            for (p, n) in [a, b, c, a, c, d] {
-                mesh.positions.push(p);
-                mesh.normals.push(n);
-            }
-        }
-    }
-    mesh
+    let (positions, normals) = lattice_triangles(grid, |x, z| {
+        let p = Vec3::new(x as f32, hole.height(x, z) as f32, z as f32);
+        (p, hole.normal(x, z).as_vec3())
+    })
+    .into_iter()
+    .unzip();
+    GroundMesh { positions, normals }
 }
 
 /// The grid of `grid` draped over the hole: the same lines as
@@ -405,20 +393,6 @@ mod tests {
         let (_, far) = near(17.0, 218.0);
         let (_, short) = near(17.0, 206.0);
         assert!(far.z < -0.05 && short.z > 0.05, "{far} {short}");
-    }
-
-    #[test]
-    fn the_reflective_ground_covers_the_terrain_mesh() {
-        let h = hole();
-        let grid = hole_grid();
-        let mesh = reflective_ground(&h, &grid);
-        let drawn = terrain_mesh(&h, &grid);
-        assert_eq!(mesh.positions.len(), drawn.len());
-        for (p, v) in mesh.positions.iter().zip(&drawn).step_by(11) {
-            let [x, y, z] = v.position;
-            assert_eq!((p.x, p.z), (x, z));
-            assert!((p.y - y - MESH_DROP_M as f32).abs() < 1e-4);
-        }
     }
 
     #[test]

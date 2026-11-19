@@ -845,7 +845,7 @@ impl SceneAccel {
     /// Build the static structures of `geometries` (one submission, which
     /// completes before this returns), and for each of `tracers` the
     /// instances of those and the tracer, and a top-level structure over
-    /// them.
+    /// them. Returns the normal buffer.
     ///
     /// # Errors
     /// A buffer or structure fails to create or the build submission fails;
@@ -856,15 +856,15 @@ impl SceneAccel {
         gpu: &mut GpuContext,
         geometries: &[RtGeometry],
         tracers: &[TracerAccel],
-    ) -> Result<(), RenderError> {
-        let normals = terrain_normals(geometries);
-        self.normals = Some(HostBuffer::with_data(
+    ) -> Result<vk::Buffer, RenderError> {
+        let normals = self.normals.insert(HostBuffer::with_data(
             &gpu.device,
             &mut gpu.allocator,
-            &normals,
+            terrain_normals(geometries),
             vk::BufferUsageFlags::STORAGE_BUFFER,
             "terrain normals",
         )?);
+        let normals = normals.handle();
         for geom in geometries.iter().filter(|g| g.primitive_count() > 0) {
             let blas = StaticBlas::new(loader, gpu, geom)?;
             self.statics.push(blas);
@@ -935,7 +935,7 @@ impl SceneAccel {
             };
             self.frames.push(SceneFrame { instances, tlas });
         }
-        Ok(())
+        Ok(normals)
     }
 
     /// # Safety
@@ -964,11 +964,12 @@ impl SceneAccel {
 
 /// The vertex normals of the [`GEOM_TERRAIN`] geometry in `geometries`, 3
 /// floats per vertex; one up normal when there is none.
-fn terrain_normals(geometries: &[RtGeometry]) -> Vec<f32> {
+fn terrain_normals(geometries: &[RtGeometry]) -> &[f32] {
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
     geometries
         .iter()
         .find(|g| g.geom_type == GEOM_TERRAIN && !g.normals.is_empty())
-        .map_or_else(|| vec![0.0, 1.0, 0.0], |g| g.normals.clone())
+        .map_or(&UP, |g| &g.normals)
 }
 
 /// An instance of the structure at `blas` for geometry type `geom_type`,
@@ -1368,7 +1369,7 @@ impl RtPipeline {
             unsafe { old.destroy(&self.accel_loader, &gpu.device, &mut gpu.allocator) };
         }
         let scene = self.scene.insert(SceneAccel::default());
-        scene.build(&self.accel_loader, gpu, geometries, &self.tracers)?;
+        let normals = scene.build(&self.accel_loader, gpu, geometries, &self.tracers)?;
         let accels: Vec<vk::AccelerationStructureKHR> =
             scene.frames.iter().map(|f| f.tlas.accel.accel).collect();
         let mut infos: Vec<_> = accels
@@ -1378,10 +1379,6 @@ impl RtPipeline {
                     .acceleration_structures(std::slice::from_ref(accel))
             })
             .collect();
-        let normals = scene
-            .normals
-            .as_ref()
-            .map_or(vk::Buffer::null(), HostBuffer::handle);
         let normal_infos = [vk::DescriptorBufferInfo::default()
             .buffer(normals)
             .offset(0)

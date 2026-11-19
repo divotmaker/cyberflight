@@ -6,7 +6,7 @@ use gpu_allocator::vulkan::Allocator;
 use cf_scene::camera::Camera;
 use cf_scene::color;
 use cf_scene::grid::GridVertex;
-use cf_scene::scenery::{Floor, Scenery};
+use cf_scene::scenery::Scenery;
 use cf_scene::tee::TeeBox;
 
 use crate::context::GpuContext;
@@ -159,21 +159,17 @@ impl SceneRecorder {
             .map(FrameResources::tracer_buffers)
             .collect::<Option<_>>()
             .filter(|_| rt == RtMode::Auto);
-        let reflections = match scenery.floor.as_ref().and_then(|floor| {
-            // Only the ray tracer reflects on terrain.
-            let reflects = matches!(floor, Floor::Flat(_)) || tracer_buffers.is_some();
-            reflects.then(|| {
-                Reflections::new(
-                    gpu,
-                    color_format,
-                    extent,
-                    floor,
-                    &tee,
-                    tracer_buffers.as_deref(),
-                )
-            })
+        let reflections = match scenery.floor.as_ref().map(|floor| {
+            Reflections::new(
+                gpu,
+                color_format,
+                extent,
+                floor,
+                &tee,
+                tracer_buffers.as_deref(),
+            )
         }) {
-            Some(Ok(reflections)) => Some(reflections),
+            Some(Ok(reflections)) => reflections,
             Some(Err(e)) => {
                 eprintln!("Reflections setup failed, rendering without them: {e}");
                 None

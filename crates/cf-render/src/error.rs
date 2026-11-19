@@ -17,9 +17,6 @@ pub enum RenderError {
     #[error("no suitable GPU found")]
     NoSuitableDevice,
 
-    #[error("ray tracing unavailable")]
-    RayTracingUnavailable,
-
     #[error("no suitable queue family")]
     NoSuitableQueue,
 

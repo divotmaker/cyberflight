@@ -145,12 +145,12 @@ impl Reflections {
     /// there; given the `tracers` buffers (one set per frame in flight, not
     /// empty), so is the ray tracer, unless it fails to set up (it says so
     /// on stderr and the mirror remains). On terrain there is only the ray
-    /// tracer.
+    /// tracer: without `tracers` there are no reflections (`None`).
     ///
     /// # Errors
     /// The image, the composite or the mirror fails to create, or, on
-    /// terrain, there are no `tracers` or the ray tracer fails to set up;
-    /// what was created is destroyed first.
+    /// terrain, the ray tracer fails to set up; what was created is
+    /// destroyed first.
     pub(crate) fn new(
         gpu: &mut GpuContext,
         color_format: vk::Format,
@@ -158,7 +158,10 @@ impl Reflections {
         floor: &Floor,
         tee: &TeeBox,
         tracers: Option<&[TracerBuffers]>,
-    ) -> Result<Self, RenderError> {
+    ) -> Result<Option<Self>, RenderError> {
+        if matches!(floor, Floor::Terrain(_)) && tracers.is_none() {
+            return Ok(None);
+        }
         let target = create_target(&gpu.device, &mut gpu.allocator, extent)?;
         let composite = match CompositePass::new(&gpu.device, color_format, target.view()) {
             Ok(composite) => composite,
@@ -196,16 +199,12 @@ impl Reflections {
         });
         let rt = match (rt, &mirror) {
             (Some(Ok(rt)), _) => Some(rt),
-            (None, Some(_)) => None,
+            (None, _) => None,
             (Some(Err(e)), Some(_)) => {
                 eprintln!("RT setup failed, using mirror reflections: {e}");
                 None
             }
-            (rt, None) => {
-                let e = match rt {
-                    Some(Err(e)) => e,
-                    _ => RenderError::RayTracingUnavailable,
-                };
+            (Some(Err(e)), None) => {
                 // SAFETY: Just created; no GPU work has used them.
                 unsafe {
                     composite.destroy(&gpu.device);
@@ -214,7 +213,7 @@ impl Reflections {
                 return Err(e);
             }
         };
-        Ok(Self {
+        Ok(Some(Self {
             target,
             composite,
             mirror,
@@ -223,7 +222,7 @@ impl Reflections {
                 center: tee_ball_center(tee),
                 radius: tee.ball_radius,
             },
-        })
+        }))
     }
 
     /// Whether the ray tracer is available.
@@ -281,8 +280,8 @@ impl Reflections {
     /// flight that owns those buffers and whose fence was waited on; the
     /// color image is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image
     /// extent equals `frame.extent` and every view lies within it. Afterward the
-    /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the color
-    /// image still in `COLOR_ATTACHMENT_OPTIMAL`.
+    /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` (unless it records
+    /// nothing) and the color image still in `COLOR_ATTACHMENT_OPTIMAL`.
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,
