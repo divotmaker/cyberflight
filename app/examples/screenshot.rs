@@ -37,10 +37,19 @@
 //!   - `hole_trees.png` — a 140 mph drive pushed 9° right into the right
 //!     tree row, at rest under the tree, seen along the row
 //!
+//!   - `hole_rt_tee.png`, `hole_rt_flight.png`, `hole_rt_green.png` — the
+//!     hole ray-traced, when the GPU supports ray tracing: idle from the tee
+//!     camera; a 160 mph drive at 70 % of its flight over the fairway
+//!     bunkers, from the pond's left bank (70° field of view); the same
+//!     drive at 98.5 %, the ball just over the green's front slope
+//!   - `hole_mirror_flight.png` — `hole_rt_flight` on the same renderer
+//!     switched to `RenderMode::Rasterized`: the hole has no mirror, so no
+//!     reflections
+//!
 //!   - `menu.png` — the startup menu over the idle driving range (raster)
 //!
-//! The hole images are raster (`RtMode::Off`): the hole draws no
-//! reflections.
+//! The other hole images are raster (`RtMode::Off`): without ray tracing
+//! the hole draws no reflections.
 //!
 //! Compare two runs with `cargo run -p cf-test -- compare <dir_a> <dir_b>`.
 
@@ -461,7 +470,66 @@ fn render_hole() -> Result<()> {
     };
     let mut treed = animate(&range, pushed, 0.0).0;
     let row = look_at(Vec3::new(-20.0, 0.0, 110.0), Vec3::new(-33.0, -8.0, 220.0));
-    render_at_rest(&mut renderer, row, &mut treed, "hole_trees")
+    render_at_rest(&mut renderer, row, &mut treed, "hole_trees")?;
+
+    render_hole_rt(&range)
+}
+
+/// Render the hole ray-traced (`hole_rt_*`), then one view with the
+/// renderer switched to mirror (`hole_mirror_flight`). Skipped when the GPU
+/// does not ray-trace.
+fn render_hole_rt(range: &Range) -> Result<()> {
+    let hole = range.ground.hole().context("not a hole")?;
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Auto)
+        .context("failed to create hole RT renderer")?;
+    if renderer.render_mode() != RenderMode::RayTraced {
+        eprintln!("Ray tracing not supported — skipping hole RT screenshots");
+        return Ok(());
+    }
+    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
+    let idle = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
+    renderer.update_hud(&idle.lines, &idle.fills);
+    eprintln!("Rendering hole_rt_tee...");
+    let frame = renderer.render(&range.camera).context("render failed")?;
+    save_png(&frame, &out_path("hole_rt_tee.png"))?;
+
+    let drive = ShotInput {
+        ball_speed_mph: 160.0,
+        launch_angle_deg: 12.0,
+        launch_azimuth_deg: 0.0,
+        backspin_rpm: 2600.0,
+        sidespin_rpm: 0.0,
+    };
+    let above =
+        |x: f64, z: f64, up: f64| Vec3::new(x as f32, (hole.height(x, z) + up) as f32, z as f32);
+    // From the pond's left bank, 6 m up, 70° field of view: the tracer over
+    // the fairway bunkers and its reflection across the pond and fairway.
+    let (flight, now) = animate(range, drive, 0.70);
+    let rough = Camera {
+        fov_y: 70f32.to_radians(),
+        ..look_at(above(42.0, 172.0, 6.0), above(0.0, 205.0, 4.0))
+    };
+    renderer.update_flight(&[render_data(&flight, now)?]);
+    eprintln!("Rendering hole_rt_flight...");
+    let frame = renderer.render(&rough).context("render failed")?;
+    save_png(&frame, &out_path("hole_rt_flight.png"))?;
+
+    // In front of the green and to the right, 6 m up: the ball just over
+    // the pad's front slope, its reflection on the slope.
+    let (flight, now) = animate(range, drive, 0.985);
+    let data = render_data(&flight, now)?;
+    let front = look_at(above(-22.0, 232.0, 6.0), data.ball_pos);
+    renderer.update_flight(&[data]);
+    eprintln!("Rendering hole_rt_green...");
+    let frame = renderer.render(&front).context("render failed")?;
+    save_png(&frame, &out_path("hole_rt_green.png"))?;
+
+    let (flight, now) = animate(range, drive, 0.70);
+    renderer.update_flight(&[render_data(&flight, now)?]);
+    renderer.set_render_mode(RenderMode::Rasterized);
+    eprintln!("Rendering hole_mirror_flight...");
+    let frame = renderer.render(&rough).context("render failed")?;
+    save_png(&frame, &out_path("hole_mirror_flight.png"))
 }
 
 /// Render the startup menu over the idle driving range, as the windowed app

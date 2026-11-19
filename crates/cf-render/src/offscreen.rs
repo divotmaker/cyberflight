@@ -41,8 +41,9 @@ impl OffscreenRenderer {
     ///
     /// `RtMode::Off` creates the device without ray tracing; `Auto` requests
     /// it and ray-traces floor reflections when the GPU supports them and
-    /// they set up (otherwise it mirrors them across the floor and says so on
-    /// stderr). Scenery without a floor draws no reflections.
+    /// they set up (otherwise it mirrors them across a flat floor and says
+    /// so on stderr; terrain has no mirror). Scenery without a floor draws no
+    /// reflections.
     pub fn new(
         width: u32,
         height: u32,

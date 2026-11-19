@@ -41,12 +41,14 @@ fn next_reflections(current: RenderMode) -> RenderMode {
 }
 
 /// The notice that says which reflections are drawn, after a press of the
-/// reflections key left the renderer in `mode`.
-fn reflections_notice(mode: RenderMode, ray_tracing_available: bool) -> &'static str {
-    match (mode, ray_tracing_available) {
-        (RenderMode::RayTraced, _) => "REFLECTIONS: RAY TRACED",
-        (RenderMode::Rasterized, true) => "REFLECTIONS: MIRROR",
-        (RenderMode::Rasterized, false) => "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE",
+/// reflections key left the renderer in `mode`, on a flat floor (`flat`,
+/// which the mirror reflects on) or on terrain (only ray-traced).
+fn reflections_notice(mode: RenderMode, ray_tracing_available: bool, flat: bool) -> &'static str {
+    match (mode, ray_tracing_available, flat) {
+        (RenderMode::RayTraced, _, _) => "REFLECTIONS: RAY TRACED",
+        (RenderMode::Rasterized, _, false) => "REFLECTIONS: OFF",
+        (RenderMode::Rasterized, true, true) => "REFLECTIONS: MIRROR",
+        (RenderMode::Rasterized, false, true) => "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE",
     }
 }
 
@@ -358,15 +360,18 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && !event.repeat
-                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
-                    // The hole draws no reflections to switch.
-                    && self.range.ground.hole().is_none() =>
+                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyR) =>
             {
-                if let Some(renderer) = &mut self.renderer {
+                let flat = self.range.ground.hole().is_none();
+                // Without ray tracing the hole draws no reflections to switch.
+                if let Some(renderer) = &mut self.renderer
+                    && (flat || renderer.ray_tracing_available())
+                {
                     renderer.set_render_mode(next_reflections(renderer.render_mode()));
                     let text = reflections_notice(
                         renderer.render_mode(),
                         renderer.ray_tracing_available(),
+                        flat,
                     );
                     eprintln!("{text}");
                     self.notice = Some((text, Instant::now()));
@@ -560,18 +565,28 @@ mod tests {
     #[test]
     fn the_notice_names_the_reflections_drawn() {
         assert_eq!(
-            reflections_notice(RenderMode::RayTraced, true),
+            reflections_notice(RenderMode::RayTraced, true, true),
             "REFLECTIONS: RAY TRACED"
         );
         assert_eq!(
-            reflections_notice(RenderMode::Rasterized, true),
+            reflections_notice(RenderMode::Rasterized, true, true),
             "REFLECTIONS: MIRROR"
+        );
+        // Terrain has no mirror: switching away from ray tracing turns the
+        // reflections off.
+        assert_eq!(
+            reflections_notice(RenderMode::RayTraced, true, false),
+            "REFLECTIONS: RAY TRACED"
+        );
+        assert_eq!(
+            reflections_notice(RenderMode::Rasterized, true, false),
+            "REFLECTIONS: OFF"
         );
         // Pressing the key without a ray tracer stays on the mirror and says why.
         let stays = next_reflections(RenderMode::Rasterized);
         assert_eq!(stays, RenderMode::RayTraced, "the key asks for ray tracing");
         assert_eq!(
-            reflections_notice(RenderMode::Rasterized, false),
+            reflections_notice(RenderMode::Rasterized, false, true),
             "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE"
         );
     }

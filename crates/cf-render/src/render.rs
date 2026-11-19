@@ -45,8 +45,9 @@ impl Renderer {
     /// Create a renderer for `swapchain` on `gpu`, drawing the range
     /// `scenery` with the ball on the tee. When the scenery has a floor, it
     /// ray-traces floor reflections when the GPU supports them and they set
-    /// up (otherwise it mirrors them across the floor and says so on
-    /// stderr). Scenery without a floor draws no reflections.
+    /// up (otherwise it mirrors them across a flat floor and says so on
+    /// stderr; terrain has no mirror). Scenery without a floor draws no
+    /// reflections.
     ///
     /// # Errors
     /// A part fails to create; what was created, and `swapchain`, are

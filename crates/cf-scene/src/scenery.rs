@@ -6,7 +6,7 @@
 //! line layers (1 px lines), each in its color, with the pipelines it uses
 //! for the grid.
 
-use glam::Vec4;
+use glam::{Vec3, Vec4};
 
 use crate::grid::{GridConfig, GridVertex};
 
@@ -24,7 +24,27 @@ pub struct Scenery {
     pub fills: Vec<Layer>,
     /// `LINE_LIST` layers, 1 px, drawn after the fills.
     pub lines: Vec<Layer>,
-    /// The flat reflective floor, when the ground is one: the grid whose
-    /// floor the reflections are drawn on. `None` draws no reflections.
-    pub floor: Option<GridConfig>,
+    /// The reflective ground the reflections are drawn on. `None` draws no
+    /// reflections.
+    pub floor: Option<Floor>,
+}
+
+/// The reflective ground of a range.
+#[derive(Debug, Clone)]
+pub enum Floor {
+    /// The plane Y = 0 under the grid of this config and the tee box. Both
+    /// reflection paths draw on it: ray-traced and mirrored.
+    Flat(GridConfig),
+    /// Shaped ground. Only the ray tracer reflects on it; without ray
+    /// tracing it draws no reflections.
+    Terrain(GroundMesh),
+}
+
+/// A `TRIANGLE_LIST` with a unit normal per vertex: the surface's normal at
+/// that vertex, which the ray tracer interpolates across each triangle.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GroundMesh {
+    pub positions: Vec<Vec3>,
+    /// One per position.
+    pub normals: Vec<Vec3>,
 }

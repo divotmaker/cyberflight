@@ -3,7 +3,8 @@
 //!
 //! The black mesh lies [`MESH_DROP_M`] under the surface, so the lines on
 //! the surface never fight it for depth; the grid lies exactly on the
-//! surface, and the outlines 1 cm above it.
+//! surface, and the outlines 1 cm above it. The reflective ground the ray
+//! tracer reflects on ([`reflective_ground`]) lies exactly on the surface.
 
 use dimple::units::yards_to_meters;
 use glam::Vec3;
@@ -11,6 +12,7 @@ use glam::Vec3;
 use crate::green::RING_SEGMENTS;
 use crate::grid::{GridConfig, GridVertex};
 use crate::hole::{Bunker, CANOPY_BASE, CUP_RADIUS_M, Hole, Pond, Tree};
+use crate::scenery::GroundMesh;
 
 /// How far the terrain mesh lies under the surface (m).
 pub(crate) const MESH_DROP_M: f64 = 0.15;
@@ -84,6 +86,44 @@ pub fn terrain_mesh(hole: &Hole, grid: &GridConfig) -> Vec<GridVertex> {
         }
     }
     out
+}
+
+/// The hole's reflective ground (`TRIANGLE_LIST`): the extent and the
+/// [`CELL_YD`] cells of [`terrain_mesh`], exactly on the surface, each
+/// vertex with the surface normal [`Hole::normal`] there. The tee box lies
+/// on it, as it lies on the flat floor.
+#[must_use]
+pub fn reflective_ground(hole: &Hole, grid: &GridConfig) -> GroundMesh {
+    let cell = yards_to_meters(CELL_YD);
+    let lateral = yards_to_meters(f64::from(grid.lateral));
+    let xs: Vec<f64> = steps(-lateral, lateral, cell).collect();
+    let zs: Vec<f64> = steps(
+        -yards_to_meters(5.0),
+        yards_to_meters(f64::from(grid.downrange)),
+        cell,
+    )
+    .collect();
+    let lattice: Vec<(Vec3, Vec3)> = zs
+        .iter()
+        .flat_map(|&z| {
+            xs.iter().map(move |&x| {
+                let p = Vec3::new(x as f32, hole.height(x, z) as f32, z as f32);
+                (p, hole.normal(x, z).as_vec3())
+            })
+        })
+        .collect();
+    let at = |i: usize, j: usize| lattice[j * xs.len() + i];
+    let mut mesh = GroundMesh::default();
+    for j in 0..zs.len() - 1 {
+        for i in 0..xs.len() - 1 {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            for (p, n) in [a, b, c, a, c, d] {
+                mesh.positions.push(p);
+                mesh.normals.push(n);
+            }
+        }
+    }
+    mesh
 }
 
 /// The grid of `grid` draped over the hole: the same lines as
@@ -309,6 +349,76 @@ mod tests {
 
     fn hole() -> Hole {
         Hole::no_1()
+    }
+
+    fn hole_grid() -> GridConfig {
+        GridConfig {
+            spacing: 10.0,
+            downrange: 450.0,
+            lateral: 50.0,
+        }
+    }
+
+    #[test]
+    fn the_reflective_ground_lies_on_the_surface_with_its_normals() {
+        let h = hole();
+        let mesh = reflective_ground(&h, &hole_grid());
+        assert_eq!(mesh.positions.len() % 3, 0);
+        assert_eq!(mesh.positions.len(), mesh.normals.len());
+        for (p, n) in mesh.positions.iter().zip(&mesh.normals).step_by(7) {
+            let (x, z) = (f64::from(p.x), f64::from(p.z));
+            assert!((f64::from(p.y) - h.height(x, z)).abs() < 1e-4, "({x}, {z})");
+            let want = h.normal(x, z).as_vec3();
+            // `p` is the vertex rounded to f32, `n` was taken before rounding.
+            assert!((*n - want).length() < 1e-4, "({x}, {z}): {n} vs {want}");
+            assert!((n.length() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn normals_point_up_on_flat_ground_and_tilt_downhill_on_a_slope() {
+        let h = hole();
+        let mesh = reflective_ground(&h, &hole_grid());
+        let near = |x: f32, z: f32| {
+            let i = mesh
+                .positions
+                .iter()
+                .position(|p| (p.x - x).abs() < 0.6 && (p.z - z).abs() < 0.6)
+                .expect("a vertex there");
+            (mesh.positions[i], mesh.normals[i])
+        };
+        // Around the tee the ground is level at Y = 0.
+        let (p, n) = near(4.0, 3.0);
+        assert_eq!(p.y, 0.0);
+        assert_eq!(n, Vec3::Y);
+        // Halfway down the drop from the tee (z 5 to 110, 0 to -9.5 m) the
+        // smoothstep is steepest: 1.5 x 9.5 / 105 per meter, falling toward
+        // +Z, so the normal leans downrange and not sideways.
+        let (p, n) = near(0.0, 57.5);
+        let slope = 1.5 * 9.5 / 105.0;
+        let lean = Vec3::new(0.0, 1.0, slope).normalize();
+        assert!((p.z - 57.5).abs() < 0.6);
+        assert!(n.z > 0.1 && n.x.abs() < 1e-6, "{n}");
+        assert!((n - lean).length() < 0.01, "{n} vs {lean}");
+        // A bunker's far wall (bunker 1 at x 17, z 212) faces back up the
+        // hole: its normal leans toward -Z, its near wall toward +Z.
+        let (_, far) = near(17.0, 218.0);
+        let (_, short) = near(17.0, 206.0);
+        assert!(far.z < -0.05 && short.z > 0.05, "{far} {short}");
+    }
+
+    #[test]
+    fn the_reflective_ground_covers_the_terrain_mesh() {
+        let h = hole();
+        let grid = hole_grid();
+        let mesh = reflective_ground(&h, &grid);
+        let drawn = terrain_mesh(&h, &grid);
+        assert_eq!(mesh.positions.len(), drawn.len());
+        for (p, v) in mesh.positions.iter().zip(&drawn).step_by(11) {
+            let [x, y, z] = v.position;
+            assert_eq!((p.x, p.z), (x, z));
+            assert!((p.y - y - MESH_DROP_M as f32).abs() < 1e-4);
+        }
     }
 
     #[test]

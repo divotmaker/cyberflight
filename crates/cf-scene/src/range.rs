@@ -4,7 +4,7 @@ use crate::green::{DEFAULT_GREEN, GreenConfig, generate_green_edge};
 use crate::grid::{GridConfig, generate_grid_vertices};
 use crate::hole::Hole;
 use crate::hole_draw;
-use crate::scenery::{Layer, Scenery};
+use crate::scenery::{Floor, Layer, Scenery};
 
 /// The ground a range is played on.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,7 +80,8 @@ impl Range {
     /// grid. A hole: the black terrain mesh and the cup's disc as fills;
     /// the draped grid (cyan), the fairway outline (cyan), the bunkers
     /// (sand), the ponds (water), the trees (tree), the green's ring and the cup's rim, pin and flag (white) as
-    /// lines; no floor, so no reflections.
+    /// lines; its ground surface with smooth normals as the reflective
+    /// ground ([`Floor::Terrain`]), which only the ray tracer reflects on.
     #[must_use]
     pub fn scenery(&self) -> Scenery {
         match &self.ground {
@@ -98,7 +99,7 @@ impl Range {
                 Scenery {
                     fills: Vec::new(),
                     lines,
-                    floor: Some(self.grid),
+                    floor: Some(Floor::Flat(self.grid)),
                 }
             }
             Ground::Hole(hole) => {
@@ -132,7 +133,9 @@ impl Range {
                         layer(color::GREEN_EDGE, hole_draw::green_ring(hole)),
                         layer(color::PIN, hole_draw::cup_and_pin(hole)),
                     ],
-                    floor: None,
+                    floor: Some(Floor::Terrain(hole_draw::reflective_ground(
+                        hole, &self.grid,
+                    ))),
                 }
             }
         }
@@ -159,7 +162,7 @@ mod tests {
         assert!(scenery.fills.is_empty());
         assert_eq!(scenery.lines.len(), 1);
         assert_eq!(scenery.lines[0].color, color::CYAN);
-        assert!(scenery.floor.is_some());
+        assert!(matches!(scenery.floor, Some(Floor::Flat(_))));
     }
 
     #[test]
@@ -184,10 +187,10 @@ mod tests {
     }
 
     #[test]
-    fn the_hole_has_no_floor_and_its_mesh_lies_under_the_ground() {
+    fn the_hole_reflects_on_its_terrain_and_its_mesh_lies_under_the_ground() {
         let range = Range::hole();
         let scenery = range.scenery();
-        assert!(scenery.floor.is_none());
+        assert!(matches!(scenery.floor, Some(Floor::Terrain(_))));
         let hole = range.ground.hole().expect("a hole");
         for v in scenery.fills[0].vertices.iter().step_by(13) {
             let [x, y, z] = v.position.map(f64::from);

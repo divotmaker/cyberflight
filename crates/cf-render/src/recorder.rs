@@ -6,7 +6,7 @@ use gpu_allocator::vulkan::Allocator;
 use cf_scene::camera::Camera;
 use cf_scene::color;
 use cf_scene::grid::GridVertex;
-use cf_scene::scenery::Scenery;
+use cf_scene::scenery::{Floor, Scenery};
 use cf_scene::tee::TeeBox;
 
 use crate::context::GpuContext;
@@ -98,13 +98,16 @@ impl SceneRecorder {
     /// ray tracer's structures built from them) exists `frames` times (at
     /// least once), one set for each frame in flight.
     ///
-    /// When `scenery` has a floor, it adds reflections of the ball on the
-    /// tee, mirrored across the floor ([`RenderMode::Rasterized`]); with `RtMode::Auto` and a device that
+    /// When `scenery` has a flat floor, it adds reflections of the ball on
+    /// the tee, mirrored across the floor ([`RenderMode::Rasterized`]); with `RtMode::Auto` and a device that
     /// supports ray tracing, it also adds ray-traced ones and starts in
     /// `RayTraced` mode. If the ray tracer fails to set up, it says so on
-    /// stderr and keeps the mirror. If the reflections fail to set up, it
-    /// says so on stderr and renders without them. Without a floor it
-    /// renders without reflections.
+    /// stderr and keeps the mirror. On terrain the reflections are only
+    /// ray-traced: with `RtMode::Auto` and ray tracing it adds them and
+    /// starts in `RayTraced` mode, and `Rasterized` frames draw none. If the
+    /// reflections fail to set up, it says so on stderr and renders without
+    /// them. Without a floor, or on terrain without ray tracing, it renders
+    /// without reflections.
     ///
     /// # Errors
     /// Any other part fails to create; what was created is destroyed first.
@@ -156,15 +159,19 @@ impl SceneRecorder {
             .map(FrameResources::tracer_buffers)
             .collect::<Option<_>>()
             .filter(|_| rt == RtMode::Auto);
-        let reflections = match scenery.floor.as_ref().map(|grid| {
-            Reflections::new(
-                gpu,
-                color_format,
-                extent,
-                grid,
-                &tee,
-                tracer_buffers.as_deref(),
-            )
+        let reflections = match scenery.floor.as_ref().and_then(|floor| {
+            // Only the ray tracer reflects on terrain.
+            let reflects = matches!(floor, Floor::Flat(_)) || tracer_buffers.is_some();
+            reflects.then(|| {
+                Reflections::new(
+                    gpu,
+                    color_format,
+                    extent,
+                    floor,
+                    &tee,
+                    tracer_buffers.as_deref(),
+                )
+            })
         }) {
             Some(Ok(reflections)) => Some(reflections),
             Some(Err(e)) => {
