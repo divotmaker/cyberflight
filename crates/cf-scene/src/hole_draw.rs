@@ -6,12 +6,13 @@
 //! surface, and the outlines 1 cm above it. The reflective ground the ray
 //! tracer reflects on ([`reflective_ground`]) lies exactly on the surface.
 
+use dimple::cup::REGULATION_RADIUS_M;
 use dimple::units::yards_to_meters;
 use glam::Vec3;
 
 use crate::green::RING_SEGMENTS;
 use crate::grid::{GridConfig, GridVertex};
-use crate::hole::{Bunker, CANOPY_BASE, CUP_RADIUS_M, FLAG_SIZE_M, Hole, PIN_HEIGHT_M, Pond, Tree};
+use crate::hole::{Bunker, CANOPY_BASE, FLAG_SIZE_M, Hole, PIN_HEIGHT_M, Pond, Tree};
 use crate::scenery::GroundMesh;
 
 /// How far the terrain mesh lies under the surface (m).
@@ -293,8 +294,8 @@ pub fn cup_disc(hole: &Hole) -> Vec<GridVertex> {
         let a = f64::from(k) / f64::from(CUP_SEGMENTS) * std::f64::consts::TAU;
         on(
             hole,
-            cx + CUP_RADIUS_M * a.cos(),
-            cz + CUP_RADIUS_M * a.sin(),
+            cx + REGULATION_RADIUS_M * a.cos(),
+            cz + REGULATION_RADIUS_M * a.sin(),
             0.004,
         )
     };
@@ -314,8 +315,8 @@ pub fn cup_and_pin(hole: &Hole) -> Vec<GridVertex> {
             let a = f64::from(k) / f64::from(CUP_SEGMENTS) * std::f64::consts::TAU;
             on(
                 hole,
-                cx + CUP_RADIUS_M * a.cos(),
-                cz + CUP_RADIUS_M * a.sin(),
+                cx + REGULATION_RADIUS_M * a.cos(),
+                cz + REGULATION_RADIUS_M * a.sin(),
                 0.005,
             )
         })

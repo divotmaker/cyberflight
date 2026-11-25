@@ -308,9 +308,6 @@ fn a_topped_shot_stops_on_the_hill() {
     assert!(at.y < 0.0, "below the tee: y {:.2}", at.y);
 }
 
-const BALL_R: f64 = 0.021_335;
-const G: f64 = 9.81;
-
 /// A ground point at scene (x, z) moving downrange at `v` m/s.
 fn gp(time: f64, x: f64, z: f64, v: f64, phase: dimple::ground::Phase) -> GroundPoint {
     let state = dimple::BallState {
@@ -322,26 +319,63 @@ fn gp(time: f64, x: f64, z: f64, v: f64, phase: dimple::ground::Phase) -> Ground
     GroundPoint::new(&state, phase)
 }
 
-/// A straight roll at `v` m/s across the cup at (0, 10), `off` m to the
-/// side, from 0.5 m short to 0.5 m past, in `phase`.
+/// A cup off the target line, at scene (2, 10): mixing up the scene's
+/// (x, z) and dimple's would put it on the other side of the line, where
+/// no ball rolling past this one ever drops.
+const OFF_LINE_CUP: (f64, f64) = (2.0, 10.0);
+
+/// When a straight roll at `v` m/s across [`OFF_LINE_CUP`], `off` m to the
+/// side, from 0.5 m short to 0.5 m past, in `phase`, drops.
 fn across(off: f64, v: f64, phase: dimple::ground::Phase) -> Option<f64> {
-    let points = [gp(1.0, off, 9.5, v, phase), gp(2.0, off, 10.5, v, phase)];
-    holed_at(&points, (0.0, 10.0), BALL_R, G)
+    let (x, z) = OFF_LINE_CUP;
+    let points = [
+        gp(1.0, x + off, z - 0.5, v, phase),
+        gp(2.0, x + off, z + 0.5, v, phase),
+    ];
+    captured(&points)
+}
+
+/// When the ball drops into [`OFF_LINE_CUP`] along `points`.
+fn captured(points: &[GroundPoint]) -> Option<f64> {
+    let h = Hole {
+        cup: OFF_LINE_CUP,
+        ..hole()
+    };
+    h.physics_cup()
+        .capture(points, &Tour::SEA_LEVEL)
+        .map(|c| c.time)
 }
 
 #[test]
 fn the_cup_takes_a_slow_enough_ball() {
     use dimple::ground::Phase::{Hop, Roll, Slide};
     let t = across(0.0, 1.2, Roll).expect("holed through the center");
-    assert!((t - 1.5).abs() < 1e-9, "at the crossing: {t}");
-    assert_eq!(across(0.0, 1.4, Roll), None);
-    assert!(across(0.04, 0.7, Slide).is_some());
-    assert_eq!(across(0.04, 0.9, Roll), None);
+    let edge = 1.0 + 0.5 - dimple::cup::REGULATION_RADIUS_M;
+    assert!(
+        (t - edge).abs() < 1e-9,
+        "when the center crosses the edge: {t}"
+    );
+    // Through the center a ball faster than its fall across the cup still
+    // drops: it strikes the far wall heading at or below the edge (limit
+    // 1.61 m/s).
+    assert!(across(0.0, 1.5, Roll).is_some());
+    assert_eq!(across(0.0, 1.7, Roll), None);
+    // Three quarters of the radius off center: it rolls onto the rim and in
+    // below 0.68 m/s and flies to the far wall and drops in up to about
+    // 1.07 m/s; above that it flies over.
+    assert!(across(0.04, 0.6, Slide).is_some());
+    assert!(across(0.04, 0.9, Roll).is_some());
+    assert_eq!(across(0.04, 1.2, Roll), None);
+    // Past the cup's radius it misses; a hop never drops.
     assert_eq!(across(0.06, 0.1, Roll), None);
     assert_eq!(across(0.0, 0.5, Hop), None);
-    // A ball that stops inside the cup's radius.
-    let stops = [gp(1.0, 0.0, 9.9, 0.2, Roll), gp(2.0, 0.03, 10.0, 0.0, Roll)];
-    assert!(holed_at(&stops, (0.0, 10.0), BALL_R, G).is_some());
+    // A ball that stops just inside the edge, slowly, falls off the rim.
+    let (x, z) = OFF_LINE_CUP;
+    let stops = [
+        gp(1.0, x, z - 0.1, 0.2, Roll),
+        gp(2.0, x + 0.03, z, 0.0, Roll),
+    ];
+    assert!(captured(&stops).is_some());
 }
 
 /// A ball started at `v` m/s with no spin (it slides, then rolls) from 1 m
@@ -362,9 +396,9 @@ fn roll_at_the_cup(v: f64) -> (Hole, ShotResult) {
 }
 
 fn holed(h: &Hole, r: &ShotResult) -> Option<f64> {
-    use dimple::AeroModel;
-    let model = Tour::SEA_LEVEL;
-    holed_at(&r.ground.points, h.cup, model.radius_m(), model.gravity())
+    h.physics_cup()
+        .capture(&r.ground.points, &Tour::SEA_LEVEL)
+        .map(|c| c.time)
 }
 
 #[test]
@@ -379,6 +413,8 @@ fn a_holed_ball_rests_in_the_cup() {
     let (h, r) = roll_at_the_cup(2.0);
     let cut = stop_of(&h, &r).expect("holed");
     assert_eq!(cut.stop, Stop::Cup);
+    // Cut when the ball's center crosses the cup's edge.
+    assert_eq!(Some(cut.time()), holed(&h, &r));
     let at = physics_to_scene(cut.rest());
     let (cx, cz) = h.cup;
     assert_eq!((at.x, at.z), (cx, cz));
@@ -386,6 +422,23 @@ fn a_holed_ball_rests_in_the_cup() {
     // with the green.
     let radius = Tour::SEA_LEVEL.radius_m();
     assert!((at.y - (h.height(cx, cz) - 2.0 * radius)).abs() < 1e-9);
+}
+
+#[test]
+fn a_roll_too_fast_to_fall_across_drops_off_the_far_wall() {
+    let (h, r) = roll_at_the_cup(2.4);
+    let capture = h
+        .physics_cup()
+        .capture(&r.ground.points, &Tour::SEA_LEVEL)
+        .expect("holed");
+    // Faster at the edge than the ball's fall of one radius across the cup
+    // (1.31 m/s) allows, it strikes the far wall heading at or below the
+    // edge (limit 1.61 m/s through the center) and drops.
+    assert!(
+        (1.32..1.6).contains(&capture.speed_mps),
+        "{}",
+        capture.speed_mps
+    );
 }
 
 #[test]
@@ -452,12 +505,7 @@ fn path(r: &ShotResult) -> Vec<TrajectoryPoint> {
 
 fn stop_of(h: &Hole, r: &ShotResult) -> Option<Cut> {
     let model = Tour::SEA_LEVEL;
-    h.stop(
-        &path(r),
-        &r.ground.points,
-        model.radius_m(),
-        model.gravity(),
-    )
+    h.stop(&path(r), &r.ground.points, &model)
 }
 
 #[test]

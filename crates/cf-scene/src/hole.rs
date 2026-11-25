@@ -13,9 +13,10 @@
 //! `(1 − ρ²)³` for each bunker and pond, so heights and normals are
 //! continuous.
 
-use dimple::Vec3;
-use dimple::ground::{GroundPoint, GroundSample, Phase, Restitution, Surface, Terrain};
+use dimple::cup::Cup;
+use dimple::ground::{GroundPoint, GroundSample, Restitution, Surface, Terrain};
 use dimple::trajectory::TrajectoryPoint;
+use dimple::{AeroModel, Vec3};
 
 use crate::frame::{physics_to_scene, scene_to_physics};
 use crate::green::GreenConfig;
@@ -574,9 +575,12 @@ impl Hole {
     /// Whether and where a shot stops before dimple brings it to rest:
     /// the first of the ball reaching water ([`water_entry`](Self::water_entry)),
     /// the ball hitting a tree ([`tree_hit`](Self::tree_hit)) and the ball
-    /// dropping into the cup ([`holed_at`], at rest in the cup's center with
-    /// the ball's top level with the green). `path` is the shot's timeline and
-    /// `points` its ground points, both in dimple's frame.
+    /// dropping into the cup ([`Cup::capture`] on the cup in dimple's frame,
+    /// cut when the ball's center crosses the cup's edge, at rest in the cup's
+    /// center with the ball's top level with the green). `path` is the shot's
+    /// timeline and `points` its ground points, both in dimple's frame; the
+    /// ball's radius and gravity come from `model`. A ball that lips out or
+    /// flies over the cup runs on along `points`.
     ///
     /// Trees stop the ball and drop it: it loses its travel where it
     /// enters a trunk or canopy and falls straight down under gravity to
@@ -587,16 +591,16 @@ impl Hole {
         &self,
         path: &[TrajectoryPoint],
         points: &[GroundPoint],
-        ball_radius: f64,
-        gravity: f64,
+        model: &dyn AeroModel,
     ) -> Option<Cut> {
+        let (ball_radius, gravity) = (model.radius_m(), model.gravity());
         let water = self
             .water_entry(path)
             .map(|(time, pos)| Cut::at(Stop::Water, time, pos));
         let tree = self
             .tree_hit(path)
             .map(|(time, at)| self.drop(time, at, gravity));
-        let cup = holed_at(points, self.cup, ball_radius, gravity).map(|time| {
+        let cup = self.physics_cup().capture(points, model).map(|capture| {
             let (x, z) = self.cup;
             // dimple's ball point rides on the ground, and the ball is drawn one radius above
             // it: two radii under the green, the ball's top is level with the green, in the cup.
@@ -605,12 +609,19 @@ impl Hole {
                 self.height(x, z) - 2.0 * ball_radius,
                 z,
             ));
-            Cut::at(Stop::Cup, time, pos)
+            Cut::at(Stop::Cup, capture.time, pos)
         });
         [water, tree, cup]
             .into_iter()
             .flatten()
             .min_by(|a, b| a.time().total_cmp(&b.time()))
+    }
+
+    /// The cup as dimple's regulation [`Cup`], centered in dimple's frame.
+    fn physics_cup(&self) -> Cup {
+        let (x, z) = self.cup;
+        let center = scene_to_physics(glam::DVec3::new(x, 0.0, z));
+        Cup::new(center.x, center.z)
     }
 
     /// The ball falling from the scene point `at` at shot time `time`
@@ -650,57 +661,11 @@ pub const TREE_STEP_M: f64 = 0.1;
 /// Points in the fall of a ball that hit a tree, after the hit.
 const DROP_POINTS: u32 = 8;
 
-/// Radius of the cup (m): 4.25 in across.
-pub const CUP_RADIUS_M: f64 = 0.054;
 /// Height of the pin (m).
 pub const PIN_HEIGHT_M: f64 = 2.13;
 /// The flag, a triangle off the top of the pin toward +X: its length out
 /// from the pin and its height along the pin (m).
 pub const FLAG_SIZE_M: (f64, f64) = (0.5, 0.35);
-
-/// When the ball drops into the cup at scene (x, z) `cup`: the shot time,
-/// or `None`.
-///
-/// `points` are dimple's ground points (its frame). Each segment the ball
-/// slides or rolls along (never a hop) is checked at its closest approach
-/// `d` to the cup's center, with the ball's horizontal speed `v` there. The
-/// ball drops if `d < R` and `v ≤ (2·√(R² − d²) − r)·√(g / 2r)`, with `R`
-/// the cup's radius and `r` = `ball_radius`: it falls its own radius before
-/// it has crossed the chord of the cup under it. A ball that flies or hops
-/// over the cup, lips out or is deflected is not modeled.
-#[must_use]
-pub fn holed_at(
-    points: &[GroundPoint],
-    cup: (f64, f64),
-    ball_radius: f64,
-    gravity: f64,
-) -> Option<f64> {
-    let r_cup = CUP_RADIUS_M;
-    let fall = (gravity / (2.0 * ball_radius)).sqrt();
-    points.windows(2).find_map(|pair| {
-        let (a, b) = (&pair[0], &pair[1]);
-        if a.phase == Phase::Hop {
-            return None;
-        }
-        let (pa, pb) = (physics_to_scene(a.pos), physics_to_scene(b.pos));
-        let (ax, az) = (pa.x - cup.0, pa.z - cup.1);
-        let (sx, sz) = (pb.x - pa.x, pb.z - pa.z);
-        let len2 = sx * sx + sz * sz;
-        let t = if len2 > 0.0 {
-            (-(ax * sx + az * sz) / len2).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let d = (ax + t * sx).hypot(az + t * sz);
-        if d >= r_cup {
-            return None;
-        }
-        let speed = |p: &GroundPoint| p.vel.x.hypot(p.vel.z);
-        let v = speed(a) + (speed(b) - speed(a)) * t;
-        let limit = (2.0 * (r_cup * r_cup - d * d).sqrt() - ball_radius) * fall;
-        (v <= limit).then_some(a.time + (b.time - a.time) * t)
-    })
-}
 
 /// A [`Hole`] as a dimple [`Terrain`]: each sample maps dimple's (x, z) to
 /// the scene, reads the hole there and maps the normal back.

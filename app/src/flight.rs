@@ -166,14 +166,7 @@ impl AnimatedFlight {
             ground::simulate_shot(&shot.input, model, ground)
         };
         let hole = ground.hole();
-        let cut = hole.and_then(|h| {
-            h.stop(
-                &build_timeline(&result),
-                &result.ground.points,
-                model.radius_m(),
-                model.gravity(),
-            )
-        });
+        let cut = hole.and_then(|h| h.stop(&build_timeline(&result), &result.ground.points, model));
         Self::from_result(shot, result, launch_time, hole.cloned(), cut)
     }
 
