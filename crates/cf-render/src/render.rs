@@ -4,8 +4,8 @@ use ash::vk;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
-use cf_scene::grid::GridVertex;
-use cf_scene::scenery::Scenery;
+use cf_scene::green::GreenConfig;
+use cf_scene::grid::{GridConfig, GridVertex};
 
 use crate::context::GpuContext;
 use crate::error::RenderError;
@@ -43,11 +43,9 @@ pub struct Renderer {
 
 impl Renderer {
     /// Create a renderer for `swapchain` on `gpu`, drawing the range
-    /// `scenery` with the ball on the tee. When the scenery has a floor, it
-    /// ray-traces floor reflections when the GPU supports them and they set
-    /// up (otherwise it mirrors them across a flat floor and says so on
-    /// stderr; terrain has no mirror). Scenery without a floor draws no
-    /// reflections.
+    /// `grid_config` with the ball on the tee. It ray-traces floor
+    /// reflections when the GPU supports them and they set up (otherwise it
+    /// mirrors them across the floor and says so on stderr).
     ///
     /// # Errors
     /// A part fails to create; what was created, and `swapchain`, are
@@ -55,7 +53,7 @@ impl Renderer {
     pub fn new(
         mut gpu: GpuContext,
         swapchain: Swapchain,
-        scenery: &Scenery,
+        grid_config: &GridConfig,
     ) -> Result<Self, RenderError> {
         // The HUD pass ends every frame and leaves the image ready to present.
         // Ray-traced reflections when the device supports them; mirrored if not.
@@ -66,7 +64,7 @@ impl Renderer {
             swapchain.format,
             vk::ImageLayout::PRESENT_SRC_KHR,
             swapchain.extent,
-            scenery,
+            grid_config,
             RtMode::Auto,
             swapchain.image_views.len(),
         ) {
@@ -420,6 +418,13 @@ impl Renderer {
     /// Falls back to `Rasterized` if RT is requested but not available.
     pub fn set_render_mode(&mut self, mode: RenderMode) {
         self.recorder.set_mode(mode);
+    }
+
+    /// Draw the edge of `green` as one ring on the range floor, faded like
+    /// the renderer's grid; `None` draws nothing. Replaces any green set
+    /// before.
+    pub fn set_green(&mut self, green: Option<&GreenConfig>) -> Result<(), RenderError> {
+        self.recorder.set_green(&mut self.gpu, green)
     }
 
     /// Set or clear the chase camera for the right 20% viewport.

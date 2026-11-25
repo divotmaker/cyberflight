@@ -5,8 +5,8 @@ use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
 use cf_scene::color;
-use cf_scene::grid::GridVertex;
-use cf_scene::scenery::Scenery;
+use cf_scene::green::GreenConfig;
+use cf_scene::grid::{GridConfig, GridVertex};
 use cf_scene::tee::TeeBox;
 
 use crate::context::GpuContext;
@@ -87,27 +87,24 @@ pub(crate) struct SceneRecorder {
     mode: RenderMode,
     /// Chase camera for the right 20 % inset.
     chase: Option<Camera>,
+    grid: GridConfig,
     tee: TeeBox,
 }
 
 impl SceneRecorder {
     /// Create the passes and pipelines for an `extent` image of
     /// `color_format` that the HUD pass leaves in `output_layout`, and the
-    /// layers of `scenery` with the default tee box and the ball on the tee.
+    /// scene of `grid` with the default tee box and the ball on the tee.
     /// Every resource the CPU rewrites per frame (the vertex buffers and the
     /// ray tracer's structures built from them) exists `frames` times (at
     /// least once), one set for each frame in flight.
     ///
-    /// When `scenery` has a flat floor, it adds reflections of the ball on
-    /// the tee, mirrored across the floor ([`RenderMode::Rasterized`]); with `RtMode::Auto` and a device that
+    /// It adds reflections of the ball on the tee, mirrored across the floor
+    /// ([`RenderMode::Rasterized`]); with `RtMode::Auto` and a device that
     /// supports ray tracing, it also adds ray-traced ones and starts in
     /// `RayTraced` mode. If the ray tracer fails to set up, it says so on
-    /// stderr and keeps the mirror. On terrain the reflections are only
-    /// ray-traced: with `RtMode::Auto` and ray tracing it adds them and
-    /// starts in `RayTraced` mode, and `Rasterized` frames draw none. If the
-    /// reflections fail to set up, it says so on stderr and renders without
-    /// them. Without a floor, or on terrain without ray tracing, it renders
-    /// without reflections.
+    /// stderr and keeps the mirror. If the reflections fail to set up, it
+    /// says so on stderr and renders without them.
     ///
     /// # Errors
     /// Any other part fails to create; what was created is destroyed first.
@@ -116,27 +113,22 @@ impl SceneRecorder {
         color_format: vk::Format,
         output_layout: vk::ImageLayout,
         extent: vk::Extent2D,
-        scenery: &Scenery,
+        grid: &GridConfig,
         rt: RtMode,
         frames: usize,
     ) -> Result<Self, RenderError> {
         let tee = TeeBox::default();
         let pipelines =
             ScenePipelines::new(&gpu.device, color_format, gpu.depth_format, output_layout)?;
-        let geometry = match SceneGeometry::new(
-            &gpu.device,
-            &mut gpu.allocator,
-            scenery,
-            &tee,
-            gpu.wide_lines,
-        ) {
-            Ok(geometry) => geometry,
-            Err(e) => {
-                // SAFETY: Just created; no GPU work has used it.
-                unsafe { pipelines.destroy(&gpu.device) };
-                return Err(e);
-            }
-        };
+        let geometry =
+            match SceneGeometry::new(&gpu.device, &mut gpu.allocator, grid, &tee, gpu.wide_lines) {
+                Ok(geometry) => geometry,
+                Err(e) => {
+                    // SAFETY: Just created; no GPU work has used it.
+                    unsafe { pipelines.destroy(&gpu.device) };
+                    return Err(e);
+                }
+            };
         let mut made: Vec<FrameResources> = Vec::with_capacity(frames.max(1));
         for _ in 0..frames.max(1) {
             match FrameResources::new(&gpu.device, &mut gpu.allocator, gpu.rt_supported) {
@@ -159,22 +151,19 @@ impl SceneRecorder {
             .map(FrameResources::tracer_buffers)
             .collect::<Option<_>>()
             .filter(|_| rt == RtMode::Auto);
-        let reflections = match scenery.floor.as_ref().map(|floor| {
-            Reflections::new(
-                gpu,
-                color_format,
-                extent,
-                floor,
-                &tee,
-                tracer_buffers.as_deref(),
-            )
-        }) {
-            Some(Ok(reflections)) => reflections,
-            Some(Err(e)) => {
+        let reflections = match Reflections::new(
+            gpu,
+            color_format,
+            extent,
+            grid,
+            &tee,
+            tracer_buffers.as_deref(),
+        ) {
+            Ok(reflections) => Some(reflections),
+            Err(e) => {
                 eprintln!("Reflections setup failed, rendering without them: {e}");
                 None
             }
-            None => None,
         };
         let mode = if reflections
             .as_ref()
@@ -192,6 +181,7 @@ impl SceneRecorder {
             reflections,
             mode,
             chase: None,
+            grid: *grid,
             tee,
         })
     }
@@ -201,6 +191,21 @@ impl SceneRecorder {
         self.reflections
             .as_ref()
             .is_some_and(Reflections::has_ray_tracing)
+    }
+
+    /// Draw the edge of `green` as one ring on the range floor, faded like
+    /// the recorder's grid; `None` draws nothing. Replaces any green set
+    /// before, waiting for the device to go idle before it frees the old one.
+    ///
+    /// # Errors
+    /// The wait or the upload fails.
+    pub(crate) fn set_green(
+        &mut self,
+        gpu: &mut GpuContext,
+        green: Option<&GreenConfig>,
+    ) -> Result<(), RenderError> {
+        self.geometry
+            .set_green(&gpu.device, &mut gpu.allocator, green, &self.grid)
     }
 
     /// Set or clear the chase camera of the right 20 % inset.

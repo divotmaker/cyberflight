@@ -6,7 +6,7 @@ A (very) digital driving range for golf simulators.
 > Ball flight comes from [dimple](https://github.com/divotmaker/dimple); its ground model
 > (bounce and roll after landing, so run and total distance) is **beta** and not yet validated
 > against measured data. See [docs/AERO.md](docs/AERO.md).
-> The whole driving range plays as fairway. A putt with only a speed and a direction (no launch angle or spin) rolls
+> The whole range plays as fairway. A putt with only a speed and a direction (no launch angle or spin) rolls
 > from the tee on green. An optional circular green, drawn as one neon-green ring, is off
 > by default; see [docs/AERO.md](docs/AERO.md) for how to enable it.
 
@@ -50,31 +50,19 @@ shot's arrival, launch and stop. The file starts over at every launch.
 ## Running
 
 ```bash
-cyberflight                         # borderless fullscreen, startup menu
+cyberflight                         # borderless fullscreen
 cyberflight --windowed              # 1920x1080 window
-cyberflight --range hole            # skip the menu: driving or hole
 cyberflight --frp ws://pc:5880/frp  # flighthook on another machine
 ```
 
-cyberflight opens with a menu over the driving range: pick the driving range or the hole
-with the arrow keys and Enter. `--range driving` or `--range hole` skips the menu.
-
-The hole is a straight 300 yd par 4 played from the tee: fairway, rough, bunkers, a pond,
-rows of trees and a raised green with a cup and pin. Shots bounce and roll on its slopes,
-stop in the water, under a tree or in the cup (a holed shot), and the HUD shows the distance
-to the pin and the lie.
-
-The ground reflects the tracer and the ball. On the driving range, a GPU that supports Vulkan
-ray tracing starts with ray-traced reflections; otherwise (or after `R`) the reflections are
-the tracer mirrored across the floor, which works on any Vulkan GPU and looks the same. On
-the hole the reflections follow its slopes and are ray traced only: `R` turns them off and on,
-and without ray tracing the hole draws no reflections.
+The floor reflects the tracer and the ball. With a GPU that supports Vulkan ray tracing, the
+window starts with ray-traced reflections; otherwise (or after `R`) the reflections are the
+tracer mirrored across the floor, which works on any Vulkan GPU and looks the same.
 
 | Key | Action |
 |---|---|
 | `Esc` | Quit |
-| `↑` / `↓`, `Enter` | Pick a range in the startup menu |
-| `R` | Driving range: switch the reflections between ray traced and mirrored (no ray tracing: mirrored only). Hole: switch them between ray traced and off (no ray tracing: none). The screen says which |
+| `R` | Switch the floor reflections between ray traced and mirrored; the screen says which (no ray tracing: mirrored only) |
 | `[` / `]` | Draw the tracer from more / fewer trajectory points |
 
 On Linux, winit picks Wayland or X11; set `CYBERFLIGHT_X11=1` to force X11.
@@ -82,10 +70,9 @@ On Linux, winit picks Wayland or X11; set `CYBERFLIGHT_X11=1` to force X11.
 ### Streaming
 
 `--stream` renders headless (no window) and streams H.264 through
-[ffmpeg](https://ffmpeg.org/), which must be on `PATH`. It draws the driving range, or the hole
-with `--range hole`. Like the window, it draws ray-traced reflections when the GPU supports
-Vulkan ray tracing; otherwise they are mirrored on the driving range and absent on the hole. It
-uses NVENC when a test encode succeeds and libx264 otherwise.
+[ffmpeg](https://ffmpeg.org/), which must be on `PATH`. Like the window, it draws ray-traced
+floor reflections when the GPU supports Vulkan ray tracing and mirrored ones otherwise. It uses
+NVENC when a test encode succeeds and libx264 otherwise.
 
 ```bash
 cyberflight --stream                                # UDP to 127.0.0.1:5004
@@ -103,7 +90,7 @@ cyberflight --stream --mode hls --serve --port 8080 # HLS in stream/, served ove
 
 Requires Rust 1.94 or newer (edition 2024) and a Vulkan 1.3 driver. Ray tracing
 needs `VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure`; it is optional (the
-driving range's reflections are then mirrored, and the hole has none).
+floor's reflections are then mirrored).
 
 ```bash
 cargo build --release -p cyberflight          # target/release/cyberflight
@@ -121,11 +108,8 @@ The `screenshot` example renders a fixed set of views headless (needs a Vulkan G
 shot with chase camera and HUD, the empty range, a 7-iron from five views (one with the HUD;
 the floor's reflections mirrored), ray-traced versions of the range and four of the 7-iron
 views on GPUs that ray-trace, and two frames (in flight, then idle) through the calls
-`--stream` makes, then the startup menu. On the hole it renders the tee from three cameras,
-the green, a drive in flight and at rest, a holed drive, a shot in the water and one in the
-trees, and on GPUs that ray-trace the tee, a drive over the fairway, over the pond and at the
-green with ray-traced reflections, plus the drive with them off. `cf-test` compares two sets,
-so a change can be checked for visual differences:
+`--stream` makes. `cf-test` compares two sets, so a change can be checked for visual
+differences:
 
 ```bash
 cargo run --release -p cyberflight --example screenshot -- --out before

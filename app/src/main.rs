@@ -17,13 +17,12 @@ use cf_render::context::{GpuConfig, GpuContext};
 use cf_render::mode::RenderMode;
 use cf_render::render::Renderer;
 use cf_render::window::Swapchain;
-use cf_scene::hud::{build_menu, build_notice};
+use cf_scene::hud::build_notice;
 use cf_scene::range::Range;
 use dimple::Tour;
 
 use cyberflight::flight::FlightManager;
 use cyberflight::intake::{self, FrpState};
-use cyberflight::menu::{self, MENU_ITEMS, Menu, MenuKey, RangeChoice};
 
 /// How often a minimized window wakes to take in shots and advance the
 /// flights without drawing.
@@ -41,14 +40,12 @@ fn next_reflections(current: RenderMode) -> RenderMode {
 }
 
 /// The notice that says which reflections are drawn, after a press of the
-/// reflections key left the renderer in `mode`, on a flat floor (`flat`,
-/// which the mirror reflects on) or on terrain (only ray-traced).
-fn reflections_notice(mode: RenderMode, ray_tracing_available: bool, flat: bool) -> &'static str {
-    match (mode, ray_tracing_available, flat) {
-        (RenderMode::RayTraced, _, _) => "REFLECTIONS: RAY TRACED",
-        (RenderMode::Rasterized, _, false) => "REFLECTIONS: OFF",
-        (RenderMode::Rasterized, true, true) => "REFLECTIONS: MIRROR",
-        (RenderMode::Rasterized, false, true) => "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE",
+/// reflections key left the renderer in `mode`.
+fn reflections_notice(mode: RenderMode, ray_tracing_available: bool) -> &'static str {
+    match (mode, ray_tracing_available) {
+        (RenderMode::RayTraced, _) => "REFLECTIONS: RAY TRACED",
+        (RenderMode::Rasterized, true) => "REFLECTIONS: MIRROR",
+        (RenderMode::Rasterized, false) => "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE",
     }
 }
 
@@ -84,22 +81,19 @@ struct App {
     minimized: bool,
     /// The notice shown over the scene and when it was raised.
     notice: Option<(&'static str, Instant)>,
-    /// The startup menu while it is open: drawn over the driving range,
-    /// it takes the arrow keys and Enter, and shots are dropped.
-    menu: Option<Menu>,
     /// Why the event loop was stopped, when the app could not run.
     fatal: Option<anyhow::Error>,
 }
 
 impl App {
     /// The app, taking in shots from `frp`, whose arrival times are seconds
-    /// since `start_time`, playing `range`.
-    fn with_range(windowed: bool, frp: FrpState, start_time: Instant, range: Range) -> Self {
+    /// since `start_time`.
+    fn new(windowed: bool, frp: FrpState, start_time: Instant) -> Self {
         Self {
             windowed,
             window: None,
             renderer: None,
-            range,
+            range: Range::new(),
             model: Tour::SEA_LEVEL,
             frp,
             flights: FlightManager::new(),
@@ -108,7 +102,6 @@ impl App {
             fps_timer: Instant::now(),
             minimized: false,
             notice: None,
-            menu: None,
             fatal: None,
         }
     }
@@ -150,8 +143,11 @@ impl App {
             size.height,
         )
         .context("failed to create swapchain")?;
-        let renderer = Renderer::new(gpu, swapchain, &self.range.scenery())
-            .context("failed to create renderer")?;
+        let mut renderer =
+            Renderer::new(gpu, swapchain, &self.range.grid).context("failed to create renderer")?;
+        renderer
+            .set_green(self.range.green.as_ref())
+            .context("failed to upload the green")?;
         eprintln!(
             "Renderer initialized: {}x{}",
             renderer.extent().width,
@@ -180,37 +176,8 @@ impl App {
     /// `now` (seconds since start).
     fn take_in(&mut self, now: f64) {
         for shot in self.frp.poll() {
-            if self.menu.is_some() {
-                eprintln!(
-                    "Shot #{} from {} dropped: no range picked yet",
-                    shot.shot.shot_number, shot.shot.device
-                );
-                continue;
-            }
             self.flights
-                .take_in(&shot, now, &self.model, &self.range.ground);
-        }
-    }
-
-    /// Apply `key` to the open menu. Picking the hole rebuilds the renderer
-    /// for it, once; picking the driving range closes the menu.
-    fn menu_key(&mut self, event_loop: &ActiveEventLoop, key: MenuKey) {
-        let Some(choice) = self.menu.as_mut().and_then(|m| m.key(key)) else {
-            return;
-        };
-        self.menu = None;
-        eprintln!("Range: {choice:?}");
-        if choice == RangeChoice::Hole {
-            self.range = choice.range();
-            self.renderer = None;
-            if let Some(window) = self.window.take() {
-                let init = self.init_renderer(&window);
-                window.request_redraw();
-                self.window = Some(window);
-                if let Err(e) = init {
-                    self.fail(event_loop, e);
-                }
-            }
+                .take_in(&shot, now, &self.model, self.range.green);
         }
     }
 
@@ -248,11 +215,6 @@ impl App {
                 let notice = build_notice(text, screen_w, screen_h);
                 lines.extend(notice.lines);
                 fills.extend(notice.fills);
-            }
-            if let Some(menu) = self.menu {
-                let panel = build_menu(&MENU_ITEMS, menu.selected, screen_w, screen_h);
-                lines.extend(panel.lines);
-                fills.extend(panel.fills);
             }
             renderer.update_hud(&lines, &fills);
         }
@@ -350,28 +312,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
-                    && self.menu.is_some()
-                    && menu_key(event.physical_key).is_some() =>
-            {
-                if let Some(key) = menu_key(event.physical_key) {
-                    self.menu_key(event_loop, key);
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
                     && !event.repeat
                     && event.physical_key == PhysicalKey::Code(KeyCode::KeyR) =>
             {
-                let flat = self.range.ground.hole().is_none();
-                // Without ray tracing the hole draws no reflections to switch.
-                if let Some(renderer) = &mut self.renderer
-                    && (flat || renderer.ray_tracing_available())
-                {
+                if let Some(renderer) = &mut self.renderer {
                     renderer.set_render_mode(next_reflections(renderer.render_mode()));
                     let text = reflections_notice(
                         renderer.render_mode(),
                         renderer.ray_tracing_available(),
-                        flat,
                     );
                     eprintln!("{text}");
                     self.notice = Some((text, Instant::now()));
@@ -445,16 +393,6 @@ fn wake_on_intake(proxy: EventLoopProxy<()>) -> impl Fn() + Send + 'static {
     }
 }
 
-/// The menu key of a physical key: the arrows and Enter.
-fn menu_key(key: PhysicalKey) -> Option<MenuKey> {
-    match key {
-        PhysicalKey::Code(KeyCode::ArrowUp) => Some(MenuKey::Up),
-        PhysicalKey::Code(KeyCode::ArrowDown) => Some(MenuKey::Down),
-        PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => Some(MenuKey::Enter),
-        _ => None,
-    }
-}
-
 fn main() -> ExitCode {
     let log = logfile::start();
     let result = run();
@@ -473,10 +411,8 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let frp_url = intake::frp_url(&args)?;
-    let range = menu::parse_range(&args)?;
     if args.iter().any(|a| a == "--stream") {
-        let range = range.unwrap_or(RangeChoice::DrivingRange);
-        return stream::run_stream(&frp_url, range.range());
+        return stream::run_stream(&frp_url);
     }
 
     let windowed = args.iter().any(|a| a == "--windowed");
@@ -507,16 +443,7 @@ fn run() -> Result<()> {
         wake_on_intake(event_loop.create_proxy()),
     )
     .context("failed to start the FRP intake")?;
-    // Without `--range` the driving range is drawn under the startup menu.
-    let mut app = App::with_range(
-        windowed,
-        frp,
-        start_time,
-        range.unwrap_or(RangeChoice::DrivingRange).range(),
-    );
-    if range.is_none() {
-        app.menu = Some(Menu::default());
-    }
+    let mut app = App::new(windowed, frp, start_time);
     event_loop.run_app(&mut app).context("event loop error")?;
     match app.fatal.take() {
         Some(err) => Err(err),
@@ -536,12 +463,7 @@ mod tests {
     /// An app on the clock started now, and the channel its intake reports on.
     fn app_and_intake() -> (App, mpsc::Sender<IntakeEvent>) {
         let (tx, rx) = mpsc::channel();
-        let app = App::with_range(
-            true,
-            FrpState::from_events(rx),
-            Instant::now(),
-            Range::new(),
-        );
+        let app = App::new(true, FrpState::from_events(rx), Instant::now());
         (app, tx)
     }
 
@@ -565,28 +487,18 @@ mod tests {
     #[test]
     fn the_notice_names_the_reflections_drawn() {
         assert_eq!(
-            reflections_notice(RenderMode::RayTraced, true, true),
+            reflections_notice(RenderMode::RayTraced, true),
             "REFLECTIONS: RAY TRACED"
         );
         assert_eq!(
-            reflections_notice(RenderMode::Rasterized, true, true),
+            reflections_notice(RenderMode::Rasterized, true),
             "REFLECTIONS: MIRROR"
-        );
-        // Terrain has no mirror: switching away from ray tracing turns the
-        // reflections off.
-        assert_eq!(
-            reflections_notice(RenderMode::RayTraced, true, false),
-            "REFLECTIONS: RAY TRACED"
-        );
-        assert_eq!(
-            reflections_notice(RenderMode::Rasterized, true, false),
-            "REFLECTIONS: OFF"
         );
         // Pressing the key without a ray tracer stays on the mirror and says why.
         let stays = next_reflections(RenderMode::Rasterized);
         assert_eq!(stays, RenderMode::RayTraced, "the key asks for ray tracing");
         assert_eq!(
-            reflections_notice(RenderMode::Rasterized, false, true),
+            reflections_notice(RenderMode::Rasterized, false),
             "REFLECTIONS: MIRROR - RAY TRACING UNAVAILABLE"
         );
     }
@@ -624,8 +536,8 @@ mod tests {
     }
 
     /// Shots that arrive while nothing is drawn launch when they arrived.
-    /// A 140 mph shot as the intake hands it over.
-    fn intake_shot() -> cf_scene::shot::ReceivedShot {
+    #[test]
+    fn advance_launches_shots_without_a_renderer() {
         let key = ShotKey {
             shot_id: "shot-1".to_owned(),
             shot_number: 1,
@@ -640,7 +552,7 @@ mod tests {
         let lm = "7d2f9a41c03be856";
         let mut intake = ShotIntake::default();
         let read = Instant::now();
-        [
+        let shot = [
             FrpMessage::new(lm, ShotTrigger::new(key.clone())),
             FrpMessage::new(
                 lm,
@@ -653,25 +565,8 @@ mod tests {
         ]
         .iter()
         .find_map(|msg| intake.ingest_at(msg, read))
-        .expect("a shot")
-    }
+        .expect("a shot");
 
-    #[test]
-    fn shots_are_dropped_while_the_menu_is_open() {
-        let (mut app, tx) = app_and_intake();
-        app.menu = Some(Menu::default());
-        tx.send(IntakeEvent::Shot(ArrivedShot {
-            shot: intake_shot(),
-            arrival: 1.0,
-        }))
-        .expect("send");
-        let _ = app.advance(2.5);
-        assert!(app.flights.flights.is_empty());
-    }
-
-    #[test]
-    fn advance_launches_shots_without_a_renderer() {
-        let shot = intake_shot();
         // It arrived at 1 s; the next tick, at 2.5 s, takes it in.
         let (mut app, tx) = app_and_intake();
         app.minimized = true;

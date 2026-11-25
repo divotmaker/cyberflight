@@ -7,9 +7,9 @@
 //! ([`DEFAULT_GREEN`] is `None`), so the whole floor is fairway and no
 //! circle is drawn.
 //!
-//! The green of [`Ground::Flat`](crate::range::Ground::Flat) is the knob:
-//! set it to a [`GreenConfig`] before the range is drawn and played, e.g.
-//! `range.ground = Ground::Flat { green: Some(GreenConfig { distance_m: 137.16, diameter_m: 30.0 }) }`
+//! [`Range::green`](crate::range::Range::green) is the knob: set it to a
+//! [`GreenConfig`] before the range is drawn and played, e.g.
+//! `range.green = Some(GreenConfig { distance_m: 137.16, diameter_m: 30.0 })`
 //! for a 30 m green 150 yd out. [`DEFAULT_GREEN`] is the value
 //! [`Range::new`](crate::range::Range::new) starts with; changing it
 //! changes the default for every range.

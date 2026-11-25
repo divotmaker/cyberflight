@@ -21,35 +21,6 @@
 //!     `--stream` (ray-traced when supported)
 //!   - `stream_idle.png` — the same renderer after the flight clears: no
 //!     flight, no chase camera, idle HUD
-//!   - `hole_tee.png` — the hole range, idle, from its tee camera; with
-//!     `hole_tee_fov30.png` (eye height, 30° field of view) and
-//!     `hole_tee_raised.png` (8 m up, 14 m behind the tee, 40°) to compare
-//!   - `hole_flight.png` — a 140 mph drive on the hole at 55 % of its
-//!     flight, through the streaming calls, with HUD and chase camera
-//!   - `hole_green.png` — the green, its bank and bunkers and the pin, from
-//!     beside the fairway
-//!   - `hole_hud.png` — the same drive at rest, with the hole's HUD rows
-//!     (`TO PIN`, `LIE`) and the chase camera
-//!   - `hole_holed.png` — a straight drive that drops into the cup, at rest
-//!     (the first holed one scanning 150-185 mph in 0.05 mph steps)
-//!   - `hole_water.png` — a pulled 120 mph drive at rest in the pond, from
-//!     20 m short of the ball, over the fairway side
-//!   - `hole_trees.png` — a 140 mph drive pushed 9° right into the right
-//!     tree row, at rest under the tree, seen along the row
-//!
-//!   - `hole_rt_tee.png`, `hole_rt_flight.png`, `hole_rt_green.png` — the
-//!     hole ray-traced, when the GPU supports ray tracing: idle from the tee
-//!     camera; a 160 mph drive at 70 % of its flight over the fairway
-//!     bunkers, from the pond's left bank (70° field of view); the same
-//!     drive at 98.5 %, the ball just over the green's front slope
-//!   - `hole_mirror_flight.png` — `hole_rt_flight` on the same renderer
-//!     switched to `RenderMode::Rasterized`: the hole has no mirror, so no
-//!     reflections
-//!
-//!   - `menu.png` — the startup menu over the idle driving range (raster)
-//!
-//! The other hole images are raster (`RtMode::Off`): without ray tracing
-//! the hole draws no reflections.
 //!
 //! Compare two runs with `cargo run -p cf-test -- compare <dir_a> <dir_b>`.
 
@@ -66,12 +37,10 @@ use cf_render::mode::{RenderMode, RtMode};
 use cf_render::offscreen::OffscreenRenderer;
 use cf_render::readback::Frame;
 use cf_scene::camera::Camera;
-use cf_scene::frame::physics_to_scene;
-use cf_scene::hud::{build_hud, build_menu};
+use cf_scene::hud::build_hud;
 use cf_scene::range::Range;
 use cf_scene::shot::{ClubDelivery, ReceivedShot};
 use cyberflight::flight::{AnimatedFlight, DEFAULT_TRAIL_SUBSAMPLE};
-use cyberflight::menu::MENU_ITEMS;
 use dimple::Tour;
 use dimple::trajectory::ShotInput;
 
@@ -158,7 +127,7 @@ fn animate(range: &Range, input: ShotInput, frac: f64) -> (AnimatedFlight, f64) 
         clamped: Vec::new(),
         rolled: false,
     };
-    let flight = AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, &range.ground);
+    let flight = AnimatedFlight::from_received(&shot, 0.0, &Tour::SEA_LEVEL, range.green);
     let now = flight.result.flight.flight_time * frac;
     (flight, now)
 }
@@ -265,7 +234,7 @@ fn range_shots(data: &FlightRenderData) -> (Vec<Shot>, Vec<Shot>) {
 /// tracing and the renderer does not ray-trace.
 fn render_shot(range: &Range, flight: &AnimatedFlight, now: f64, shot: &Shot) -> Result<bool> {
     eprintln!("Rendering {}...", shot.name);
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), shot.rt)
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, shot.rt)
         .context("failed to create renderer")?;
     if shot.rt == RtMode::Auto && renderer.render_mode() != RenderMode::RayTraced {
         return Ok(false);
@@ -273,6 +242,9 @@ fn render_shot(range: &Range, flight: &AnimatedFlight, now: f64, shot: &Shot) ->
     if shot.flight {
         renderer.update_flight(&[render_data(flight, now)?]);
     }
+    renderer
+        .set_green(range.green.as_ref())
+        .context("failed to upload the green")?;
     if shot.hud {
         let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
         let hud = build_hud(
@@ -318,9 +290,12 @@ fn render_hero(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result<(
     );
 
     // Reflections, main camera at the tee box, chase camera on the right 20%
-    let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.scenery(), RtMode::Auto)
+    let mut renderer = OffscreenRenderer::new(render_w, render_h, &range.grid, RtMode::Auto)
         .context("failed to create hero renderer")?;
     renderer.update_flight(&[render_data(flight, now)?]);
+    renderer
+        .set_green(range.green.as_ref())
+        .context("failed to upload the green")?;
 
     renderer.set_chase_camera(Some(chase));
     renderer.update_hud(&hud.lines, &hud.fills);
@@ -354,8 +329,11 @@ fn render_stream(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result
     let camera = Camera::driving_range();
     let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
 
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Auto)
+    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.grid, RtMode::Auto)
         .context("failed to create stream renderer")?;
+    renderer
+        .set_green(range.green.as_ref())
+        .context("failed to upload the green")?;
 
     renderer.update_flight(&[render_data(flight, now)?]);
     renderer.set_chase_camera(Some(chase_camera(flight, now)?));
@@ -377,220 +355,6 @@ fn render_stream(range: &Range, flight: &mut AnimatedFlight, now: f64) -> Result
     renderer.update_hud(&hud.lines, &hud.fills);
     let frame = renderer.render(&camera).context("render failed")?;
     save_png(&frame, &out_path("stream_idle.png"))
-}
-
-/// Render the hole range: the idle tee cameras and the green, then a drive
-/// through the streaming calls.
-fn render_hole() -> Result<()> {
-    let range = Range::hole();
-    let pin = range.camera.target;
-    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Off)
-        .context("failed to create hole renderer")?;
-    let idle = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
-    renderer.update_hud(&idle.lines, &idle.fills);
-
-    let fov30 = Camera {
-        fov_y: 30f32.to_radians(),
-        ..range.camera
-    };
-    let raised = Camera {
-        position: Vec3::new(0.0, 8.0, -14.0),
-        fov_y: 40f32.to_radians(),
-        ..range.camera
-    };
-    let green = look_at(Vec3::new(-30.0, 4.0, 235.0), pin);
-    for (name, camera) in [
-        ("hole_tee", range.camera),
-        ("hole_tee_fov30", fov30),
-        ("hole_tee_raised", raised),
-        ("hole_green", green),
-    ] {
-        eprintln!("Rendering {name}...");
-        let frame = renderer.render(&camera).context("render failed")?;
-        save_png(&frame, &out_path(&format!("{name}.png")))?;
-    }
-
-    eprintln!("Rendering hole_flight...");
-    let drive = ShotInput {
-        ball_speed_mph: 140.0,
-        launch_angle_deg: 13.0,
-        launch_azimuth_deg: 0.0,
-        backspin_rpm: 3000.0,
-        sidespin_rpm: 0.0,
-    };
-    let (mut flight, now) = animate(&range, drive, 0.55);
-    renderer.update_flight(&[render_data(&flight, now)?]);
-    renderer.set_chase_camera(Some(chase_camera(&mut flight, now)?));
-    let hud = build_hud(
-        Some(&flight.telemetry(now)),
-        true,
-        &lm,
-        true,
-        WIDTH as f32,
-        HEIGHT as f32,
-    );
-    renderer.update_hud(&hud.lines, &hud.fills);
-    let frame = renderer.render(&range.camera).context("render failed")?;
-    save_png(&frame, &out_path("hole_flight.png"))?;
-
-    eprintln!("Rendering hole_hud...");
-    render_at_rest(&mut renderer, range.camera, &mut flight, "hole_hud")?;
-
-    eprintln!("Finding a holed drive...");
-    let mut holed = (0..=700)
-        .map(|i| ShotInput {
-            ball_speed_mph: 150.0 + 0.05 * f64::from(i),
-            launch_angle_deg: 11.0,
-            launch_azimuth_deg: 0.0,
-            backspin_rpm: 2500.0,
-            sidespin_rpm: 0.0,
-        })
-        .map(|input| animate(&range, input, 0.0).0)
-        .find(AnimatedFlight::holed)
-        .context("no holed drive from 150 to 185 mph")?;
-    eprintln!("Rendering hole_holed...");
-    render_at_rest(&mut renderer, range.camera, &mut holed, "hole_holed")?;
-
-    eprintln!("Rendering hole_water...");
-    let pulled = ShotInput {
-        ball_speed_mph: 120.0,
-        launch_azimuth_deg: -9.0,
-        ..drive
-    };
-    let mut wet = animate(&range, pulled, 0.0).0;
-    let ball = physics_to_scene(wet.rest_pos).as_vec3();
-    let pond = look_at(ball + Vec3::new(-12.0, 4.0, -16.0), ball);
-    render_at_rest(&mut renderer, pond, &mut wet, "hole_water")?;
-
-    eprintln!("Rendering hole_trees...");
-    let pushed = ShotInput {
-        launch_azimuth_deg: 9.0,
-        ..drive
-    };
-    let mut treed = animate(&range, pushed, 0.0).0;
-    let row = look_at(Vec3::new(-20.0, 0.0, 110.0), Vec3::new(-33.0, -8.0, 220.0));
-    render_at_rest(&mut renderer, row, &mut treed, "hole_trees")?;
-
-    render_hole_rt(&range)
-}
-
-/// Render the hole ray-traced (`hole_rt_*`), then one view with the
-/// renderer switched to mirror (`hole_mirror_flight`). Skipped when the GPU
-/// does not ray-trace.
-fn render_hole_rt(range: &Range) -> Result<()> {
-    let hole = range.ground.hole().context("not a hole")?;
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Auto)
-        .context("failed to create hole RT renderer")?;
-    if renderer.render_mode() != RenderMode::RayTraced {
-        eprintln!("Ray tracing not supported — skipping hole RT screenshots");
-        return Ok(());
-    }
-    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
-    let idle = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
-    renderer.update_hud(&idle.lines, &idle.fills);
-    eprintln!("Rendering hole_rt_tee...");
-    let frame = renderer.render(&range.camera).context("render failed")?;
-    save_png(&frame, &out_path("hole_rt_tee.png"))?;
-
-    let drive = ShotInput {
-        ball_speed_mph: 160.0,
-        launch_angle_deg: 12.0,
-        launch_azimuth_deg: 0.0,
-        backspin_rpm: 2600.0,
-        sidespin_rpm: 0.0,
-    };
-    let above =
-        |x: f64, z: f64, up: f64| Vec3::new(x as f32, (hole.height(x, z) + up) as f32, z as f32);
-    // From the pond's left bank, 6 m up, 70° field of view: the tracer over
-    // the fairway bunkers and its reflection across the pond and fairway.
-    let (flight, now) = animate(range, drive, 0.70);
-    let rough = Camera {
-        fov_y: 70f32.to_radians(),
-        ..look_at(above(42.0, 172.0, 6.0), above(0.0, 205.0, 4.0))
-    };
-    renderer.update_flight(&[render_data(&flight, now)?]);
-    eprintln!("Rendering hole_rt_flight...");
-    let frame = renderer.render(&rough).context("render failed")?;
-    save_png(&frame, &out_path("hole_rt_flight.png"))?;
-
-    // In front of the green and to the right, 6 m up: the ball just over
-    // the pad's front slope, its reflection on the slope.
-    let (flight, now) = animate(range, drive, 0.985);
-    let data = render_data(&flight, now)?;
-    let front = look_at(above(-22.0, 232.0, 6.0), data.ball_pos);
-    renderer.update_flight(&[data]);
-    eprintln!("Rendering hole_rt_green...");
-    let frame = renderer.render(&front).context("render failed")?;
-    save_png(&frame, &out_path("hole_rt_green.png"))?;
-
-    // 40 m above the water, on the line that reflects the ball at the
-    // pond's center: the tracer and its reflection in the flat water.
-    let pond = hole.ponds[0];
-    let water = Vec3::new(pond.x as f32, hole.water_level(&pond) as f32, pond.z as f32);
-    let (flight, now) = animate(range, drive, 0.70);
-    let data = render_data(&flight, now)?;
-    let ball = data.ball_pos;
-    let mirrored = Vec3::new(ball.x, 2.0 * water.y - ball.y, ball.z);
-    let pond_view = Camera {
-        fov_y: 70f32.to_radians(),
-        ..look_at(
-            water + 40.0 / (ball.y - water.y) * (water - mirrored),
-            water + 0.3 * (ball - water),
-        )
-    };
-    renderer.update_flight(&[data]);
-    eprintln!("Rendering hole_rt_pond...");
-    let frame = renderer.render(&pond_view).context("render failed")?;
-    save_png(&frame, &out_path("hole_rt_pond.png"))?;
-
-    let (flight, now) = animate(range, drive, 0.70);
-    renderer.update_flight(&[render_data(&flight, now)?]);
-    renderer.set_render_mode(RenderMode::Rasterized);
-    eprintln!("Rendering hole_mirror_flight...");
-    let frame = renderer.render(&rough).context("render failed")?;
-    save_png(&frame, &out_path("hole_mirror_flight.png"))
-}
-
-/// Render the startup menu over the idle driving range, as the windowed app
-/// draws it before a range is picked.
-fn render_menu(range: &Range) -> Result<()> {
-    eprintln!("Rendering menu...");
-    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
-    let mut renderer = OffscreenRenderer::new(WIDTH, HEIGHT, &range.scenery(), RtMode::Off)
-        .context("failed to create menu renderer")?;
-    let mut hud = build_hud(None, false, &lm, true, WIDTH as f32, HEIGHT as f32);
-    let panel = build_menu(&MENU_ITEMS, 0, WIDTH as f32, HEIGHT as f32);
-    hud.lines.extend(panel.lines);
-    hud.fills.extend(panel.fills);
-    renderer.update_hud(&hud.lines, &hud.fills);
-    let frame = renderer.render(&range.camera).context("render failed")?;
-    save_png(&frame, &out_path("menu.png"))
-}
-
-/// Render `flight` just after it stopped, from `camera` with its HUD and
-/// chase camera, as the screenshot `name`.
-fn render_at_rest(
-    renderer: &mut OffscreenRenderer,
-    camera: Camera,
-    flight: &mut AnimatedFlight,
-    name: &str,
-) -> Result<()> {
-    let lm = std::collections::HashMap::from([("mevo.0".to_owned(), true)]);
-    let now = flight.total_time + 0.5;
-    renderer.update_flight(&[render_data(flight, now)?]);
-    renderer.set_chase_camera(Some(chase_camera(flight, now)?));
-    let hud = build_hud(
-        Some(&flight.telemetry(now)),
-        true,
-        &lm,
-        true,
-        WIDTH as f32,
-        HEIGHT as f32,
-    );
-    renderer.update_hud(&hud.lines, &hud.fills);
-    let frame = renderer.render(&camera).context("render failed")?;
-    save_png(&frame, &out_path(&format!("{name}.png")))
 }
 
 fn main() -> Result<()> {
@@ -638,7 +402,5 @@ fn main() -> Result<()> {
     // ── Streaming path (dynamic geometry, as `--stream` renders it) ──
     render_stream(&range, &mut hero, hero_now)?;
 
-    // ── The startup menu, then the hole range ──
-    render_menu(&range)?;
-    render_hole()
+    Ok(())
 }

@@ -80,7 +80,7 @@ fn parse_stream_args() -> StreamArgs {
     }
 }
 
-pub fn run_stream(frp_url: &str, range: Range) -> Result<()> {
+pub fn run_stream(frp_url: &str) -> Result<()> {
     let stream_args = parse_stream_args();
     let config = stream_args.config;
 
@@ -90,13 +90,17 @@ pub fn run_stream(frp_url: &str, range: Range) -> Result<()> {
         config.width, config.height, config.fps, config.bitrate
     );
 
+    let range = Range::new();
     let model = Tour::SEA_LEVEL;
 
     // Create headless renderer, ray-traced when the GPU supports it.
     eprintln!("Initializing headless Vulkan renderer...");
     let mut renderer =
-        OffscreenRenderer::new(config.width, config.height, &range.scenery(), RtMode::Auto)
+        OffscreenRenderer::new(config.width, config.height, &range.grid, RtMode::Auto)
             .context("failed to create offscreen renderer")?;
+    renderer
+        .set_green(range.green.as_ref())
+        .context("failed to upload the green")?;
 
     // Start ffmpeg encoder.
     let mut encoder =
@@ -153,7 +157,7 @@ pub fn run_stream(frp_url: &str, range: Range) -> Result<()> {
 
         // Launch the shots that have arrived, each from its arrival time.
         for shot in fh.poll() {
-            fm.take_in(&shot, now, &model, &range.ground);
+            fm.take_in(&shot, now, &model, range.green);
         }
 
         // Update flight animations.

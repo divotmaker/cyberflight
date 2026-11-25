@@ -1,13 +1,12 @@
-//! Floor reflections: the reflection image, filled by the ray tracer or (on
-//! a flat floor) by the raster mirror, and the composite pass that adds it
-//! onto the scene.
+//! Floor reflections: the reflection image, filled by the ray tracer or by
+//! the raster mirror, and the composite pass that adds it onto the scene.
 
 use ash::vk;
 use glam::Vec3;
 use gpu_allocator::vulkan::Allocator;
 
 use cf_scene::camera::Camera;
-use cf_scene::scenery::Floor;
+use cf_scene::grid::GridConfig;
 use cf_scene::tee::TeeBox;
 
 use crate::composite::CompositePass;
@@ -102,15 +101,12 @@ pub(crate) struct ReflectionFrame<'a> {
 /// Both paths shade the floor with the code of `floor_shading.glsl` and
 /// show the same tracer (the newest flight's, drawn from the vertex buffers
 /// the raster pass draws from) and ball, so they show the same reflection.
-/// The mirror needs a flat floor: on terrain there is only the ray tracer,
-/// and a frame that does not ray-trace draws no reflections.
 pub(crate) struct Reflections {
     /// The image both paths write and the composite reads: the floor's
     /// color, with the reflections in it, per pixel.
     target: Image2d,
     composite: CompositePass,
-    /// `None` on terrain.
-    mirror: Option<Mirror>,
+    mirror: Mirror,
     /// `None` without ray tracing.
     rt: Option<RtPipeline>,
     /// The reflected ball.
@@ -139,29 +135,24 @@ fn create_target(
 }
 
 impl Reflections {
-    /// Create the reflections for an `extent` frame of `floor` and the tee
-    /// box of `tee`, showing the ball on the tee, composited onto a
-    /// `color_format` target. On a flat floor the raster mirror is always
-    /// there; given the `tracers` buffers (one set per frame in flight, not
-    /// empty), so is the ray tracer, unless it fails to set up (it says so
-    /// on stderr and the mirror remains). On terrain there is only the ray
-    /// tracer: without `tracers` there are no reflections (`None`).
+    /// Create the reflections for an `extent` frame of the floor of `grid`
+    /// and the tee box of `tee`, showing the ball on the tee, composited onto
+    /// a `color_format` target. The raster mirror is always there; given the
+    /// `tracers` buffers (one set per frame in flight, not empty), so is the
+    /// ray tracer, unless it fails to set up (it says so on stderr and the
+    /// mirror remains).
     ///
     /// # Errors
-    /// The image, the composite or the mirror fails to create, or, on
-    /// terrain, the ray tracer fails to set up; what was created is
-    /// destroyed first.
+    /// The image, the composite or the mirror fails to create; what was
+    /// created is destroyed first.
     pub(crate) fn new(
         gpu: &mut GpuContext,
         color_format: vk::Format,
         extent: vk::Extent2D,
-        floor: &Floor,
+        grid: &GridConfig,
         tee: &TeeBox,
         tracers: Option<&[TracerBuffers]>,
-    ) -> Result<Option<Self>, RenderError> {
-        if matches!(floor, Floor::Terrain(_)) && tracers.is_none() {
-            return Ok(None);
-        }
+    ) -> Result<Self, RenderError> {
         let target = create_target(&gpu.device, &mut gpu.allocator, extent)?;
         let composite = match CompositePass::new(&gpu.device, color_format, target.view()) {
             Ok(composite) => composite,
@@ -171,40 +162,17 @@ impl Reflections {
                 return Err(e);
             }
         };
-        let mirror = match floor {
-            Floor::Flat(grid) => match Mirror::new(
-                &gpu.device,
-                &mut gpu.allocator,
-                target.view(),
-                extent,
-                grid,
-                tee,
-                gpu.wide_lines,
-            ) {
-                Ok(mirror) => Some(mirror),
-                Err(e) => {
-                    // SAFETY: Just created; no GPU work has used them.
-                    unsafe {
-                        composite.destroy(&gpu.device);
-                        target.destroy(&gpu.device, &mut gpu.allocator);
-                    }
-                    return Err(e);
-                }
-            },
-            Floor::Terrain(_) => None,
-        };
-        let rt = tracers.map(|tracers| {
-            let geometries = build_scene_geometry(floor, tee);
-            RtPipeline::new(gpu, target.view(), &geometries, tracers)
-        });
-        let rt = match (rt, &mirror) {
-            (Some(Ok(rt)), _) => Some(rt),
-            (None, _) => None,
-            (Some(Err(e)), Some(_)) => {
-                eprintln!("RT setup failed, using mirror reflections: {e}");
-                None
-            }
-            (Some(Err(e)), None) => {
+        let mirror = match Mirror::new(
+            &gpu.device,
+            &mut gpu.allocator,
+            target.view(),
+            extent,
+            grid,
+            tee,
+            gpu.wide_lines,
+        ) {
+            Ok(mirror) => mirror,
+            Err(e) => {
                 // SAFETY: Just created; no GPU work has used them.
                 unsafe {
                     composite.destroy(&gpu.device);
@@ -213,7 +181,17 @@ impl Reflections {
                 return Err(e);
             }
         };
-        Ok(Some(Self {
+        let rt = tracers.and_then(|tracers| {
+            let geometries = build_scene_geometry(grid, tee);
+            match RtPipeline::new(gpu, target.view(), &geometries, tracers) {
+                Ok(rt) => Some(rt),
+                Err(e) => {
+                    eprintln!("RT setup failed, using mirror reflections: {e}");
+                    None
+                }
+            }
+        });
+        Ok(Self {
             target,
             composite,
             mirror,
@@ -222,7 +200,7 @@ impl Reflections {
                 center: tee_ball_center(tee),
                 radius: tee.ball_radius,
             },
-        }))
+        })
     }
 
     /// Whether the ray tracer is available.
@@ -252,9 +230,7 @@ impl Reflections {
         let target = create_target(device, allocator, extent)?;
         // SAFETY: The caller guarantees the device is idle.
         unsafe {
-            if let Some(mirror) = &mut self.mirror
-                && let Err(e) = mirror.resize(device, allocator, target.view(), extent)
-            {
+            if let Err(e) = self.mirror.resize(device, allocator, target.view(), extent) {
                 target.destroy(device, allocator);
                 return Err(e);
             }
@@ -270,8 +246,7 @@ impl Reflections {
 
     /// Fill the reflection image for each view of `frame`, with the ray
     /// tracer when `frame.ray_traced` and it is available, else with the
-    /// mirror, then composite it into `frame.overlay`. Without either (a
-    /// frame on terrain that does not ray-trace) it records nothing.
+    /// mirror, then composite it into `frame.overlay`.
     ///
     /// # Safety
     /// `cb` is recording, outside a render pass; the buffers of
@@ -280,8 +255,8 @@ impl Reflections {
     /// flight that owns those buffers and whose fence was waited on; the
     /// color image is in `COLOR_ATTACHMENT_OPTIMAL`; the reflection image
     /// extent equals `frame.extent` and every view lies within it. Afterward the
-    /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` (unless it records
-    /// nothing) and the color image still in `COLOR_ATTACHMENT_OPTIMAL`.
+    /// reflection image is in `SHADER_READ_ONLY_OPTIMAL` and the color
+    /// image still in `COLOR_ATTACHMENT_OPTIMAL`.
     pub(crate) unsafe fn record(
         &self,
         device: &ash::Device,
@@ -291,11 +266,11 @@ impl Reflections {
         // SAFETY: The caller guarantees the command buffer and image states
         // and the tracer's buffers.
         unsafe {
-            match (&self.rt, &self.mirror) {
-                (Some(rt), _) if frame.ray_traced => {
+            match &self.rt {
+                Some(rt) if frame.ray_traced => {
                     self.record_trace(rt, device, cb, frame);
                 }
-                (_, Some(mirror)) => mirror.record(
+                _ => self.mirror.record(
                     device,
                     cb,
                     frame.tracer,
@@ -303,7 +278,6 @@ impl Reflections {
                     frame.extent,
                     &self.ball,
                 ),
-                (_, None) => return,
             }
             self.composite
                 .record(device, cb, frame.overlay, frame.extent);
@@ -429,9 +403,7 @@ impl Reflections {
             if let Some(rt) = self.rt {
                 rt.destroy(device, allocator);
             }
-            if let Some(mirror) = self.mirror {
-                mirror.destroy(device, allocator);
-            }
+            self.mirror.destroy(device, allocator);
             self.composite.destroy(device);
             self.target.destroy(device, allocator);
         }

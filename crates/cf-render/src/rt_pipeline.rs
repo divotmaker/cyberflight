@@ -75,9 +75,6 @@ impl RtPushConstants {
 
 /// Geometry type IDs used as `gl_InstanceCustomIndexEXT` in shaders.
 pub const GEOM_FLOOR: u32 = 0;
-/// Shaped reflective ground: like the floor, with the normal interpolated
-/// from its vertices' normals.
-pub const GEOM_TERRAIN: u32 = 1;
 // The ball has no RT geometry: the floor shader reflects it analytically.
 pub const GEOM_TEE_BOX: u32 = 2;
 pub const GEOM_TRAIL: u32 = 3;
@@ -143,8 +140,7 @@ impl PipelineObjects {
         self.line_rahit_module =
             load_shader(device, include_bytes!("../shaders/rt_line.rahit.spv"))?;
 
-        // ── Descriptor set layout: TLAS, storage image, tracer vertices,
-        // terrain normals ──
+        // ── Descriptor set layout: TLAS, storage image, tracer vertices ──
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -170,11 +166,6 @@ impl PipelineObjects {
                 .stage_flags(
                     vk::ShaderStageFlags::INTERSECTION_KHR | vk::ShaderStageFlags::ANY_HIT_KHR,
                 ),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::CLOSEST_HIT_KHR),
         ];
         let ds_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: Creating descriptor set layout.
@@ -305,7 +296,7 @@ impl PipelineObjects {
                 .descriptor_count(count),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(3 * count),
+                .descriptor_count(2 * count),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(count)
@@ -824,19 +815,16 @@ struct SceneFrame {
     tlas: Rebuilt,
 }
 
-/// The scene the tracer is traced in: the static bottom-level structures and
-/// the terrain's vertex normals, shared by every frame in flight, and per
-/// frame the instances (those, then the frame's tracer tube and center line)
-/// and the top-level structure over them, which is rebuilt every frame.
+/// The scene the tracer is traced in: the static bottom-level structures,
+/// shared by every frame in flight, and per frame the instances (those, then
+/// the frame's tracer tube and center line) and the top-level structure over
+/// them, which is rebuilt every frame.
 ///
 /// Each part is stored as soon as it exists, so after a failure
 /// [`destroy`](Self::destroy) frees what was built.
 #[derive(Default)]
 struct SceneAccel {
     statics: Vec<StaticBlas>,
-    /// The vertex normals of the [`GEOM_TERRAIN`] geometry, or one normal
-    /// when there is none (the binding must name a buffer).
-    normals: Option<HostBuffer>,
     frames: Vec<SceneFrame>,
     instance_count: u32,
 }
@@ -845,7 +833,7 @@ impl SceneAccel {
     /// Build the static structures of `geometries` (one submission, which
     /// completes before this returns), and for each of `tracers` the
     /// instances of those and the tracer, and a top-level structure over
-    /// them. Returns the normal buffer.
+    /// them.
     ///
     /// # Errors
     /// A buffer or structure fails to create or the build submission fails;
@@ -856,15 +844,7 @@ impl SceneAccel {
         gpu: &mut GpuContext,
         geometries: &[RtGeometry],
         tracers: &[TracerAccel],
-    ) -> Result<vk::Buffer, RenderError> {
-        let normals = self.normals.insert(HostBuffer::with_data(
-            &gpu.device,
-            &mut gpu.allocator,
-            terrain_normals(geometries),
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            "terrain normals",
-        )?);
-        let normals = normals.handle();
+    ) -> Result<(), RenderError> {
         for geom in geometries.iter().filter(|g| g.primitive_count() > 0) {
             let blas = StaticBlas::new(loader, gpu, geom)?;
             self.statics.push(blas);
@@ -935,7 +915,7 @@ impl SceneAccel {
             };
             self.frames.push(SceneFrame { instances, tlas });
         }
-        Ok(normals)
+        Ok(())
     }
 
     /// # Safety
@@ -955,21 +935,8 @@ impl SceneAccel {
             for blas in self.statics {
                 blas.destroy(loader, device, allocator);
             }
-            if let Some(normals) = self.normals {
-                normals.destroy(device, allocator);
-            }
         }
     }
-}
-
-/// The vertex normals of the [`GEOM_TERRAIN`] geometry in `geometries`, 3
-/// floats per vertex; one up normal when there is none.
-fn terrain_normals(geometries: &[RtGeometry]) -> &[f32] {
-    const UP: [f32; 3] = [0.0, 1.0, 0.0];
-    geometries
-        .iter()
-        .find(|g| g.geom_type == GEOM_TERRAIN && !g.normals.is_empty())
-        .map_or(&UP, |g| &g.normals)
 }
 
 /// An instance of the structure at `blas` for geometry type `geom_type`,
@@ -1006,7 +973,7 @@ fn transform_matrix(m: glam::Mat4) -> vk::TransformMatrixKHR {
 
 /// The instance mask of geometry type `geom_type`:
 ///
-/// - Bit 0 (0x01): floor and terrain. Primary rays use cull mask 0x01.
+/// - Bit 0 (0x01): floor. Primary rays use cull mask 0x01.
 /// - Bit 1 (0x02): tee box border. No ray uses this bit.
 /// - Bit 2 (0x04): tracer tube and center line. Floor reflection rays use
 ///   cull mask 0x04.
@@ -1017,7 +984,7 @@ fn transform_matrix(m: glam::Mat4) -> vk::TransformMatrixKHR {
 /// from the glass floor shader. It only exists for raster depth.
 fn instance_mask(geom_type: u32) -> u8 {
     match geom_type {
-        GEOM_FLOOR | GEOM_TERRAIN => 0x01,
+        GEOM_FLOOR => 0x01,
         GEOM_TEE_BOX => 0x80,
         GEOM_TRAIL | GEOM_TRAIL_LINE => 0x04,
         _ => 0x02,
@@ -1079,9 +1046,6 @@ pub struct RtGeometry {
     pub positions: Vec<f32>,
     /// Geometry type ID (GEOM_FLOOR, GEOM_TEE_BOX, etc.).
     pub geom_type: u32,
-    /// Unit normal of each vertex, 3 floats each, for [`GEOM_TERRAIN`];
-    /// empty for the other types.
-    pub normals: Vec<f32>,
     /// Instance transform (identity if not set); converted to the 3×4
     /// row-major `VkTransformMatrixKHR` for the instance.
     pub transform: glam::Mat4,
@@ -1346,9 +1310,8 @@ impl RtPipeline {
     // ── Acceleration structures ──
 
     /// Build the structures of `geometries`, once, and the instances and
-    /// top-level structure over them and each frame's tracer, and upload the
-    /// terrain's normals, replacing the ones built before. Waits for the
-    /// device to go idle first.
+    /// top-level structure over them and each frame's tracer, replacing the
+    /// ones built before. Waits for the device to go idle first.
     ///
     /// # Errors
     /// The wait or a build fails. The old structures are destroyed by then
@@ -1369,7 +1332,7 @@ impl RtPipeline {
             unsafe { old.destroy(&self.accel_loader, &gpu.device, &mut gpu.allocator) };
         }
         let scene = self.scene.insert(SceneAccel::default());
-        let normals = scene.build(&self.accel_loader, gpu, geometries, &self.tracers)?;
+        scene.build(&self.accel_loader, gpu, geometries, &self.tracers)?;
         let accels: Vec<vk::AccelerationStructureKHR> =
             scene.frames.iter().map(|f| f.tlas.accel.accel).collect();
         let mut infos: Vec<_> = accels
@@ -1379,27 +1342,16 @@ impl RtPipeline {
                     .acceleration_structures(std::slice::from_ref(accel))
             })
             .collect();
-        let normal_infos = [vk::DescriptorBufferInfo::default()
-            .buffer(normals)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
         let writes: Vec<_> = infos
             .iter_mut()
             .zip(&self.objects.descriptor_sets)
-            .flat_map(|(info, &set)| {
-                [
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(0)
-                        .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                        .descriptor_count(1)
-                        .push_next(info),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(4)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(&normal_infos),
-                ]
+            .map(|(info, &set)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                    .descriptor_count(1)
+                    .push_next(info)
             })
             .collect();
         // SAFETY: The device is idle, so no command buffer uses the sets; the
@@ -1685,22 +1637,8 @@ mod tests {
         RtGeometry {
             positions: positions.to_vec(),
             geom_type: GEOM_FLOOR,
-            normals: Vec::new(),
             transform: glam::Mat4::IDENTITY,
         }
-    }
-
-    #[test]
-    fn the_normal_buffer_holds_the_terrains_normals_or_one_up() {
-        let flat = geometry(&[0.0; 9]);
-        assert_eq!(terrain_normals(&[flat]), [0.0, 1.0, 0.0]);
-        let terrain = RtGeometry {
-            normals: vec![0.6, 0.8, 0.0, 0.0, 1.0, 0.0, 0.0, 0.8, 0.6],
-            geom_type: GEOM_TERRAIN,
-            ..geometry(&[0.0; 9])
-        };
-        let want = terrain.normals.clone();
-        assert_eq!(terrain_normals(&[geometry(&[0.0; 9]), terrain]), want);
     }
 
     #[test]
@@ -1749,7 +1687,6 @@ mod tests {
     #[test]
     fn masks_separate_what_each_ray_sees() {
         assert_eq!(instance_mask(GEOM_FLOOR), 0x01);
-        assert_eq!(instance_mask(GEOM_TERRAIN), 0x01);
         assert_eq!(instance_mask(GEOM_TRAIL), 0x04);
         assert_eq!(instance_mask(GEOM_TRAIL_LINE), 0x04);
         assert_eq!(instance_mask(GEOM_TEE_BOX), 0x80);

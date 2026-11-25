@@ -1,6 +1,6 @@
 // The floor's material and the light it reflects, shared by the ray-traced
-// floor and terrain (rt.rchit) and the raster mirror (mirror_floor.frag), so
-// the two reflection paths shade a floor point with the same code.
+// floor (rt.rchit) and the raster mirror (mirror_floor.frag), so the two
+// reflection paths shade a floor point with the same code.
 //
 // A path supplies what its way of finding the tracer gives: `trail`, the
 // summed light of every tracer surface the reflected ray crosses
@@ -54,14 +54,15 @@ float height_fade(float h) {
     return mix(1.0, REFLECTION_FADE_MIN, clamp(h / REFLECTION_FADE_HEIGHT, 0.0, 1.0));
 }
 
-// What the ground point `hit_pos`, with unit surface normal `N`, shows to a
-// camera at `camera_pos` looking along the unit vector `view_dir`: glass
-// tint, the reflected tracer (`trail`) and ball (center `ball_pos`, radius
-// `ball_radius`, both in meters), and the specular gleam. The reflections'
-// height fade is measured from `hit_pos`. Alpha 1.
-vec4 shade_ground(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 ball_pos,
-                  float ball_radius, vec3 N) {
+// What the floor point `hit_pos` (on the plane y = 0) shows to a camera at
+// `camera_pos` looking along the unit vector `view_dir`: glass tint, the
+// reflected tracer (`trail`) and ball (center `ball_pos`, radius
+// `ball_radius`, both in meters), and the specular
+// gleam. Alpha 1.
+vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 ball_pos,
+                 float ball_radius) {
     vec3 V = -view_dir; // toward camera
+    vec3 N = vec3(0.0, 1.0, 0.0);
 
     // Schlick Fresnel approximation
     float NdotV = max(dot(N, V), 0.0);
@@ -117,14 +118,6 @@ vec4 shade_ground(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3
     reflection *= REFL_TINT;
 
     return vec4(glass_base + reflection + specular, 1.0);
-}
-
-// `shade_ground` for a point `hit_pos` of the flat floor (the plane y = 0,
-// normal +Y).
-vec4 shade_floor(vec3 camera_pos, vec3 hit_pos, vec3 view_dir, vec4 trail, vec3 ball_pos,
-                 float ball_radius) {
-    return shade_ground(camera_pos, hit_pos, view_dir, trail, ball_pos, ball_radius,
-                        vec3(0.0, 1.0, 0.0));
 }
 
 // A reflection-image texel: color in [0, MAX_RADIANCE] (emissive

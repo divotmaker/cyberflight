@@ -464,9 +464,9 @@ dependencies = [
 
 [[package]]
 name = "dimple"
-version = "0.0.10"
+version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34e4bb454dd8635c7cfc98fcb7dda49680273f64d9d2efddd4e9c9dd5db046de"
+checksum = "5d01bac98f3c1e4364d35e3c6cca460debe27d9b9ea5bbd2b1e9e31f7f735f1f"
 
 [[package]]
 name = "dispatch"
